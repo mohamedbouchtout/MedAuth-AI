@@ -218,19 +218,22 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
+          # `shell: bash` runs with -e already set by the runner, so the exit
+          # status has to be captured inline — a bare `code=$?` on the next line
+          # never executes, because -e aborts the script first.
+          code=0
           uv run pytest tests \
             --cov=src \
             --cov-report=term-missing \
-            --cov-report=xml
-          code=$?
+            --cov-report=xml || code=$?
           # Exit 5 is "no tests collected". Services are scaffolded before their
           # tests exist (Phase 0), so that is not a failure yet. Remove this
           # escape hatch once every service ships tests.
-          if [ $code -eq 5 ]; then
+          if [ "$code" -eq 5 ]; then
             echo "::warning title=No tests::services/${{ matrix.service }} has no tests yet"
             exit 0
           fi
-          exit $code
+          exit "$code"
 
       - name: Upload coverage
         if: always()
