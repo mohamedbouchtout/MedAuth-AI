@@ -5,7 +5,7 @@ description = "Nightly CronJob that scrapes public payer policy PDFs and feeds t
 requires-python = ">=3.12"
 dependencies = [
     "asyncpg>=0.30",
-    "beautifulsoup4>=4.12",
+    "beautifulsoup4>=4.15.0",
     "httpx>=0.28",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
