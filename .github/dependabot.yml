@@ -1,0 +1,125 @@
+# Dependabot configuration — lives at .github/dependabot.yml (NOT under workflows/).
+#
+# Security patches matter more than usual here: this codebase handles PHI, so a
+# vulnerable transitive dependency is a HIPAA exposure, not just a bug. Grouped
+# minor/patch updates keep the PR volume low; majors come through one at a time
+# so they get a real review.
+
+version: 2
+
+updates:
+  # -------------------------------------------------------------------------
+  # Python — one uv workspace at the repo root covers all services/ and packages/
+  # -------------------------------------------------------------------------
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      python-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Majors of the core data/LLM stack land as separate, reviewed PRs.
+      - dependency-name: "pydantic"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "sqlalchemy"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "langchain*"
+        update-types: ["version-update:semver-major"]
+
+  # -------------------------------------------------------------------------
+  # JavaScript — frontends only (all backend services are Python)
+  # -------------------------------------------------------------------------
+  - package-ecosystem: "npm"
+    directory: "/apps/web"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "frontend"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      web-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "npm"
+    directory: "/apps/mobile"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "mobile"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      mobile-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Expo SDK upgrades are coordinated migrations — never automatic.
+      - dependency-name: "expo"
+      - dependency-name: "react-native"
+
+  # -------------------------------------------------------------------------
+  # GitHub Actions — keeps the pinned action versions in workflows/ current
+  # -------------------------------------------------------------------------
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # -------------------------------------------------------------------------
+  # Docker — local stack images (postgres, redis, qdrant, hapi-fhir)
+  # -------------------------------------------------------------------------
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Terraform is not enabled yet — infrastructure/terraform has no .tf files.
+  # Add this block with TASK-0xx when the AWS infrastructure lands:
+  # - package-ecosystem: "terraform"
+  #   directory: "/infrastructure/terraform"
+  #   schedule:
+  #     interval: "weekly"

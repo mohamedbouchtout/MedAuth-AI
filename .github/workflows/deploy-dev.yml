@@ -1,0 +1,116 @@
+name: Deploy (dev) — STUB
+
+# Placeholder only. Nothing is built, pushed, or deployed by this workflow today.
+#
+# Uncomment the real steps in Phase 6, once there is something to deploy and the
+# AWS account is ready. Before enabling, the following must all be true:
+#
+#   1. Terraform in infrastructure/terraform provisions the dev EKS cluster, RDS,
+#      ElastiCache and the Qdrant node.
+#   2. An OIDC role exists for GitHub Actions (no long-lived AWS keys in secrets —
+#      configure `permissions: id-token: write` and aws-actions/configure-aws-credentials).
+#   3. Application secrets resolve from AWS Secrets Manager at runtime, never from
+#      GitHub Actions secrets or a baked-in .env.
+#   4. Images are built per service and pushed to ECR with the commit SHA as tag.
+#   5. Deploys are HIPAA-relevant changes: the run must be auditable, so keep the
+#      environment protection rule with a required reviewer.
+#
+# Until then this workflow is manual-dispatch only and does nothing but say so.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "This workflow is a stub and performs no deployment."
+        required: false
+        default: "acknowledged"
+
+permissions:
+  contents: read
+
+jobs:
+  noop:
+    name: Deploy is not wired up yet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain
+        run: |
+          echo "deploy-dev is a stub — no deployment performed."
+          echo "See the header comment in .github/workflows/deploy-dev.yml (Phase 6)."
+
+# ---------------------------------------------------------------------------
+# Phase 6 — uncomment from here down, and delete the `noop` job above.
+# ---------------------------------------------------------------------------
+#
+# on:
+#   push:
+#     branches: [main]
+#   workflow_dispatch:
+#
+# permissions:
+#   contents: read
+#   id-token: write          # required for AWS OIDC
+#
+# env:
+#   AWS_REGION: us-east-1
+#   ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+#   EKS_CLUSTER: medauth-dev
+#
+# jobs:
+#   build-and-push:
+#     name: Build and push ${{ matrix.service }}
+#     runs-on: ubuntu-latest
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         service:
+#           - audio-ingestion
+#           - track-a-clinical
+#           - track-b-rag
+#           - fhir-integration
+#           - prior-auth
+#           - nudge-service
+#           - policy-scraper
+#     steps:
+#       - uses: actions/checkout@v4
+#
+#       - uses: aws-actions/configure-aws-credentials@v4
+#         with:
+#           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+#           aws-region: ${{ env.AWS_REGION }}
+#
+#       - uses: aws-actions/amazon-ecr-login@v2
+#         id: ecr
+#
+#       - name: Build and push image
+#         run: |
+#           IMAGE="${{ steps.ecr.outputs.registry }}/medauth-${{ matrix.service }}:${{ github.sha }}"
+#           docker build -f services/${{ matrix.service }}/Dockerfile -t "$IMAGE" .
+#           docker push "$IMAGE"
+#
+#   deploy:
+#     name: Roll out to dev EKS
+#     needs: build-and-push
+#     runs-on: ubuntu-latest
+#     environment:
+#       name: dev          # keep a required reviewer on this environment
+#     steps:
+#       - uses: actions/checkout@v4
+#
+#       - uses: aws-actions/configure-aws-credentials@v4
+#         with:
+#           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+#           aws-region: ${{ env.AWS_REGION }}
+#
+#       - name: Update kubeconfig
+#         run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER }} --region ${{ env.AWS_REGION }}
+#
+#       - name: Helm upgrade
+#         run: |
+#           helm upgrade --install medauth infrastructure/kubernetes/helm \
+#             --namespace medauth --create-namespace \
+#             --set image.tag=${{ github.sha }} \
+#             --wait --timeout 10m
+#
+#       - name: Smoke check
+#         run: kubectl rollout status deployment --namespace medauth --timeout 5m

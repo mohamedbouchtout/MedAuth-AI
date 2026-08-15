@@ -1,0 +1,119 @@
+# ---------------------------------------------------------------------------
+# Secrets and local environment — NEVER commit these.
+# Real secrets live in AWS Secrets Manager. .env.example holds names only.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+wheels/
+*.egg-info/
+*.egg
+.installed.cfg
+MANIFEST
+
+# Virtual environments (uv creates .venv)
+.venv/
+venv/
+ENV/
+
+# Test / type-check / lint caches
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+.hypothesis/
+
+# uv
+# uv.lock IS committed — it pins the workspace for reproducible builds.
+.uv_cache/
+
+# ---------------------------------------------------------------------------
+# Node
+# ---------------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.eslintcache
+.vite/
+.turbo/
+apps/*/dist/
+apps/*/build/
+coverage/
+
+# Expo (apps/mobile)
+.expo/
+.expo-shared/
+*.jks
+*.p8
+*.p12
+*.mobileprovision
+*.orig.*
+
+# ---------------------------------------------------------------------------
+# Terraform
+# ---------------------------------------------------------------------------
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+.terraform.lock.hcl
+
+# ---------------------------------------------------------------------------
+# Local data volumes from docker compose (postgres/qdrant/redis bind mounts)
+# ---------------------------------------------------------------------------
+.docker-data/
+
+# ---------------------------------------------------------------------------
+# PHI safety net — no audio or transcript files should ever land on disk.
+# ---------------------------------------------------------------------------
+*.wav
+*.mp3
+*.m4a
+*.pcm
+transcripts/
+
+# ---------------------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+*.swp

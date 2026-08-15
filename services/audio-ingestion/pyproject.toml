@@ -1,0 +1,24 @@
+[project]
+name = "medauth-audio-ingestion"
+version = "0.1.0"
+description = "WebSocket audio intake, streamed to AWS Transcribe Medical. Audio never touches disk."
+requires-python = ">=3.12"
+dependencies = [
+    "amazon-transcribe>=0.6",
+    "boto3>=1.35",
+    "fastapi>=0.115",
+    "medauth-hipaa-logger",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "pyjwt>=2.9",
+    "redis>=5.2",
+    "uvicorn[standard]>=0.32",
+    "websockets>=13.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]

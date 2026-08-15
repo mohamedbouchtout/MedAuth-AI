@@ -1,0 +1,34 @@
+# Code owners for MedAuth AI.
+#
+# A matching entry makes the owner a required reviewer on any PR touching that
+# path (once "Require review from Code Owners" is enabled in branch protection).
+# Last matching pattern wins, so the catch-all goes first.
+#
+# Single owner for now — split this per team as the project grows. The explicit
+# per-area entries below are redundant today; they exist so that handing off an
+# area later means changing one line rather than reconstructing the map.
+
+# Everything
+*                               @mohamedbouchtout
+
+# Compliance-critical — never let these lose an explicit owner
+/packages/hipaa-logger/         @mohamedbouchtout
+/packages/crypto-utils/         @mohamedbouchtout
+/.github/                       @mohamedbouchtout
+/infrastructure/                @mohamedbouchtout
+/CLAUDE.md                      @mohamedbouchtout
+/TASKS.md                       @mohamedbouchtout
+/.env.example                   @mohamedbouchtout
+
+# Services
+/services/audio-ingestion/      @mohamedbouchtout
+/services/track-a-clinical/     @mohamedbouchtout
+/services/track-b-rag/          @mohamedbouchtout
+/services/fhir-integration/     @mohamedbouchtout
+/services/prior-auth/           @mohamedbouchtout
+/services/nudge-service/        @mohamedbouchtout
+/services/policy-scraper/       @mohamedbouchtout
+
+# Frontends
+/apps/web/                      @mohamedbouchtout
+/apps/mobile/                   @mohamedbouchtout

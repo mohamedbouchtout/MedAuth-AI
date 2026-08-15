@@ -1,0 +1,45 @@
+# MedAuth AI — uv workspace root.
+#
+# This is a virtual root: it defines no package of its own, it only ties the
+# workspace members together and holds shared tool configuration.
+# Every Python service and shared package is a workspace member.
+#
+# Install everything:      uv sync --all-packages
+# Run one service:         cd services/track-b-rag && uv run uvicorn src.main:app --reload --port 8002
+
+[tool.uv.workspace]
+members = ["services/*", "packages/*"]
+
+[tool.uv.sources]
+medauth-hipaa-logger = { workspace = true }
+medauth-crypto-utils = { workspace = true }
+medauth-fhir-types = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "httpx>=0.28",
+    "moto[all]>=5.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "T20"]  # T20 bans print() — see CLAUDE.md conventions
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.report]
+fail_under = 80
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

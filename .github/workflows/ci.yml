@@ -1,0 +1,315 @@
+name: CI
+
+# Runs on every PR into main, and on main itself after merge.
+#
+# Shape: a `changes` job works out which workspace members a PR actually touches,
+# then lint / type-check / test fan out over just those. A change to packages/ or
+# to the root pyproject.toml tests every service, since every service imports the
+# shared packages.
+#
+# Nothing here talks to AWS. Bedrock, Transcribe Medical, Comprehend Medical and
+# KMS are all mocked with moto — no real credentials belong in CI.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Work out what changed. Outputs a JSON matrix of service directories.
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect changed workspace members
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.detect.outputs.services }}
+      any_python: ${{ steps.detect.outputs.any_python }}
+      web: ${{ steps.detect.outputs.web }}
+      mobile: ${{ steps.detect.outputs.mobile }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+            # First push to a new branch reports an all-zero base SHA.
+            if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+              base="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
+            fi
+          fi
+
+          changed="$(git diff --name-only "$base" HEAD)"
+          echo "Changed files:"
+          echo "$changed"
+
+          all_services=(audio-ingestion track-a-clinical track-b-rag fhir-integration prior-auth nudge-service policy-scraper)
+
+          # A shared package or the workspace root affects every service.
+          if echo "$changed" | grep -qE '^(packages/|pyproject\.toml|uv\.lock|\.github/workflows/ci\.yml)'; then
+            selected=("${all_services[@]}")
+          else
+            selected=()
+            for s in "${all_services[@]}"; do
+              if echo "$changed" | grep -q "^services/$s/"; then
+                selected+=("$s")
+              fi
+            done
+          fi
+
+          if [ ${#selected[@]} -eq 0 ]; then
+            echo "services=[]" >> "$GITHUB_OUTPUT"
+            echo "any_python=false" >> "$GITHUB_OUTPUT"
+          else
+            printf -v joined '"%s",' "${selected[@]}"
+            echo "services=[${joined%,}]" >> "$GITHUB_OUTPUT"
+            echo "any_python=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          if echo "$changed" | grep -q '^apps/web/'; then
+            echo "web=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "web=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if echo "$changed" | grep -q '^apps/mobile/'; then
+            echo "mobile=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "mobile=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Lint — ruff over the whole workspace. Cheap enough not to bother scoping.
+  # T20 (ban print()) is part of the rule set: print() can leak PHI to stdout.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+
+      - run: uv sync --all-packages
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format --check
+        run: uv run ruff format --check .
+
+  # ---------------------------------------------------------------------------
+  # Type-check — mypy strict, per changed service.
+  # ---------------------------------------------------------------------------
+  typecheck:
+    name: Type-check (mypy)
+    needs: changes
+    if: needs.changes.outputs.any_python == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+
+      - run: uv sync --all-packages
+
+      - name: mypy ${{ matrix.service }}
+        run: uv run mypy services/${{ matrix.service }}/src
+
+  # ---------------------------------------------------------------------------
+  # Test — pytest per changed service, against real backing services.
+  # Coverage gate is 80% (CLAUDE.md); the root pyproject sets fail_under.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test
+    needs: changes
+    if: needs.changes.outputs.any_python == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.services) }}
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: medauth_test
+          POSTGRES_USER: medauth
+          POSTGRES_PASSWORD: medauth_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U medauth -d medauth_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports:
+          - 6333:6333
+
+    env:
+      ENVIRONMENT: test
+      # Dummy values — moto intercepts every AWS call. No real credentials in CI.
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: testing
+      AWS_SECRET_ACCESS_KEY: testing
+      AWS_SESSION_TOKEN: testing
+      AWS_DEFAULT_REGION: us-east-1
+      DATABASE_URL: postgresql+asyncpg://medauth:medauth_ci@localhost:5432/medauth_test
+      REDIS_URL: redis://localhost:6379/0
+      QDRANT_HOST: localhost
+      QDRANT_PORT: "6333"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+
+      - run: uv sync --all-packages
+
+      - name: pytest ${{ matrix.service }}
+        working-directory: services/${{ matrix.service }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          uv run pytest tests \
+            --cov=src \
+            --cov-report=term-missing \
+            --cov-report=xml
+          code=$?
+          # Exit 5 is "no tests collected". Services are scaffolded before their
+          # tests exist (Phase 0), so that is not a failure yet. Remove this
+          # escape hatch once every service ships tests.
+          if [ $code -eq 5 ]; then
+            echo "::warning title=No tests::services/${{ matrix.service }} has no tests yet"
+            exit 0
+          fi
+          exit $code
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.service }}
+          path: services/${{ matrix.service }}/coverage.xml
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Frontends — only when the app actually changed and has a package.json.
+  # ---------------------------------------------------------------------------
+  web:
+    name: Web (apps/web)
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install, lint, type-check, test, build
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f apps/web/package.json ]; then
+            echo "apps/web not scaffolded yet — skipping"
+            exit 0
+          fi
+          npm ci
+          npm run lint --workspace apps/web --if-present
+          npm run typecheck --workspace apps/web --if-present
+          npm run test --workspace apps/web --if-present
+          npm run build --workspace apps/web --if-present
+
+  mobile:
+    name: Mobile (apps/mobile)
+    needs: changes
+    if: needs.changes.outputs.mobile == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install, lint, type-check, test
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f apps/mobile/package.json ]; then
+            echo "apps/mobile not scaffolded yet — skipping"
+            exit 0
+          fi
+          npm ci
+          npm run lint --workspace apps/mobile --if-present
+          npm run typecheck --workspace apps/mobile --if-present
+          npm run test --workspace apps/mobile --if-present
+
+  # ---------------------------------------------------------------------------
+  # Single required status check for branch protection.
+  # ---------------------------------------------------------------------------
+  ci-passed:
+    name: CI passed
+    needs: [lint, typecheck, test, web, mobile]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any job failed
+        shell: bash
+        run: |
+          results="${{ join(needs.*.result, ' ') }}"
+          echo "Job results: $results"
+          for r in $results; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+              exit 1
+            fi
+          done
