@@ -22,12 +22,37 @@ Claude Code should read this before starting any task to understand current stat
   - `docker-compose.yml` (postgres, redis, qdrant, hapi-fhir)
   - `scripts/seed-synthea.sh` and `scripts/setup-dev.sh` — create as empty stubs
     with a comment: "# Implemented in TASK-052". Do not implement them now.
+  - `.github/` directory with the following (details below in GitHub scaffold spec):
+    - `dependabot.yml` — automated dependency updates (goes in .github/, NOT workflows/)
+    - `workflows/ci.yml` — runs on every PR: lint, type-check, pytest per changed service
+    - `workflows/deploy-dev.yml` — stub only, no real deploy yet (uncomment in Phase 6)
+    - `PULL_REQUEST_TEMPLATE.md` — PR checklist
+    - `ISSUE_TEMPLATE/bug_report.md` — bug report template
+    - `ISSUE_TEMPLATE/task.md` — task implementation template
+    - `CODEOWNERS` — you own everything for now
+  - **Test:** open a draft PR against main, verify ci.yml triggers and runs
 
 - [ ] **TASK-002:** Create shared `packages/hipaa-logger`
-  - Python package: `audit_log(actor_id, action, resource_type, resource_id, session_id)`
-  - Writes to `audit_log` table in PostgreSQL async
-  - Raises exception if DB write fails (audit failures must not be silent)
-  - Unit tests with mocked asyncpg
+  - Owns its own audit_log table — see CLAUDE.md "hipaa-logger — Design Decisions"
+    for the full schema and the reasoning for this ownership split
+  - Alembic migration in `packages/hipaa-logger/migrations/` creating the audit_log table
+    (this migration must run before any service-level migration — see TASK-005 note)
+  - Alembic `version_table = "alembic_version_hipaa_logger"` — never the default
+    `alembic_version`, which two migration setups sharing one database would corrupt
+  - Raw asyncpg (not SQLAlchemy) — self-managed lazy connection pool from DATABASE_URL,
+    with an injection hook accepting an optional `conn` param for tests and for callers
+    that want the audit write inside their own transaction
+  - Defensive DSN normalization: strip a SQLAlchemy driver suffix (`postgresql+asyncpg://`
+    → `postgresql://`) so one DATABASE_URL value works for every consumer
+  - `async def audit_log(actor_id, action, resource_type, resource_id, session_id, service_name, request_id=None, ip_address=None, user_agent=None, conn=None)`
+  - Unit tests with mocked asyncpg (mock the pool/connection, not a real DB)
+  - Integration test against real local Postgres: run the migration, call audit_log(),
+    verify the row lands with correct columns
+  - Update `.github/workflows/ci.yml` so packages/ get their own path-filter entries
+    and test jobs — before this, a packages/ change only triggered service jobs and
+    package tests never ran at all
+  - **Test:** open a PR touching only `packages/hipaa-logger/**` and confirm the
+    hipaa-logger job runs
 
 - [ ] **TASK-003:** Create shared `packages/crypto-utils`
   - AES-256-GCM encrypt/decrypt using a KEK from AWS KMS + per-record DEK
@@ -41,10 +66,15 @@ Claude Code should read this before starting any task to understand current stat
   - Mirror in TypeScript interfaces for the fhir-integration Node service
 
 - [ ] **TASK-005:** Initialize database schema + migrations
-  - Create Alembic setup in `services/track-a-clinical` (owns the schema)
+  - Create Alembic setup in `services/track-a-clinical` (owns the domain schema)
+  - `version_table = "alembic_version_track_a_clinical"` — see constraint 8 below
   - Tables: encounters, clinical_notes, clinical_nudges, prior_auth_requests,
-    insurance_policies, audit_log (see architecture doc for full schema)
-  - `scripts/init-db.sh` that runs migrations against local postgres
+    insurance_policies (see architecture doc for full schema)
+  - Note: audit_log is NOT created here — it's owned by packages/hipaa-logger
+    (TASK-002) and its migration must be applied first. Run hipaa-logger's
+    migration before this service's migrations in any fresh environment.
+  - `scripts/init-db.sh` runs migrations in order: hipaa-logger first, then
+    track-a-clinical's domain tables
   - Seed script with 5 test encounters linked to Synthea patient IDs
 
 ---
@@ -350,3 +380,9 @@ logic do not change.
 6. **Every new API route needs:** (a) Pydantic request/response models, (b) hipaa-logger call, (c) OpenAPI docstring, (d) at least one integration test.
 
 7. **TASK numbers must be recorded in commit messages.** Format: `feat(track-b-rag): implement policy query endpoint [TASK-012]`
+
+8. **Namespace every Alembic version table.** Each migration setup sets
+   `version_table = "alembic_version_{name}"` in its `env.py` — `alembic_version_hipaa_logger`
+   for packages/hipaa-logger, `alembic_version_track_a_clinical` for track-a-clinical, and the
+   same pattern for every future service. Multiple setups share one database; on the default
+   `alembic_version` table each would read another's revision as its own head.

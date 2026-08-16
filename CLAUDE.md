@@ -168,6 +168,28 @@ Bedrock is the only AWS service called during local dev (no local mock available
 - Test files mirror src structure: `src/services/rag.py` → `tests/unit/services/test_rag.py`
 - Minimum 80% coverage on services/packages; CI fails below this
 
+### Git Commits
+- **50/72 rule.** Subject line 50 characters or fewer; body hard-wrapped at 72
+  columns. The subject must still carry the type, scope, and task number, so keep
+  it terse and put the explanation in the body.
+- Subject is imperative mood, no trailing period.
+- Blank line between subject and body. Trailers (`Co-Authored-By:`) go last.
+- **Every commit must pass CI on its own**, not just the tip of the branch. Order
+  the work so tooling and config land before the code that depends on them, and
+  squash or reorder any "fixes the previous commit" commit before opening a PR —
+  history has to stay bisectable.
+- One logical change per commit. A branch that mixes CI changes, docs, and feature
+  code should be three commits, not one.
+
+```
+feat(hipaa-logger): add audit_log [TASK-002]
+<blank>
+Body explains why, wrapped at 72 columns. What changed is visible in
+the diff; the body is for the reasoning that is not.
+<blank>
+Co-Authored-By: ...
+```
+
 ## Key Architectural Constraints
 - **Audio never persists.** Process in-memory BytesIO buffers only. Discard immediately after transcription.
 - **Claude is called via AWS Bedrock only** (not Anthropic's direct API). This is the HIPAA-eligible path.
@@ -176,7 +198,68 @@ Bedrock is the only AWS service called during local dev (no local mock available
 - **Cache RAG results in Redis** with 24h TTL keyed by `rag:{payer}:{plan_type}:{state}:{cpt_code}`. This is a major cost lever — implement it from the start.
 - **Haiku for extraction tasks, Sonnet for reasoning.** ICD/CPT entity extraction → Haiku. SOAP generation and payer policy analysis → Sonnet. Costs 15x less per extraction call.
 
-## FHIR Integration Notes
+### packages/hipaa-logger — Design Decisions (locked, do not revisit)
+- **Owns its own audit_log table and Alembic migration.** Every service depends on
+  this package, so it cannot wait on another service's schema (see TASK-002/TASK-005
+  ordering note below). The migration lives in `packages/hipaa-logger/migrations/`
+  and is applied first, before any service-owned migration.
+- **Raw asyncpg, not SQLAlchemy.** Single hot-path INSERT — an ORM adds nothing here.
+  SQLAlchemy 2.0 async remains standard for services with real domain models
+  (track-a-clinical, prior-auth, etc.) — this is an intentional exception, not
+  an inconsistency.
+- **Self-managed lazy connection pool**, initialized from `DATABASE_URL` on first use.
+  Provides an explicit injection hook (`set_connection(conn)` / accepts an optional
+  `conn` param on `audit_log()`) so tests can mock it and so services that need the
+  audit write inside their own transaction can pass their connection in.
+- **Defensive DSN normalization.** `normalize_dsn()` strips a SQLAlchemy driver suffix
+  (`postgresql+asyncpg://` → `postgresql://`) so a single `DATABASE_URL` value serves
+  this package and the SQLAlchemy services alike; `sqlalchemy_dsn()` adds it back for
+  Alembic.
+- **`version_table = "alembic_version_hipaa_logger"`.** Several Alembic setups share one
+  database; on the default `alembic_version` table each would read another's revision as
+  its own head. Every setup namespaces its own as `alembic_version_{name}` — this applies
+  to every future migration setup, not just this package and track-a-clinical.
+
+### audit_log table schema (authoritative — matches architecture doc)
+```sql
+CREATE TABLE audit_log (
+    id BIGSERIAL PRIMARY KEY,
+    actor_id UUID,                  -- provider or service account
+    action VARCHAR(100) NOT NULL,   -- e.g. READ_PATIENT, WRITE_NOTE, SUBMIT_PRIOR_AUTH
+    resource_type VARCHAR(100),     -- e.g. Patient, Encounter, ClinicalNote
+    resource_id VARCHAR(200),
+    session_id UUID,
+    service_name VARCHAR(100) NOT NULL,   -- which service made the call, e.g. "track-b-rag"
+    request_id UUID,                      -- correlates to request tracing, nullable
+    ip_address INET,
+    user_agent TEXT,
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_audit_log_occurred_at ON audit_log(occurred_at);
+CREATE INDEX idx_audit_log_actor ON audit_log(actor_id);
+CREATE INDEX idx_audit_log_session ON audit_log(session_id);
+```
+`service_name` and `request_id` were added beyond the original architecture doc
+sketch — every service calls this package, so knowing which one wrote each row
+and being able to trace it to a specific request is worth the two extra columns.
+
+`audit_log()` function signature:
+```python
+async def audit_log(
+    actor_id: str | None,
+    action: str,
+    resource_type: str | None,
+    resource_id: str | None,
+    session_id: str | None,
+    service_name: str,
+    request_id: str | None = None,
+    ip_address: str | None = None,  # trailing optionals — otherwise these columns
+    user_agent: str | None = None,  # would always be NULL
+    conn: asyncpg.Connection | None = None,  # injection hook — uses pool if omitted
+) -> None: ...
+```
+
+
 - FHIR version: R4 (4.0.1)
 - SMART on FHIR version: 2.0
 - Local dev FHIR server: HAPI FHIR at localhost:8080 (Docker)
@@ -228,6 +311,263 @@ What gets overridden in subclasses (EHR-specific only):
 
 Rule: if code only works on one EHR, it belongs in a subclass. If it works
 on all EHRs using standard FHIR, it belongs in base.py.
+
+## GitHub Actions & Templates
+
+### Branch Rules (configure in GitHub repo Settings → Branches)
+- `main` is protected: no direct commits, PRs required, CI must pass before merge
+- `feature/*` — day to day work branches
+- `release/*` — triggers production deploy (Phase 6+)
+- Commit message format: `type(scope): description [TASK-XXX]`
+  - types: feat, fix, test, refactor, chore, docs
+  - scope: service or package name (track-b-rag, hipaa-logger, web, etc.)
+  - example: `feat(track-b-rag): implement policy query endpoint [TASK-012]`
+
+### .github/CODEOWNERS
+```
+# Everything — Mohamed owns all of it for now
+*   @mohamedbouchtout
+
+# Infra and compliance require extra attention
+/infrastructure/terraform/environments/production/   @mohamedbouchtout
+/docs/compliance/                                    @mohamedbouchtout
+/packages/hipaa-logger/                              @mohamedbouchtout
+```
+
+### .github/workflows/ci.yml
+Triggers on: pull_request to main, push to main
+Jobs:
+1. `detect-changes` — uses dorny/paths-filter to find which services/packages changed
+2. Per-service test jobs (only run if that service changed):
+   - `ruff check` + `ruff format --check` (linting)
+   - `mypy src/` (type checking)
+   - `pytest tests/ --cov=src --cov-fail-under=80`
+3. `security-scan` — runs bandit -r . -ll on changed Python services
+4. All jobs must pass before PR can merge
+
+Path filter groups (each maps to a test job):
+- `hipaa-logger`: packages/hipaa-logger/** or packages/crypto-utils/**
+- `track-b-rag`: services/track-b-rag/** or packages/**
+- `track-a-clinical`: services/track-a-clinical/** or packages/**
+- `audio-ingestion`: services/audio-ingestion/** or packages/**
+- `fhir-integration`: services/fhir-integration/** or packages/**
+- `nudge-service`: services/nudge-service/** or packages/**
+- `web`: apps/web/**
+- `mobile`: apps/mobile/**
+
+### .github/workflows/deploy-dev.yml
+Stub file only during Phases 0-5. Content:
+```yaml
+# Deploy to dev — enabled in Phase 6 when infrastructure is ready
+# on:
+#   push:
+#     branches: [main]
+name: Deploy Dev (stub)
+on: workflow_dispatch  # manual trigger only for now
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Deploy pipeline not yet configured"
+```
+
+### .github/PULL_REQUEST_TEMPLATE.md
+PR template enforces task linkage and HIPAA checklist on every merge:
+```markdown
+## Task
+Closes TASK-XXX
+
+## What changed
+<!-- One paragraph description -->
+
+## Test evidence
+<!-- Paste pytest output or screenshot -->
+
+## HIPAA checklist
+- [ ] No PHI appears in logs, print statements, or error messages
+- [ ] Any new PHI access calls hipaa-logger audit_log()
+- [ ] No secrets or credentials added to code or comments
+- [ ] Audio data not written to disk anywhere in this change
+- [ ] New environment variables added to .env.example
+
+## For reviewer
+<!-- Anything specific to look at or known tradeoffs -->
+```
+
+### .github/ISSUE_TEMPLATE/task.md
+```markdown
+---
+name: Task
+about: Implement a TASKS.md item
+---
+**Task ID:** TASK-XXX
+**Phase:** 0 / 1 / 2 / 3 / 4 / 5 / 6 / 7
+
+## What to build
+<!-- Copy from TASKS.md -->
+
+## Acceptance criteria
+<!-- Copy test bullets from TASKS.md -->
+
+## Notes
+<!-- Decisions made, context for implementer -->
+```
+
+### .github/dependabot.yml
+Note: this file goes in .github/ directly, NOT in .github/workflows/.
+GitHub reads it natively — it is not a GitHub Actions workflow file.
+
+```yaml
+version: 2
+updates:
+
+  # Python — one entry per service and package (uv not yet natively supported,
+  # use pip ecosystem which reads pyproject.toml)
+  - package-ecosystem: "pip"
+    directory: "/packages/hipaa-logger"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencies", "python"]
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: "pip"
+    directory: "/packages/crypto-utils"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencies", "python"]
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: "pip"
+    directory: "/services/audio-ingestion"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencies", "python"]
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: "pip"
+    directory: "/services/track-a-clinical"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencies", "python"]
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: "pip"
+    directory: "/services/track-b-rag"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencies", "python"]
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: "pip"
+    directory: "/services/fhir-integration"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencies", "python"]
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: "pip"
+    directory: "/services/nudge-service"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencies", "python"]
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: "pip"
+    directory: "/services/prior-auth"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencies", "python"]
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: "pip"
+    directory: "/services/policy-scraper"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencies", "python"]
+    open-pull-requests-limit: 3
+
+  # npm — covers apps/web and apps/mobile (reads root package.json workspaces)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencies", "javascript"]
+    open-pull-requests-limit: 5
+    ignore:
+      # Expo SDK updates are intentional — do manually when ready
+      - dependency-name: "expo"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "expo-*"
+        update-types: ["version-update:semver-major"]
+
+  # GitHub Actions — keeps action versions current (security important)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencies", "github-actions"]
+    open-pull-requests-limit: 3
+
+  # Docker base images
+  - package-ecosystem: "docker"
+    directory: "/services/audio-ingestion"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencies", "docker"]
+
+  - package-ecosystem: "docker"
+    directory: "/services/track-b-rag"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencies", "docker"]
+
+  # Add remaining services as Dockerfiles are created
+```
+
+Dependabot behavior in this project:
+- Opens PRs automatically on Monday for any outdated dependency
+- CI runs on each Dependabot PR — if tests pass, you can merge with one click
+- `open-pull-requests-limit: 3` per ecosystem prevents getting flooded with 20 PRs at once
+- Expo SDK major versions are ignored because those require intentional migration work,
+  not automatic bumps
+- GitHub Actions versions are monitored separately — a compromised action in ci.yml
+  is a supply chain attack vector, keeping them pinned and current matters
+
+When a Dependabot PR opens:
+1. Check if CI passes
+2. Glance at the changelog link it includes
+3. Merge if green — do not let these pile up
+Security patches (CVE fixes) should be merged same day regardless of other work.
+```markdown
+---
+name: Bug report
+about: Something isn't working
+---
+**Service affected:** 
+**TASK where this was introduced:** TASK-XXX
+
+## What happened
+
+## What was expected
+
+## Steps to reproduce
+
+## Logs
+<!-- No PHI in logs — redact before pasting -->
+```
 
 ## Current Implementation Status
 See TASKS.md for what is built, what is in progress, and what is next.
