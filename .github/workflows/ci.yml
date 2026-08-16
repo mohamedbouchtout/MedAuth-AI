@@ -3,9 +3,10 @@ name: CI
 # Runs on every PR into main, and on main itself after merge.
 #
 # Shape: a `changes` job works out which workspace members a PR actually touches,
-# then lint / type-check / test fan out over just those. A change to packages/ or
-# to the root pyproject.toml tests every service, since every service imports the
-# shared packages.
+# then lint / type-check / test fan out over just those. Members are full paths —
+# `services/track-b-rag`, `packages/hipaa-logger` — so packages get their own test
+# jobs rather than only triggering service ones. A change under packages/ also
+# re-tests every service, since every service imports the shared packages.
 #
 # Nothing here talks to AWS. Bedrock, Transcribe Medical, Comprehend Medical and
 # KMS are all mocked with moto — no real credentials belong in CI.
@@ -35,7 +36,7 @@ jobs:
     name: Detect changed workspace members
     runs-on: ubuntu-latest
     outputs:
-      services: ${{ steps.detect.outputs.services }}
+      members: ${{ steps.detect.outputs.members }}
       any_python: ${{ steps.detect.outputs.any_python }}
       web: ${{ steps.detect.outputs.web }}
       mobile: ${{ steps.detect.outputs.mobile }}
@@ -64,25 +65,41 @@ jobs:
           echo "$changed"
 
           all_services=(audio-ingestion track-a-clinical track-b-rag fhir-integration prior-auth nudge-service policy-scraper)
+          all_packages=(hipaa-logger crypto-utils fhir-types)
 
-          # A shared package or the workspace root affects every service.
-          if echo "$changed" | grep -qE '^(packages/|pyproject\.toml|uv\.lock|\.github/workflows/ci\.yml)'; then
-            selected=("${all_services[@]}")
+          selected=()
+
+          if echo "$changed" | grep -qE '^(pyproject\.toml|uv\.lock|\.github/workflows/ci\.yml)'; then
+            # Workspace root or the CI definition itself — test everything.
+            for p in "${all_packages[@]}"; do selected+=("packages/$p"); done
+            for s in "${all_services[@]}"; do selected+=("services/$s"); done
           else
-            selected=()
-            for s in "${all_services[@]}"; do
-              if echo "$changed" | grep -q "^services/$s/"; then
-                selected+=("$s")
+            # A changed package gets its own job, so its unit and integration tests
+            # actually run — they never did while the matrix held services only.
+            for p in "${all_packages[@]}"; do
+              if echo "$changed" | grep -q "^packages/$p/"; then
+                selected+=("packages/$p")
               fi
             done
+
+            if echo "$changed" | grep -q '^packages/'; then
+              # Every service imports the shared packages, so re-test them all too.
+              for s in "${all_services[@]}"; do selected+=("services/$s"); done
+            else
+              for s in "${all_services[@]}"; do
+                if echo "$changed" | grep -q "^services/$s/"; then
+                  selected+=("services/$s")
+                fi
+              done
+            fi
           fi
 
           if [ ${#selected[@]} -eq 0 ]; then
-            echo "services=[]" >> "$GITHUB_OUTPUT"
+            echo "members=[]" >> "$GITHUB_OUTPUT"
             echo "any_python=false" >> "$GITHUB_OUTPUT"
           else
             printf -v joined '"%s",' "${selected[@]}"
-            echo "services=[${joined%,}]" >> "$GITHUB_OUTPUT"
+            echo "members=[${joined%,}]" >> "$GITHUB_OUTPUT"
             echo "any_python=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -122,7 +139,7 @@ jobs:
         run: uv run ruff format --check .
 
   # ---------------------------------------------------------------------------
-  # Type-check — mypy strict, per changed service.
+  # Type-check — mypy strict, per changed workspace member (service or package).
   # ---------------------------------------------------------------------------
   typecheck:
     name: Type-check (mypy)
@@ -132,7 +149,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: ${{ fromJSON(needs.changes.outputs.services) }}
+        member: ${{ fromJSON(needs.changes.outputs.members) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -143,11 +160,11 @@ jobs:
 
       - run: uv sync --all-packages
 
-      - name: mypy ${{ matrix.service }}
-        run: uv run mypy services/${{ matrix.service }}/src
+      - name: mypy ${{ matrix.member }}
+        run: uv run mypy ${{ matrix.member }}/src
 
   # ---------------------------------------------------------------------------
-  # Test — pytest per changed service, against real backing services.
+  # Test — pytest per changed workspace member, against real backing services.
   # Coverage gate is 80% (CLAUDE.md); the root pyproject sets fail_under.
   # ---------------------------------------------------------------------------
   test:
@@ -158,7 +175,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: ${{ fromJSON(needs.changes.outputs.services) }}
+        member: ${{ fromJSON(needs.changes.outputs.members) }}
 
     services:
       postgres:
@@ -176,7 +193,7 @@ jobs:
           --health-retries 5
 
       redis:
-        image: redis:7-alpine
+        image: redis:8-alpine
         ports:
           - 6379:6379
         options: >-
@@ -213,8 +230,8 @@ jobs:
 
       - run: uv sync --all-packages
 
-      - name: pytest ${{ matrix.service }}
-        working-directory: services/${{ matrix.service }}
+      - name: pytest ${{ matrix.member }}
+        working-directory: ${{ matrix.member }}
         shell: bash
         run: |
           set -uo pipefail
@@ -230,17 +247,27 @@ jobs:
           # tests exist (Phase 0), so that is not a failure yet. Remove this
           # escape hatch once every service ships tests.
           if [ "$code" -eq 5 ]; then
-            echo "::warning title=No tests::services/${{ matrix.service }} has no tests yet"
+            echo "::warning title=No tests::${{ matrix.member }} has no tests yet"
             exit 0
           fi
           exit "$code"
+
+      # Artifact names cannot contain "/", and member is a path like
+      # packages/hipaa-logger — flatten it before uploading.
+      - name: Build coverage artifact name
+        id: coverage_name
+        if: always()
+        shell: bash
+        env:
+          MEMBER: ${{ matrix.member }}
+        run: echo "name=coverage-${MEMBER//\//-}" >> "$GITHUB_OUTPUT"
 
       - name: Upload coverage
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: coverage-${{ matrix.service }}
-          path: services/${{ matrix.service }}/coverage.xml
+          name: ${{ steps.coverage_name.outputs.name }}
+          path: ${{ matrix.member }}/coverage.xml
           if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
