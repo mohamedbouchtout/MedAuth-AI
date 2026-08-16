@@ -33,9 +33,17 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "T20"]  # T20 bans print() — see CLAUDE.md conventions
 
+[tool.ruff.lint.isort]
+# Workspace packages are installed from source, so isort would otherwise sort them
+# in with third-party imports.
+known-first-party = ["hipaa_logger", "crypto_utils", "fhir_types", "src"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: requires a real backing service (PostgreSQL, Redis, Qdrant); skipped without one",
+]
 
 [tool.coverage.report]
 fail_under = 80
@@ -43,3 +51,9 @@ fail_under = 80
 [tool.mypy]
 python_version = "3.12"
 strict = true
+
+# asyncpg and alembic do not ship complete type information; strict mode would
+# otherwise fail on the import itself rather than on any of our own code.
+[[tool.mypy.overrides]]
+module = ["asyncpg.*", "alembic.*"]
+ignore_missing_imports = true
