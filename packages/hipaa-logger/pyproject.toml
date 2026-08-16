@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "Shared HIPAA audit logging — every service imports this. See TASK-002."
 requires-python = ">=3.12"
 dependencies = [
+    # alembic + sqlalchemy are migration-time only. Runtime is raw asyncpg by design
+    # — see "packages/hipaa-logger — Design Decisions" in CLAUDE.md.
+    "alembic>=1.14",
     "asyncpg>=0.30",
     "pydantic>=2.9",
     "sqlalchemy[asyncio]>=2.0",
