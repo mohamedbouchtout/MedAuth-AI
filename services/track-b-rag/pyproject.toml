@@ -19,7 +19,7 @@ dependencies = [
     "redis>=8.1.0",
     "sentence-transformers>=3.3",
     "sqlalchemy[asyncio]>=2.0",
-    "uvicorn[standard]>=0.32",
+    "uvicorn[standard]>=0.52.2",
 ]
 
 [build-system]
