@@ -5,7 +5,7 @@ description = "WebSocket audio intake, streamed to AWS Transcribe Medical. Audio
 requires-python = ">=3.12"
 dependencies = [
     "amazon-transcribe>=0.6",
-    "boto3>=1.35",
+    "boto3>=1.43.71",
     "fastapi>=0.115",
     "medauth-hipaa-logger",
     "pydantic>=2.9",
