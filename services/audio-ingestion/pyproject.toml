@@ -10,7 +10,7 @@ dependencies = [
     "medauth-hipaa-logger",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
-    "pyjwt>=2.9",
+    "pyjwt>=2.13.0",
     "redis>=8.1.0",
     "uvicorn[standard]>=0.52.2",
     "websockets>=13.1",
