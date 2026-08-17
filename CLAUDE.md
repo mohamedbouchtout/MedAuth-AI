@@ -199,6 +199,15 @@ Co-Authored-By: ...
 - **Haiku for extraction tasks, Sonnet for reasoning.** ICD/CPT entity extraction → Haiku. SOAP generation and payer policy analysis → Sonnet. Costs 15x less per extraction call.
 
 ### packages/hipaa-logger — Design Decisions (locked, do not revisit)
+**Scope note (read first):** this package is NOT a general application logger.
+It writes one specific thing — a compliance audit trail row per PHI access —
+to the audit_log Postgres table. It does not replace standard Python `logging`,
+does not handle debug/info/error output, and is not used for anything except
+PHI access events. Normal application logging (service startup, errors, request
+traces) uses `logging.getLogger(__name__)` per the Python conventions section
+above and goes to stdout/CloudWatch, not this package. Neither one ever logs
+actual PHI content — hipaa-logger records metadata about an access (who, what
+resource type, when), never the patient data itself.
 - **Owns its own audit_log table and Alembic migration.** Every service depends on
   this package, so it cannot wait on another service's schema (see TASK-002/TASK-005
   ordering note below). The migration lives in `packages/hipaa-logger/migrations/`
@@ -211,14 +220,6 @@ Co-Authored-By: ...
   Provides an explicit injection hook (`set_connection(conn)` / accepts an optional
   `conn` param on `audit_log()`) so tests can mock it and so services that need the
   audit write inside their own transaction can pass their connection in.
-- **Defensive DSN normalization.** `normalize_dsn()` strips a SQLAlchemy driver suffix
-  (`postgresql+asyncpg://` → `postgresql://`) so a single `DATABASE_URL` value serves
-  this package and the SQLAlchemy services alike; `sqlalchemy_dsn()` adds it back for
-  Alembic.
-- **`version_table = "alembic_version_hipaa_logger"`.** Several Alembic setups share one
-  database; on the default `alembic_version` table each would read another's revision as
-  its own head. Every setup namespaces its own as `alembic_version_{name}` — this applies
-  to every future migration setup, not just this package and track-a-clinical.
 
 ### audit_log table schema (authoritative — matches architecture doc)
 ```sql
@@ -253,11 +254,51 @@ async def audit_log(
     session_id: str | None,
     service_name: str,
     request_id: str | None = None,
-    ip_address: str | None = None,  # trailing optionals — otherwise these columns
-    user_agent: str | None = None,  # would always be NULL
+    ip_address: str | None = None,
+    user_agent: str | None = None,
     conn: asyncpg.Connection | None = None,  # injection hook — uses pool if omitted
 ) -> None: ...
 ```
+`ip_address` and `user_agent` are optional and default to None until a request-context
+mechanism (likely FastAPI middleware) populates them automatically in a later task.
+Ship them as real parameters, not permanently-empty columns silently filled with NULL.
+
+### Alembic version table isolation
+hipaa-logger's migrations and each service's migrations run against the same database.
+If two Alembic setups share the default `alembic_version` table, they read each other's
+revision as their own head and corrupt migration state. Every package/service with its
+own Alembic setup must set a unique `version_table` in its `env.py`:
+```python
+# packages/hipaa-logger/migrations/env.py
+context.configure(
+    connection=connection,
+    target_metadata=target_metadata,
+    version_table="alembic_version_hipaa_logger",
+)
+```
+```python
+# services/track-a-clinical/migrations/env.py
+context.configure(
+    connection=connection,
+    target_metadata=target_metadata,
+    version_table="alembic_version_track_a_clinical",
+)
+```
+Pattern: `alembic_version_{package_or_service_name_with_underscores}`. Apply this to
+every future Alembic setup, not just these two.
+
+### DATABASE_URL format — single env var, two consumers
+CI and .env.example set `DATABASE_URL` in SQLAlchemy dialect form:
+`postgresql+asyncpg://user:pass@host/db`. SQLAlchemy services use this directly.
+Raw asyncpg (hipaa-logger) cannot parse the `+asyncpg` driver suffix, so hipaa-logger
+strips it defensively on connect rather than requiring a second env var:
+```python
+def _to_asyncpg_dsn(database_url: str) -> str:
+    """SQLAlchemy-style URLs use postgresql+asyncpg://; raw asyncpg wants postgresql://"""
+    return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+```
+One `DATABASE_URL` value works for every consumer in the monorepo — services never
+need to know which driver style another package expects.
 
 
 - FHIR version: R4 (4.0.1)
@@ -346,14 +387,25 @@ Jobs:
 4. All jobs must pass before PR can merge
 
 Path filter groups (each maps to a test job):
-- `hipaa-logger`: packages/hipaa-logger/** or packages/crypto-utils/**
+- `hipaa-logger`: packages/hipaa-logger/**  (own job — was previously only
+  triggering service jobs via the packages/** wildcard below, and never
+  actually ran its own tests. Fixed: packages get dedicated jobs too.)
+- `crypto-utils`: packages/crypto-utils/**
+- `fhir-types`: packages/fhir-types/**
 - `track-b-rag`: services/track-b-rag/** or packages/**
 - `track-a-clinical`: services/track-a-clinical/** or packages/**
 - `audio-ingestion`: services/audio-ingestion/** or packages/**
 - `fhir-integration`: services/fhir-integration/** or packages/**
 - `nudge-service`: services/nudge-service/** or packages/**
+- `prior-auth`: services/prior-auth/** or packages/**
+- `policy-scraper`: services/policy-scraper/** or packages/**
 - `web`: apps/web/**
 - `mobile`: apps/mobile/**
+
+Rule: any directory under packages/ needs its own path-filter entry AND its own
+test job — a change under packages/ correctly re-runs every service that depends
+on it, but that is not a substitute for running the package's own test suite.
+The 80% coverage gate applies to packages/ the same as services/.
 
 ### .github/workflows/deploy-dev.yml
 Stub file only during Phases 0-5. Content:
@@ -567,6 +619,41 @@ about: Something isn't working
 
 ## Logs
 <!-- No PHI in logs — redact before pasting -->
+```
+
+### packages/crypto-utils — Design Decisions (locked, do not revisit)
+**Scope note:** field-level AES-256-GCM encryption using a KMS-wrapped DEK per
+record. This is for encrypting specific sensitive fields before they hit the
+database — it is not a replacement for encryption-at-rest (RDS/S3 handle that
+separately) and it is not a general crypto toolkit.
+- **Never log plaintext.** Plaintext DEKs and plaintext field values must never
+  reach any log line, exception message, or stack trace. If an encrypt/decrypt
+  call fails, the exception message names the field/context being processed —
+  never the plaintext value or the unwrapped key material. This applies inside
+  the crypto primitives themselves, not just at call sites that happen to touch PHI.
+- **Encryption context is bound in two places, not one.** The `context: dict`
+  passed to `encrypt_field()` is used both as the KMS encryption context (on the
+  DEK wrap/unwrap call) and as AES-GCM's AAD (additional authenticated data) on
+  the local encrypt/decrypt operation. Binding only at the KMS layer would let
+  ciphertext for one record's field be swapped onto another record and still
+  decrypt successfully, since GCM alone has no knowledge the ciphertext was
+  scoped to a specific record. Binding the same context as AAD makes GCM's
+  authentication tag itself reject a mismatched context — defense in depth,
+  independent of whether the KMS-side check is ever bypassed.
+- **Moto (`@mock_aws`) for all KMS mocking in tests** — not hand-rolled
+  `unittest.mock` on boto3 calls. Applies to every test that touches KMS.
+
+`encrypt_field()` / `decrypt_field()` signatures:
+```python
+def encrypt_field(plaintext: str, context: dict[str, str]) -> EncryptedField:
+    """context is bound as both KMS encryption context and GCM AAD."""
+    ...
+
+
+def decrypt_field(encrypted: EncryptedField, context: dict[str, str]) -> str:
+    """Raises if context does not match what the field was encrypted with —
+    this is the intended behavior, not an edge case to work around."""
+    ...
 ```
 
 ## Current Implementation Status
