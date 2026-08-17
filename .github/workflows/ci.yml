@@ -43,6 +43,7 @@ jobs:
       any_python: ${{ steps.detect.outputs.any_python }}
       web: ${{ steps.detect.outputs.web }}
       mobile: ${{ steps.detect.outputs.mobile }}
+      fhir_types: ${{ steps.detect.outputs.fhir_types }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -116,6 +117,15 @@ jobs:
             echo "mobile=true" >> "$GITHUB_OUTPUT"
           else
             echo "mobile=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # fhir-types spans both toolchains, so it also reacts to the npm root:
+          # the TypeScript mirrors are an npm workspace, and a lockfile change can
+          # break `npm ci` without touching the package itself.
+          if echo "$changed" | grep -qE '^(pyproject\.toml|uv\.lock|package\.json|package-lock\.json|\.github/workflows/ci\.yml|packages/fhir-types/)'; then
+            echo "fhir_types=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fhir_types=false" >> "$GITHUB_OUTPUT"
           fi
 
   # ---------------------------------------------------------------------------
@@ -274,6 +284,49 @@ jobs:
           if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
+  # fhir-types — the one package with two languages in one job.
+  #
+  # Its FHIR R4 resources are written twice: Pydantic models the backend validates
+  # against, and TypeScript mirrors apps/web and apps/mobile compile against. Two
+  # hand-written definitions of the same thing drift. Both sides run here together
+  # so a green verdict means they agree, rather than each having been checked
+  # alone: pytest carries the parity test that compares element names and closed
+  # value sets across the two, and tsc proves the mirrors actually compile.
+  #
+  # The pytest run overlaps with this package's entry in the `test` matrix above.
+  # That is deliberate — the matrix keeps every package covered by the same rules
+  # as its siblings, and this job stays self-contained enough that its result
+  # means something on its own.
+  # ---------------------------------------------------------------------------
+  fhir-types:
+    name: FHIR types (Python + TypeScript)
+    needs: changes
+    if: needs.changes.outputs.fhir_types == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - run: uv sync --all-packages
+
+      - name: pytest — Pydantic models and TypeScript parity
+        working-directory: packages/fhir-types
+        run: uv run pytest tests --cov=src --cov-report=term-missing
+
+      - run: npm ci
+
+      - name: tsc --noEmit — TypeScript mirrors
+        run: npm run typecheck --workspace @medauth/fhir-types
+
+  # ---------------------------------------------------------------------------
   # Frontends — only when the app actually changed and has a package.json.
   # ---------------------------------------------------------------------------
   web:
@@ -332,7 +385,7 @@ jobs:
   # ---------------------------------------------------------------------------
   ci-passed:
     name: CI passed
-    needs: [lint, typecheck, test, web, mobile]
+    needs: [lint, typecheck, test, fhir-types, web, mobile]
     if: always()
     runs-on: ubuntu-latest
     steps:
