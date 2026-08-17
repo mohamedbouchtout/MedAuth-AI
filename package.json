@@ -5,7 +5,8 @@
   "description": "MedAuth AI — ambient clinical AI platform. JS/TS workspaces (frontends only; all services are Python).",
   "workspaces": [
     "apps/web",
-    "apps/mobile"
+    "apps/mobile",
+    "packages/fhir-types/typescript"
   ],
   "engines": {
     "node": ">=20"

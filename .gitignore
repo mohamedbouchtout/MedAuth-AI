@@ -65,6 +65,10 @@ yarn-error.log*
 .turbo/
 apps/*/dist/
 apps/*/build/
+# The `dist/` rule in the Python section already covers this, but the TypeScript
+# mirrors in packages/fhir-types/typescript build here and it is worth being
+# obvious about it rather than relying on a rule filed under another language.
+packages/*/typescript/dist/
 coverage/
 
 # Expo (apps/mobile)

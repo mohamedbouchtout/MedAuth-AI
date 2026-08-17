@@ -1,0 +1,25 @@
+{
+  "name": "@medauth/fhir-types",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript mirrors of the FHIR R4 Pydantic models in packages/fhir-types. Consumed by apps/web and apps/mobile.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
