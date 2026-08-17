@@ -19,7 +19,10 @@ on:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded PR runs, never a run on main. Merges can arrive faster than
+  # CI completes, and cancelling then leaves commits on main with no verdict at
+  # all — which makes "every commit passes CI on its own" unenforceable.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
