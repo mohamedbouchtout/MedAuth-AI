@@ -16,7 +16,9 @@ Claude Code should read this before starting any task to understand current stat
   - Create all directories per CLAUDE.md structure
   - Root `pyproject.toml` with uv workspace config covering all services/ and packages/
     (fhir-integration is Python — do not create a Node.js workspace for it)
-  - Root `package.json` with npm workspaces covering apps/web and apps/mobile only
+  - Root `package.json` with npm workspaces covering apps/web and apps/mobile
+    (a third workspace, packages/fhir-types/typescript/, is added later in
+    TASK-004 once that package exists — don't scaffold it here)
   - `.gitignore` (Python, Node, Terraform, .env files)
   - `.env.example` with all required variable names, no values
   - `docker-compose.yml` (postgres, redis, qdrant, hapi-fhir)
@@ -78,21 +80,168 @@ Claude Code should read this before starting any task to understand current stat
     TASK-002 already replaced the old path-filter groups with full workspace-member
     paths, so every packages/ directory gets its own job automatically.
 
-- [ ] **TASK-004:** Create shared `packages/fhir-types`
+- [x] **TASK-004:** Create shared `packages/fhir-types`
   - Pydantic v2 models for FHIR R4 resources used by this project
-  - Patient, Encounter, Condition, Coverage, DocumentReference, Claim
-  - Mirror in TypeScript interfaces for the fhir-integration Node service
+  - Patient, Encounter, Condition, Coverage, MedicationRequest, DocumentReference, Claim
+    — seven resources, matching CLAUDE.md's Tech Stack list. (An earlier six-item
+    draft of this task dropped MedicationRequest — that was an omission, not an
+    intentional exclusion. The prior-auth bundle needs it for medication-based
+    authorizations like biologics and chemotherapy.)
+  - Mirror in TypeScript interfaces under `packages/fhir-types/typescript/`, consumed
+    by `apps/web` and `apps/mobile` (both use fhirclient.js for the SMART launch).
+    fhir-integration is a Python service like every other backend service — the
+    TypeScript mirrors are not for it. (An earlier draft said "for the fhir-integration
+    Node service" — stale, from before fhir-integration's language was settled.)
+  - Add `packages/fhir-types/typescript/` as a third npm workspace, with its own
+    `package.json` and `tsconfig.json` — not plain .ts files consumed via a path alias.
+    The workspace approach means CI actually type-checks the mirrors against drift
+    from the Pydantic models; plain files would leave them unverified, which defeats
+    the purpose of having mirrors at all.
+  - Add a `fhir-types` job to `.github/workflows/ci.yml`'s path-filter matrix
+    (`packages/fhir-types/**` → dedicated job, `tsc --noEmit` at minimum). Same
+    category of gap as the packages/ CI matrix fix from TASK-002 — don't repeat it.
+  - Built (85 tests, 100% coverage). Decisions worth knowing before touching this
+    package:
+    - Field names are snake_case in Python and camelCase on the wire, via a Pydantic
+      camel alias generator. **Always dump with `by_alias=True, exclude_none=True`** —
+      a server rejects snake_case element names, and FHIR has no null elements.
+    - `extra="allow"`, so elements this package does not model survive a round trip
+      instead of being dropped. A resource written back to an EHR keeps what it
+      arrived with. The cost is that a misspelled field is accepted as an extra.
+    - FHIR `date`/`dateTime` are `str`, not `datetime.date`. Reduced precision
+      (`"1975"`, `"1975-03"`) is legal in FHIR and real EHRs send it; parsing into
+      a `date` would reject valid data or invent a day.
+    - Only *required*-binding value sets are `Literal` (in `codes.py`). Extensible
+      bindings stay `CodeableConcept` — constraining those would reject valid payloads.
+    - `Encounter.class` and `Coverage.class` are `encounter_class` / `coverage_class`
+      in Python with an explicit `alias="class"`, since `class` is a keyword.
+    - Drift between the two languages is a test, not a convention:
+      `tests/unit/test_typescript_parity.py` compares every model's element names
+      against its TypeScript interface (resolving `extends`) and every `Literal`
+      against its string-literal union in `codes.ts`. It parses the mirrors with a
+      regex, so `typescript/src/` must keep one property per line and no inline
+      object literal types; a file that stops parsing fails rather than passing
+      silently.
+    - The CI job runs pytest and `tsc --noEmit` together, so its verdict means the
+      two representations agree. Its pytest run overlaps the `test` matrix entry for
+      this package on purpose — the matrix keeps packages under uniform rules, the
+      dedicated job stays meaningful on its own.
 
 - [ ] **TASK-005:** Initialize database schema + migrations
-  - Create Alembic setup in `services/track-a-clinical` (owns the domain schema)
-  - Tables: encounters, clinical_notes, clinical_nudges, prior_auth_requests,
-    insurance_policies (see architecture doc for full schema)
-  - Note: audit_log is NOT created here — it's owned by packages/hipaa-logger
-    (TASK-002) and its migration must be applied first. Run hipaa-logger's
-    migration before this service's migrations in any fresh environment.
-  - `scripts/init-db.sh` runs migrations in order: hipaa-logger first, then
-    track-a-clinical's domain tables
-  - Seed script with 5 test encounters linked to Synthea patient IDs
+  - Create Alembic setup in `services/track-a-clinical` (owns migration authorship —
+    see CLAUDE.md "Migration Ownership vs. Table Write Access" for what this does
+    and doesn't mean; other services read/write these tables via the same
+    DATABASE_URL without owning their migrations)
+  - Set `version_table="alembic_version_track_a_clinical"` per the isolation
+    pattern established in TASK-002 — every Alembic setup in this repo gets its
+    own version table, no exceptions
+  - Inline schema (this is the authoritative source — no external doc to consult):
+    ```sql
+    CREATE TABLE encounters (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        session_id UUID UNIQUE NOT NULL,
+        ehr_encounter_id VARCHAR(100),
+        patient_fhir_id VARCHAR(100) NOT NULL,
+        provider_id UUID NOT NULL,
+        organization_id UUID,
+        status VARCHAR(20) NOT NULL DEFAULT 'active',
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        ended_at TIMESTAMPTZ,
+        insurance_payer VARCHAR(200),
+        insurance_plan_type VARCHAR(100),
+        insurance_member_id VARCHAR(100),
+        deleted_at TIMESTAMPTZ  -- soft delete, see Code Conventions
+    );
+
+    CREATE TABLE clinical_notes (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        encounter_id UUID NOT NULL REFERENCES encounters(id),
+        soap_subjective TEXT,
+        soap_objective TEXT,
+        soap_assessment TEXT,
+        soap_plan TEXT,
+        icd10_codes JSONB,
+        cpt_codes JSONB,
+        ehr_document_ref_id VARCHAR(100),
+        generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        reviewed_by_provider BOOLEAN NOT NULL DEFAULT FALSE,
+        provider_edited BOOLEAN NOT NULL DEFAULT FALSE,
+        deleted_at TIMESTAMPTZ
+    );
+
+    CREATE TABLE clinical_nudges (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        encounter_id UUID NOT NULL REFERENCES encounters(id),
+        procedure_name VARCHAR(200),
+        cpt_code VARCHAR(20),
+        nudge_message TEXT,
+        missing_criteria JSONB,
+        denial_risk VARCHAR(20),
+        payer_policy_source VARCHAR(500),
+        fired_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        acknowledged BOOLEAN NOT NULL DEFAULT FALSE,
+        acknowledged_at TIMESTAMPTZ,
+        resulted_in_documentation BOOLEAN
+    );
+
+    CREATE TABLE prior_auth_requests (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        encounter_id UUID NOT NULL REFERENCES encounters(id),
+        status VARCHAR(50) NOT NULL DEFAULT 'pending',
+        payer_name VARCHAR(200),
+        procedures JSONB,
+        diagnoses JSONB,
+        clinical_evidence JSONB,
+        submission_method VARCHAR(50),
+        payer_reference_number VARCHAR(200),
+        submitted_at TIMESTAMPTZ,
+        decided_at TIMESTAMPTZ,
+        denial_reason TEXT
+    );
+
+    CREATE TABLE insurance_policies (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        payer VARCHAR(200) NOT NULL,
+        plan_type VARCHAR(100),
+        state CHAR(2),
+        policy_id VARCHAR(200) UNIQUE NOT NULL,
+        source_url TEXT,
+        content_hash VARCHAR(64) NOT NULL,  -- SHA-256 hex digest, see TASK-011
+        last_ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        effective_date DATE,
+        qdrant_collection VARCHAR(100) NOT NULL DEFAULT 'insurance_policies'
+    );
+
+    CREATE INDEX idx_encounters_session ON encounters(session_id);
+    CREATE INDEX idx_encounters_provider ON encounters(provider_id);
+    CREATE INDEX idx_clinical_notes_encounter ON clinical_notes(encounter_id);
+    CREATE INDEX idx_clinical_nudges_encounter ON clinical_nudges(encounter_id);
+    CREATE INDEX idx_prior_auth_encounter ON prior_auth_requests(encounter_id);
+    CREATE INDEX idx_prior_auth_status ON prior_auth_requests(status);
+    CREATE INDEX idx_insurance_policies_payer_state ON insurance_policies(payer, state);
+    ```
+  - audit_log is NOT created here — owned by packages/hipaa-logger (TASK-002),
+    applied first. `scripts/init-db.sh` runs migrations in order: hipaa-logger
+    first, then this migration set.
+  - Seed script (`scripts/seed-test-encounters.py`) with 5 test encounters linked
+    to Synthea patient IDs (requires TASK-052 / local HAPI FHIR to have patients
+    loaded first — if run before then, seed with placeholder patient_fhir_id
+    values and note that in a code comment)
+
+- [ ] **TASK-006:** Session lifecycle endpoints
+  - Service: `services/track-a-clinical` (owns the encounters table)
+  - Full spec is in CLAUDE.md "Session Lifecycle & JWT Issuance" — read that first,
+    this task did not exist in earlier drafts and several later tasks assume it:
+    TASK-020, TASK-021, TASK-030, TASK-041, and TASK-060 all depend on this.
+  - `POST /sessions/start` — body: `{patient_id, provider_id, ehr_encounter_id}`.
+    Creates `encounters` row, mints a 15-min HS256 JWT with claims
+    `{session_id, provider_id, exp}` signed with `JWT_SIGNING_KEY`, returns
+    `{session_id, jwt}`. All accesses logged via hipaa-logger.
+  - `POST /sessions/{session_id}/end` — sets status/ended_at, publishes
+    `session:ended:{session_id}` to Redis (empty payload, signal only)
+  - Add `JWT_SIGNING_KEY` to `.env.example`
+  - **Test:** start a session, verify JWT decodes with correct claims and 15-min expiry
+  - **Test:** end a session, verify Redis subscriber receives the signal
 
 ---
 
@@ -102,67 +251,171 @@ The insurance policy RAG is the technical core. Build and validate before other 
 
 - [ ] **TASK-010:** Set up Qdrant collection + embedding model
   - Service: `services/track-b-rag`
-  - Initialize Qdrant `insurance_policies` collection (cosine, 1024 dims)
+  - Initialize Qdrant `insurance_policies` collection (cosine, 1024 dims) using the
+    idempotent get-or-create pattern in CLAUDE.md "Qdrant Initialization — Must Be
+    Idempotent." Do NOT use `recreate_collection()` in startup code — it deletes
+    all indexed policies on every service restart, which is a real bug carried
+    over from an earlier draft of this architecture and must not ship.
   - Load `BAAI/bge-large-en-v1.5` embedding model via sentence-transformers
-  - Startup health check that verifies Qdrant connection + model loaded
+  - `GET /health` returns `{"qdrant": "ok"|"error", "embedding_model": "ok"|"error"}`
+    — 200 only if both are ok, 503 otherwise
   - **Test:** embed a query string, verify vector shape is (1024,)
+  - **Test:** call ensure_collection() twice in a row against a populated collection,
+    verify no data loss (this is the regression test for the recreate_collection bug)
 
 - [ ] **TASK-011:** Policy ingestion pipeline
   - Service: `services/track-b-rag`
   - `POST /policies/ingest` accepts PDF file + metadata (payer, plan_type, state, policy_id)
+    — internal service-to-service endpoint only (called by policy-scraper and by
+    scripts/seed-policies.py), not exposed to any frontend app
   - PDF parsing via PyMuPDF (fitz) — handles multi-column medical policy docs
   - Chunking: RecursiveCharacterTextSplitter, chunk_size=800, overlap=150
+  - `content_hash` = SHA-256 hex digest of the raw PDF bytes (not the extracted
+    text — two PDFs with identical text but different formatting should still be
+    treated as distinct source files for audit purposes)
+  - Dedup behavior: if `policy_id` already exists in `insurance_policies` with a
+    matching `content_hash`, skip re-ingestion and return 200 with `{"status": "unchanged"}`.
+    If `policy_id` exists with a different hash, re-ingest (delete old Qdrant points
+    for that policy_id first, then insert new ones) and return `{"status": "updated"}`.
+    If `policy_id` is new, ingest and return `{"status": "created"}`.
   - Embed chunks + upsert to Qdrant with metadata payload
-  - Store metadata record in `insurance_policies` table (content hash for dedup)
+  - Store metadata record in `insurance_policies` table
   - **Test:** ingest a sample 10-page PDF, verify chunks appear in Qdrant
+  - **Test:** ingest the same PDF twice, verify second call returns "unchanged" and
+    does not duplicate Qdrant points
+  - **Test:** ingest a modified version of an existing policy_id, verify old points
+    are removed and "updated" is returned
 
 - [ ] **TASK-012:** Policy query endpoint
   - Service: `services/track-b-rag`
-  - `POST /policies/query` — accepts procedure, cpt_code, payer, plan_type, state, clinical_context
-  - Check Redis cache first: key = `rag:{payer}:{plan_type}:{state}:{cpt_code}`, TTL 24h
-  - If cache miss: embed query, search Qdrant (top 8, payer+state filter), call Claude Sonnet
-  - Claude prompt: analyze policy chunks against clinical context, return structured JSON:
-    `{requires_auth, auth_criteria, missing_criteria, denial_risk, nudge_message, step_therapy_required}`
-  - Cache the result, return to caller
+  - `POST /policies/query` — Pydantic request model:
+    `{procedure: str, cpt_code: str, payer: str, plan_type: str, state: str, clinical_context: dict}`
+  - Response model: `{requires_auth: bool, auth_criteria: list[str], missing_criteria: list[str],
+    denial_risk: Literal["low","medium","high"], nudge_message: str, step_therapy_required: bool,
+    step_therapy_details: str | None}`
+  - Cache key: `rag:{payer}:{plan_type}:{state}:{cpt_code}` per CLAUDE.md's Redis key list, TTL 24h
+  - If cache miss: embed query, search Qdrant (top 8, payer+state filter), call Claude
+    **Sonnet** via Bedrock (see CLAUDE.md "Bedrock Model Assignment" — this call site
+    is Sonnet, not Haiku, because it's multi-step reasoning over retrieved text)
+  - Claude is instructed to return only JSON. If the response fails to parse as valid
+    JSON matching the response model: retry once with the same prompt. If the retry
+    also fails, return a safe fallback: `{requires_auth: true, auth_criteria: [],
+    missing_criteria: [], denial_risk: "high", nudge_message: "Unable to verify
+    authorization requirements — confirm manually", step_therapy_required: false,
+    step_therapy_details: null}` and log the parse failure (no PHI in that log line —
+    log the payer/procedure/cpt_code, never clinical_context contents). Fail toward
+    "flag for manual review," never toward "assume no auth needed."
+  - Cache the result only on a real (non-fallback) response — don't cache the fallback
   - **Test:** query for "knee MRI" + "Aetna PPO MA" — verify structured JSON returned
   - **Test:** second identical query — verify Redis cache hit (no Bedrock call)
+  - **Test:** mock Bedrock returning malformed JSON — verify retry, then fallback,
+    verify fallback is not cached
 
 - [ ] **TASK-013:** Policy scraper (background CronJob)
   - Service: `services/policy-scraper`
   - Scrape CMS Medicare coverage database (NCD/LCD pages) — public, no auth required
-  - Download PDFs, hash content, skip if hash matches existing record
-  - Trigger ingestion pipeline for new/changed policies
+  - Respect the source: set a real User-Agent identifying this as MedAuth AI's scraper
+    with a contact email, add a delay between requests (1-2s), check for and honor
+    robots.txt. This is a research/dev-stage scraper against a public government
+    database, not a high-volume crawler — no need to parallelize aggressively.
+  - Download PDFs, hash content (SHA-256, matching TASK-011's content_hash), skip
+    if hash matches existing record for that policy_id
+  - Trigger ingestion via the TASK-011 `/policies/ingest` endpoint (internal call,
+    not duplicating ingestion logic here)
   - Kubernetes CronJob manifest: runs nightly at 2am UTC
-  - **Test:** run against CMS sandbox, verify at least one policy is downloaded + hashed
+  - **Test:** run against CMS sandbox/public pages, verify at least one policy is
+    downloaded + hashed. If CMS's page structure changes and this test starts
+    failing, that's a real signal the scraper needs updating — don't loosen the
+    test to mask it.
 
 - [ ] **TASK-014:** Seed Qdrant with real payer policies for dev
   - `scripts/seed-policies.py`
   - Download publicly available policy PDFs from: CMS (Medicare), Aetna, BCBS (public guidelines)
-  - Ingest into local Qdrant via TASK-011 endpoint
+  - Ingest into local Qdrant via TASK-011 `/policies/ingest` endpoint — reuses the
+    same dedup logic, so re-running this script is safe and idempotent
   - Focus on: orthopedic MRI (CPT 72148), knee arthroscopy (CPT 29881), biologic injections
+
+- [ ] **TASK-015:** Da Vinci CRD/DTR client — two-tier policy lookup
+  - Service: `services/track-b-rag`
+  - Background: CMS-0057-F mandates Medicare Advantage, Medicaid managed care,
+    CHIP, and ACA marketplace payers expose standardized FHIR-based prior
+    authorization APIs (Da Vinci CRD for "is auth required / what's needed,"
+    DTR for the actual documentation questionnaire) by January 1, 2027. This
+    does NOT cover commercial employer-sponsored plans, which remain the RAG
+    pipeline's primary job — CRD/DTR is an enhancement for the payers it
+    applies to, not a replacement for TASK-010 through TASK-014.
+  - Testable now, not blocked on 2027: the HL7 CRD Reference Implementation
+    (github.com/HL7-DaVinci/CRD) is a real, spec-conformant simulated payer
+    server you run locally via Docker — add it to docker-compose.yml alongside
+    the existing HAPI FHIR server. The HL7 CDS-Library
+    (github.com/HL7-DaVinci/CDS-Library) provides sample coverage-requirement
+    rule sets to load into it for realistic test scenarios. ONC's Inferno
+    (inferno.healthit.gov, CRD and DTR test kits) is the federal conformance
+    tester — running against it validates you're building to the actual
+    certification bar, not an approximation of it.
+  - `is_crd_supported(payer: str) -> bool` — a small config-driven lookup (start
+    with a hardcoded dict of known-mandated payer/plan-type combos; this becomes
+    real payer capability data over time, not something to over-engineer now)
+  - Modify TASK-012's `/policies/query` to try CRD first when
+    `is_crd_supported()` is true: call the payer's CRD endpoint via a CDS
+    Hooks request (order-select or order-sign hook), and if it returns
+    documentation requirements, use those directly — skip the RAG/Qdrant/Sonnet
+    path entirely for that call. On any CRD failure (timeout, unsupported
+    service, malformed response) or when `is_crd_supported()` is false, fall
+    through to the existing RAG path unchanged. The response model returned by
+    `/policies/query` stays identical either way — callers (TASK-021, TASK-040)
+    never know or care which path answered.
+  - **Test:** stand up the CRD Reference Implementation locally, load a sample
+    rule from CDS-Library, query `/policies/query` for a payer marked
+    `is_crd_supported=True`, verify the CRD path is used and RAG/Bedrock is not called
+  - **Test:** query for a payer marked `is_crd_supported=False`, verify RAG path
+    used as before (regression test — this task must not change existing behavior
+    for unsupported payers)
+  - **Test:** simulate a CRD timeout/error, verify fallback to RAG succeeds and
+    the caller gets a normal response, not an error
 
 ---
 
 ## Phase 2 — Audio Pipeline
 
 - [ ] **TASK-020:** Audio ingestion WebSocket server
+  - Prerequisite: TASK-006 (session lifecycle) — this task validates the JWT
+    that TASK-006 mints, it does not mint or manage sessions itself
   - Service: `services/audio-ingestion`
   - `WebSocket /ws/audio/{session_id}` — accepts raw audio chunks from client
-  - Validate session JWT before accepting connection (401 close if invalid)
+  - Validate the JWT from the `Authorization` header against `JWT_SIGNING_KEY`
+    before accepting the connection: verify signature, verify `exp` not passed,
+    verify the token's `session_id` claim matches the URL's `session_id`. Close
+    with code 4401 on any failure — do not accept the connection first and
+    validate after.
   - Buffer chunks in in-memory BytesIO — never write to disk
   - Forward stream to AWS Transcribe Medical streaming API
-  - On transcript segment received: publish to Redis channel `transcription:{session_id}`
+  - On transcript segment received: publish to Redis channel
+    `transcription:{session_id}` per CLAUDE.md's Redis key list
   - On disconnect: explicitly clear BytesIO buffer, close Transcribe stream
-  - **Test:** send 10 seconds of test audio WAV chunks, verify transcript events in Redis
+  - **Test:** send 10 seconds of test audio WAV chunks with a valid JWT, verify
+    transcript events in Redis
+  - **Test:** connect with an expired or malformed JWT, verify connection closes
+    with 4401 and no Transcribe stream is opened
 
 - [ ] **TASK-021:** Transcription event fan-out
-  - When transcript segment published to `transcription:{session_id}`:
-    - Track A consumer (in track-a-clinical) accumulates full transcript
-    - Track B consumer (in track-b-rag) scans for procedure order keywords
+  - Prerequisite: TASK-020 (publishes the events this task consumes), TASK-006
+    (session lifecycle — Track A's consumer needs to know when to start
+    accumulating and when the session it's tracking has ended)
+  - This is two separate consumers in two separate services, not one shared
+    fan-out component — each subscribes to the same Redis channel independently:
+    - Track A consumer lives in `services/track-a-clinical` (implemented as
+      part of TASK-030) — accumulates full transcript per session_id
+    - Track B consumer lives in `services/track-b-rag` — scans for procedure
+      order keywords, implemented in this task
+  - Subscribe to `transcription:{session_id}` per CLAUDE.md's Redis key list
   - Keyword detection list: MRI, CT scan, X-ray, biopsy, injection, arthroscopy,
     echocardiogram, stress test, biologic, chemotherapy, referral to [specialist]
-  - On keyword detected: extract context, call TASK-012 policy query endpoint
-  - **Test:** publish transcript with "let's order an MRI" — verify policy query fires
+  - On keyword detected: extract surrounding context (the sentence or two
+    containing the keyword), call TASK-012's `/policies/query` endpoint with
+    that context as `clinical_context`
+  - **Test:** publish transcript with "let's order an MRI" — verify policy
+    query fires with the correct extracted context
 
 - [ ] **TASK-022:** Mobile audio capture (React Native)
   - App: `apps/mobile`
@@ -184,18 +437,32 @@ The insurance policy RAG is the technical core. Build and validate before other 
 ## Phase 3 — Clinical Note Generation (Track A)
 
 - [ ] **TASK-030:** Transcript accumulation + SOAP generation
+  - Prerequisite: TASK-006 (session-end signal), TASK-020/021 (transcript events)
   - Service: `services/track-a-clinical`
-  - Subscribe to Redis `transcription:{session_id}`
-  - Accumulate segments into rolling transcript buffer per session
-  - On session end event: call Claude Sonnet via Bedrock with full transcript
-  - Prompt: generate SOAP note + extract ICD-10 codes + anticipated CPT codes
+  - Subscribe to `transcription:{session_id}` — accumulate segments into a rolling
+    transcript buffer per session, in-memory (not persisted mid-session; the
+    session is short enough that a service restart mid-encounter is an accepted
+    edge case for v1, not something to build recovery for yet)
+  - Subscribe to `session:ended:{session_id}` (published by TASK-006) — on
+    receipt, call Claude **Sonnet** via Bedrock with the full accumulated
+    transcript (see CLAUDE.md "Bedrock Model Assignment" — SOAP generation is
+    Sonnet; the ICD/CPT extraction pass below is Haiku)
+  - Prompt: generate SOAP note. Separately, run a Haiku extraction pass for
+    ICD-10 codes and anticipated CPT codes — two calls, not one, so the cheap
+    model handles the mechanical extraction and the expensive model focuses on
+    the clinical writing
   - Store result in `clinical_notes` table
   - **Test:** send sample orthopedic encounter transcript, verify SOAP structure returned
+  - **Test:** publish `session:ended:{session_id}` with an accumulated transcript
+    buffered from prior TASK-020 test data, verify clinical_notes row is created
 
 - [ ] **TASK-031:** Comprehend Medical validation layer
-  - After LLM extracts ICD-10 codes, validate with AWS Comprehend Medical InferICD10CM
+  - After LLM extracts ICD-10 codes (TASK-030's Haiku pass), validate with AWS
+    Comprehend Medical InferICD10CM
   - Flag any codes LLM returned that Comprehend Medical did not confirm (confidence < 0.8)
-  - Log discrepancies for quality monitoring
+  - Log discrepancies for quality monitoring — via standard `logging`, not
+    hipaa-logger (this is a quality metric, not a PHI access event; log the
+    code and confidence score, not the surrounding clinical text)
   - **Test:** run on transcript with 3 clear diagnoses, verify codes match
 
 - [ ] **TASK-032:** SOAP note review endpoint
@@ -209,32 +476,51 @@ The insurance policy RAG is the technical core. Build and validate before other 
 
 - [ ] **TASK-040:** Nudge emitter
   - Service: `services/track-b-rag`
-  - When policy query returns `missing_criteria` or `denial_risk = high`:
-    publish nudge to Redis `nudges:{session_id}`
-  - Nudge payload: `{type, procedure, cpt_code, message, missing_criteria, denial_risk, haptic}`
-  - Store nudge in `clinical_nudges` table
+  - When `/policies/query` (TASK-012) returns `missing_criteria` non-empty or
+    `denial_risk == "high"`: publish nudge to `nudges:{session_id}` per
+    CLAUDE.md's Redis key list
+  - Nudge payload: `{type: "PAYER_RULE_ALERT", procedure, cpt_code, message,
+    missing_criteria, denial_risk, haptic: bool}` — `haptic` is true only when
+    `denial_risk == "high"`
+  - Store nudge in `clinical_nudges` table (schema in TASK-005), get back the
+    row `id` — include it in the Redis payload as `nudge_id` so the client can
+    later acknowledge this specific nudge
   - **Test:** trigger policy query with known missing criteria, verify Redis pub
+    includes a valid nudge_id matching the stored row
 
 - [ ] **TASK-041:** Nudge WebSocket relay
+  - Prerequisite: TASK-006 (JWT), same auth pattern as TASK-020
   - Service: `services/nudge-service`
-  - `WebSocket /ws/nudges/{session_id}`
-  - Subscribe to Redis `nudges:{session_id}`
+  - `WebSocket /ws/nudges/{session_id}` — same JWT validation as TASK-020
+    (verify signature, exp, session_id claim match; 4401 on failure)
+  - Subscribe to `nudges:{session_id}`
   - Forward each nudge event to connected client in real time
   - On client disconnect: unsubscribe from Redis channel
   - **Test:** publish nudge to Redis, verify it appears at WebSocket client
+  - **Test:** connect with invalid JWT, verify 4401 close
+
+- [ ] **TASK-041b:** Nudge acknowledge endpoint
+  - Service: `services/track-b-rag` (owns the clinical_nudges write from TASK-040)
+  - `PATCH /nudges/{nudge_id}/acknowledge` — sets `acknowledged=true`,
+    `acknowledged_at=NOW()`. This is what TASK-042's dismiss button calls —
+    it was referenced by the UI task but never specified as its own endpoint
+    until now.
+  - **Test:** acknowledge a nudge, verify row updated
 
 - [ ] **TASK-042:** Nudge UI component (web)
   - App: `apps/web`
   - `<NudgeOverlay sessionId={...} />` — subscribes to nudge WebSocket
   - High-contrast banner, color-coded by denial_risk (yellow/orange/red)
-  - Dismiss button — marks nudge acknowledged via API call
+  - Dismiss button calls `PATCH /nudges/{nudge_id}/acknowledge` (TASK-041b)
+    using the `nudge_id` included in the WebSocket payload
   - Accessible (ARIA role=alert, focus management)
   - **Test:** render with mock WebSocket, verify alert appears on message
+  - **Test:** click dismiss, verify acknowledge endpoint is called with correct nudge_id
 
 - [ ] **TASK-043:** Haptic nudge (mobile)
   - App: `apps/mobile`
   - On nudge received with `haptic: true`: call `Haptics.notificationAsync()`
-  - Same visual alert as web
+  - Same visual alert as web, same dismiss-calls-acknowledge behavior (TASK-041b)
   - **Test:** mock WebSocket message, verify Haptics mock called
 
 ---
@@ -346,17 +632,32 @@ logic do not change.
 ## Phase 6 — Prior Auth Bundle Assembly
 
 - [ ] **TASK-060:** Bundle assembler
+  - Prerequisite: TASK-006 (session:ended signal), TASK-030 (clinical_notes must
+    exist before this runs), TASK-040 (clinical_nudges), TASK-052 (FHIR patient data)
   - Service: `services/prior-auth`
-  - Triggered on session end (subscribe to `session:ended:{session_id}`)
-  - Fetches: clinical_note (Track A), nudges fired (Track B), patient FHIR data
-  - Assembles `prior_auth_bundle`: patient, provider, procedures, diagnoses, clinical evidence
+  - Subscribe to `session:ended:{session_id}` per CLAUDE.md's Redis key list
+  - On receipt: fetch clinical_note (by encounter's session_id), nudges fired
+    during the encounter, and patient FHIR context (via fhir-integration's
+    `/fhir/patient/{patient_id}/context` from TASK-052)
+  - Assembles `prior_auth_bundle`: patient, provider, procedures (from nudges'
+    procedure_name/cpt_code), diagnoses (from clinical_note's icd10_codes),
+    clinical evidence (relevant transcript excerpts — not the full transcript,
+    just the segments tied to flagged procedures)
   - Stores in `prior_auth_requests` table with status = 'pending'
+  - Note: this task has a soft race condition — if session:ended fires before
+    TASK-030's SOAP generation finishes (Sonnet call can take a few seconds),
+    the clinical_note won't exist yet. Handle by retrying with backoff (3
+    attempts, 2s/4s/8s) before giving up and logging a warning — do not fail silently.
   - **Test:** assemble bundle from test encounter data, verify all fields populated
+  - **Test:** publish session:ended before clinical_notes row exists, verify retry
+    behavior succeeds once the row appears
 
 - [ ] **TASK-061:** Submission router
   - Service: `services/prior-auth`
   - `POST /prior-auth/{request_id}/submit`
-  - Checks payer capabilities: supports FHIR PAS? → use TASK-053. Otherwise → CoverMyMeds API
+  - Checks payer capabilities: supports FHIR PAS? → calls fhir-integration's
+    `/fhir/prior-auth` (TASK-054, which itself routes to the right adapter).
+    Otherwise → CoverMyMeds API directly from this service.
   - Updates `prior_auth_requests.status` and `submission_method`
   - **Test:** mock both submission paths, verify correct one chosen per payer config
 
@@ -365,20 +666,43 @@ logic do not change.
 ## Phase 7 — Provider Dashboard (Web App)
 
 - [ ] **TASK-070:** Session management UI
-  - Start session (select patient from FHIR search, begin recording)
-  - Active session view (live transcript, nudge overlay, clinical checklist)
-  - End session (triggers SOAP generation + bundle assembly)
+  - App: `apps/web`
+  - Start session: patient search via `GET /fhir/patient/search?query=...` (add
+    this search route to fhir-integration if not already covered by TASK-052 —
+    flag if it's missing rather than assuming it exists), then
+    `POST /sessions/start` (TASK-006) with the selected patient, begin audio
+    capture (TASK-023) once session_id + jwt are returned
+  - Active session view: live transcript display (subscribe to a display-only
+    read of `transcription:{session_id}` — reuse the nudge-service WebSocket
+    pattern from TASK-041 rather than inventing a new relay), `<NudgeOverlay>`
+    (TASK-042), and a simple checklist of flagged procedures pending documentation
+  - End session: calls `POST /sessions/{session_id}/end` (TASK-006), stops
+    audio capture, navigates to the note review screen (TASK-071)
+  - **Test:** component tests for start/active/end state transitions with mocked APIs
 
 - [ ] **TASK-071:** Note review + edit UI
-  - Display generated SOAP note in editable form
-  - Provider can edit any section before EHR write-back
-  - One-click write-back to EHR
-  - Show ICD-10 and CPT codes extracted, allow corrections
+  - App: `apps/web`
+  - `GET /notes/{encounter_id}` (TASK-032) — display generated SOAP note in an
+    editable form, one text area per SOAP section
+  - Provider can edit any section; "Save" calls `PATCH /notes/{encounter_id}`
+    (TASK-032), which sets `provider_edited = true`
+  - "Write to EHR" button calls fhir-integration's `POST /fhir/notes` (TASK-053)
+  - Show ICD-10 and CPT codes extracted (from clinical_notes.icd10_codes /
+    cpt_codes), editable as a tag-style list — allow add/remove, save via the
+    same PATCH endpoint
+  - **Test:** load a note, edit a section, save, verify PATCH called with correct diff
 
 - [ ] **TASK-072:** Prior auth status dashboard
-  - List of all prior auth requests with status (pending, submitted, approved, denied)
-  - Denial reason display
-  - Resubmission flow for denied requests
+  - App: `apps/web`
+  - `GET /prior-auth?status=` (add this list endpoint to `services/prior-auth`
+    if not already covered — flag if missing) — list all prior auth requests
+    with status (pending, submitted, approved, denied)
+  - Denial reason display (`prior_auth_requests.denial_reason`)
+  - Resubmission flow for denied requests: calls `POST /prior-auth/{request_id}/submit`
+    again (TASK-061) — same endpoint, submission_method may differ if the first
+    attempt's method is known to have failed
+  - **Test:** render list with mixed statuses, verify denial reason shown only
+    for denied items, verify resubmit button only shown for denied items
 
 ---
 
@@ -396,4 +720,16 @@ logic do not change.
 
 6. **Every new API route needs:** (a) Pydantic request/response models, (b) hipaa-logger call, (c) OpenAPI docstring, (d) at least one integration test.
 
-7. **TASK numbers must be recorded in commit messages.** Format: `feat(track-b-rag): implement policy query endpoint [TASK-012]`
+7. **TASK numbers must be recorded in commit messages.** Format: `feat(track-b-rag): implement policy query endpoint [TASK-012]`, each commit must follow the Git 50/72 commit rule (See CLAUDE.md for more details).
+
+8. **Session lifecycle is centralized in TASK-006.** Nothing else mints or validates
+   session JWTs independently — audio-ingestion, nudge-service, and any future
+   real-time endpoint all validate against the same `POST /sessions/start`-issued
+   token. Do not build a parallel auth mechanism for convenience.
+
+9. **Two endpoints are flagged as possibly-missing, not assumed-present:**
+   FHIR patient search (`GET /fhir/patient/search`, needed by TASK-070) and
+   prior-auth list (`GET /prior-auth?status=`, needed by TASK-072). If you reach
+   either task and the endpoint doesn't exist yet, add it as part of that task
+   rather than assuming it was built elsewhere — flag it back if the scope is
+   unclear, same as any other gap found so far.

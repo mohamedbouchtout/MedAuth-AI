@@ -188,6 +188,7 @@ Body explains why, wrapped at 72 columns. What changed is visible in
 the diff; the body is for the reasoning that is not.
 <blank>
 Co-Authored-By: ...
+Authored-By: ...
 ```
 
 ## Key Architectural Constraints
@@ -197,6 +198,102 @@ Co-Authored-By: ...
 - **Qdrant for vector store.** Do not use Pinecone or Weaviate — we self-host for PHI control even though insurance policy text is not PHI (defense in depth).
 - **Cache RAG results in Redis** with 24h TTL keyed by `rag:{payer}:{plan_type}:{state}:{cpt_code}`. This is a major cost lever — implement it from the start.
 - **Haiku for extraction tasks, Sonnet for reasoning.** ICD/CPT entity extraction → Haiku. SOAP generation and payer policy analysis → Sonnet. Costs 15x less per extraction call.
+- **Policy lookup is two-tier, not RAG-only.** For payers covered by the CMS-0057-F
+  mandate (Medicare Advantage, Medicaid managed care, CHIP, ACA marketplace),
+  `/policies/query` (TASK-012) tries the Da Vinci CRD/DTR standardized API first
+  (TASK-015) and only falls back to the RAG/Qdrant/Sonnet path (TASK-010–014) on
+  failure or for unsupported payers. Commercial employer-sponsored plans — the
+  bulk of what private practices see — are not covered by the mandate and stay
+  on the RAG path for the foreseeable future. Both paths return the same response
+  shape; callers never branch on which one answered.
+
+### Session Lifecycle & JWT Issuance (read before Phase 1/2/3/4 tasks)
+This is the one piece every real-time service depends on but nothing explicitly
+creates until now — Phase 2's audio-ingestion task validates a "session JWT" that
+otherwise has no issuer. Fixed here:
+- `services/track-a-clinical` owns session lifecycle, because it owns the
+  `encounters` table (TASK-005).
+- `POST /sessions/start` — body: `{patient_id, provider_id, ehr_encounter_id}`.
+  Creates an `encounters` row (`status='active'`), mints a short-lived JWT
+  (15 min, matching the auth conventions in Security section) with claims
+  `{session_id, provider_id, exp}`, returns `{session_id, jwt}`.
+  This is what apps/web and apps/mobile call when a provider taps "start visit."
+- `POST /sessions/{session_id}/end` — sets `encounters.status='completed'`,
+  `ended_at=NOW()`, and publishes `session:ended:{session_id}` to Redis
+  (empty payload — it's a signal, not a data carrier). This is the trigger
+  TASK-030 (SOAP generation) and TASK-060 (prior auth bundle assembly) both
+  subscribe to.
+- The JWT is what `audio-ingestion` (TASK-020) and `nudge-service` (TASK-041)
+  validate before accepting a WebSocket connection. Signing secret is
+  `JWT_SIGNING_KEY` in `.env.example` — symmetric (HS256) is fine for v1,
+  every service is first-party.
+- This session-start/session-end pair did not exist as its own task in earlier
+  drafts of this file — it is now **TASK-006**, added to Phase 0, and it is a
+  prerequisite for TASK-020, TASK-021, TASK-030, TASK-041, and TASK-060. Do not
+  start those without TASK-006 done first.
+
+### Redis Key Naming — Canonical List
+Every task below should use these exact patterns, not invent variants:
+```
+transcription:{session_id}      pub/sub — raw transcript segments, published by
+                                 audio-ingestion (TASK-020), consumed by
+                                 track-a-clinical (TASK-030) and track-b-rag (TASK-021)
+nudges:{session_id}              pub/sub — nudge events, published by track-b-rag
+                                 (TASK-040), consumed by nudge-service (TASK-041)
+session:ended:{session_id}       pub/sub — empty-payload signal, published by
+                                 track-a-clinical (TASK-006), consumed by
+                                 track-a-clinical itself (TASK-030) and
+                                 prior-auth (TASK-060)
+rag:{payer}:{plan_type}:{state}:{cpt_code}
+                                  cache, 24h TTL — policy query results
+                                  (TASK-012)
+fhir_session:{state_param}       cache, TTL = OAuth flow timeout (~10 min) —
+                                  transient SMART launch state (TASK-051)
+fhir_token:{session_id}          cache, TTL = token expiry — EHR access token
+                                  + fhir_base_url + ehr_type (TASK-051)
+```
+Lowercase, colon-separated, most-specific segment last. If a task needs a new
+Redis key pattern not listed here, add it to this list in the same PR.
+
+### Qdrant Initialization — Must Be Idempotent
+`qdrant.recreate_collection()` deletes and rebuilds the collection — calling it
+on every service startup would wipe all indexed insurance policies every time
+`track-b-rag` restarts. Use a get-or-create pattern instead:
+```python
+from qdrant_client.http.exceptions import UnexpectedResponse
+
+
+def ensure_collection(client: QdrantClient, name: str, vector_size: int):
+    try:
+        client.get_collection(name)
+    except UnexpectedResponse:
+        client.create_collection(
+            collection_name=name,
+            vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+        )
+```
+`recreate_collection` is acceptable only in a one-off dev reset script that a
+human runs deliberately — never in application startup code.
+
+### Bedrock Model Assignment (concrete, per call site)
+The "Haiku for extraction, Sonnet for reasoning" rule above, made specific:
+| Call site | Model | Why |
+|---|---|---|
+| TASK-012 policy query analysis | Sonnet | Multi-step reasoning over retrieved policy text |
+| TASK-030 SOAP note generation | Sonnet | Long-form structured clinical writing |
+| TASK-030 ICD-10/CPT extraction (LLM pass) | Haiku | Extraction, not reasoning — validated against Comprehend Medical in TASK-031 anyway |
+| TASK-013 policy scraper (if any LLM cleanup used) | Haiku | Simple text cleanup, not analysis |
+Reference `BEDROCK_MODEL_SONNET` / `BEDROCK_MODEL_HAIKU` from `.env.example` —
+never hardcode a model ID string in application code.
+
+### Migration Ownership vs. Table Write Access (clarifies TASK-005)
+"Owns the schema" means owns the Alembic migration history for those tables —
+it does not mean only that service may read/write them. `clinical_nudges` is
+migrated by track-a-clinical but written by track-b-rag; `prior_auth_requests`
+is migrated by track-a-clinical but written by prior-auth. Every service
+connects to the same Postgres instance via `DATABASE_URL` and uses SQLAlchemy
+models generated from the same schema — only migration authorship is centralized,
+not query access.
 
 ### packages/hipaa-logger — Design Decisions (locked, do not revisit)
 **Scope note (read first):** this package is NOT a general application logger.
@@ -391,7 +488,11 @@ Path filter groups (each maps to a test job):
   triggering service jobs via the packages/** wildcard below, and never
   actually ran its own tests. Fixed: packages get dedicated jobs too.)
 - `crypto-utils`: packages/crypto-utils/**
-- `fhir-types`: packages/fhir-types/**
+- `fhir-types`: packages/fhir-types/** — this job runs BOTH checks: pytest against
+  the Pydantic models AND `tsc --noEmit` against packages/fhir-types/typescript/.
+  It is the only package with two languages in one job. The TypeScript side is
+  its own npm workspace (see TASK-004) so tsc actually catches drift between
+  the Pydantic models and their TS mirrors, not just compiles them in isolation.
 - `track-b-rag`: services/track-b-rag/** or packages/**
 - `track-a-clinical`: services/track-a-clinical/** or packages/**
 - `audio-ingestion`: services/audio-ingestion/** or packages/**
