@@ -32,33 +32,51 @@ Claude Code should read this before starting any task to understand current stat
     - `CODEOWNERS` — you own everything for now
   - **Test:** open a draft PR against main, verify ci.yml triggers and runs
 
-- [ ] **TASK-002:** Create shared `packages/hipaa-logger`
+- [x] **TASK-002:** Create shared `packages/hipaa-logger`
   - Owns its own audit_log table — see CLAUDE.md "hipaa-logger — Design Decisions"
     for the full schema and the reasoning for this ownership split
   - Alembic migration in `packages/hipaa-logger/migrations/` creating the audit_log table
-    (this migration must run before any service-level migration — see TASK-005 note)
-  - Alembic `version_table = "alembic_version_hipaa_logger"` — never the default
-    `alembic_version`, which two migration setups sharing one database would corrupt
+  - Set `version_table="alembic_version_hipaa_logger"` in this migration's env.py —
+    see CLAUDE.md "Alembic version table isolation." Every future Alembic setup in
+    this repo follows the same `alembic_version_{name}` pattern.
   - Raw asyncpg (not SQLAlchemy) — self-managed lazy connection pool from DATABASE_URL,
     with an injection hook accepting an optional `conn` param for tests and for callers
     that want the audit write inside their own transaction
-  - Defensive DSN normalization: strip a SQLAlchemy driver suffix (`postgresql+asyncpg://`
-    → `postgresql://`) so one DATABASE_URL value works for every consumer
+  - Strip the `+asyncpg` driver suffix from DATABASE_URL defensively on connect —
+    see CLAUDE.md "DATABASE_URL format" for the one-liner. Don't require a second env var.
   - `async def audit_log(actor_id, action, resource_type, resource_id, session_id, service_name, request_id=None, ip_address=None, user_agent=None, conn=None)`
+    — exact signature is in CLAUDE.md, keep them in sync if either changes
   - Unit tests with mocked asyncpg (mock the pool/connection, not a real DB)
   - Integration test against real local Postgres: run the migration, call audit_log(),
     verify the row lands with correct columns
-  - Update `.github/workflows/ci.yml` so packages/ get their own path-filter entries
-    and test jobs — before this, a packages/ change only triggered service jobs and
-    package tests never ran at all
-  - **Test:** open a PR touching only `packages/hipaa-logger/**` and confirm the
-    hipaa-logger job runs
+  - Update `.github/workflows/ci.yml` (created in TASK-001) to add a dedicated
+    `hipaa-logger` path-filter entry and test job — the original ci.yml only
+    triggered service jobs on packages/** changes and never ran the package's
+    own tests. See CLAUDE.md CI section for the corrected path filter list.
+    Verify: open a PR touching only packages/hipaa-logger/**, confirm the
+    hipaa-logger job runs and no service jobs run unnecessarily.
 
-- [ ] **TASK-003:** Create shared `packages/crypto-utils`
+- [x] **TASK-003:** Create shared `packages/crypto-utils`
   - AES-256-GCM encrypt/decrypt using a KEK from AWS KMS + per-record DEK
   - `encrypt_field(plaintext: str, context: dict) -> EncryptedField`
   - `decrypt_field(encrypted: EncryptedField, context: dict) -> str`
+  - Bind `context` in both places: as KMS encryption context on the DEK wrap/unwrap
+    AND as AES-GCM AAD on the local encrypt/decrypt — see CLAUDE.md "crypto-utils —
+    Design Decisions" for why. A context mismatch on decrypt must raise, not silently
+    proceed with the wrong key or the wrong field binding.
+  - HIPAA constraint: plaintext DEKs and plaintext field values must never appear in
+    any log line, exception message, or stack trace — including inside the crypto
+    primitives themselves, not just at PHI-touching call sites.
+  - Moto (`@mock_aws`) for all KMS mocking — not hand-rolled unittest.mock on boto3
   - Unit tests with mocked KMS
+  - Verify CI collects these tests under a dedicated `crypto-utils` job, not folded
+    into `hipaa-logger`'s job — confirm by checking the path-filter output on a PR
+    that touches only packages/crypto-utils/**
+  - Verified on PR #18 (54 tests, 91% coverage): the run produced
+    `Test (packages/crypto-utils)` and `Type-check (mypy) (packages/crypto-utils)`
+    as their own jobs, and no hipaa-logger job at all. ci.yml needed no change —
+    TASK-002 already replaced the old path-filter groups with full workspace-member
+    paths, so every packages/ directory gets its own job automatically.
 
 - [ ] **TASK-004:** Create shared `packages/fhir-types`
   - Pydantic v2 models for FHIR R4 resources used by this project
@@ -67,7 +85,6 @@ Claude Code should read this before starting any task to understand current stat
 
 - [ ] **TASK-005:** Initialize database schema + migrations
   - Create Alembic setup in `services/track-a-clinical` (owns the domain schema)
-  - `version_table = "alembic_version_track_a_clinical"` — see constraint 8 below
   - Tables: encounters, clinical_notes, clinical_nudges, prior_auth_requests,
     insurance_policies (see architecture doc for full schema)
   - Note: audit_log is NOT created here — it's owned by packages/hipaa-logger
@@ -380,9 +397,3 @@ logic do not change.
 6. **Every new API route needs:** (a) Pydantic request/response models, (b) hipaa-logger call, (c) OpenAPI docstring, (d) at least one integration test.
 
 7. **TASK numbers must be recorded in commit messages.** Format: `feat(track-b-rag): implement policy query endpoint [TASK-012]`
-
-8. **Namespace every Alembic version table.** Each migration setup sets
-   `version_table = "alembic_version_{name}"` in its `env.py` — `alembic_version_hipaa_logger`
-   for packages/hipaa-logger, `alembic_version_track_a_clinical` for track-a-clinical, and the
-   same pattern for every future service. Multiple setups share one database; on the default
-   `alembic_version` table each would read another's revision as its own head.
