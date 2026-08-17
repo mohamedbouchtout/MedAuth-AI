@@ -1,0 +1,29 @@
+{
+  // Strict beyond `strict: true`, because this package is nothing but shapes — if
+  // the types are loose here the looseness spreads to every screen that reads a
+  // patient record. `exactOptionalPropertyTypes` in particular matters for FHIR:
+  // an absent element and an element explicitly set to undefined are different
+  // things, and only the first is legal to send.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "rootDir": "src",
+    "outDir": "dist",
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmitOnError": true
+  },
+  "include": ["src"]
+}
