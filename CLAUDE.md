@@ -295,6 +295,30 @@ connects to the same Postgres instance via `DATABASE_URL` and uses SQLAlchemy
 models generated from the same schema — only migration authorship is centralized,
 not query access.
 
+### Where the shared SQLAlchemy models live (cross-cutting — applies to every task)
+The mapped classes for the five core tables live in
+`services/track-a-clinical/src/track_a_clinical/models/`, one module per table,
+exported from the package `__init__`. Every service that touches those tables
+imports from there rather than mapping its own class against the same table:
+
+```python
+from track_a_clinical.models import ClinicalNudge, Encounter
+```
+
+A second definition of a table drifts away from the migration history and from
+the first definition, and nothing catches it until a write fails in production.
+TASK-006, TASK-030, TASK-040 and TASK-060 all write these tables and all import
+these classes.
+
+That import path is why `services/track-a-clinical` builds
+`src/track_a_clinical/` rather than a bare `src/`, the way `packages/*` already
+do. Every other service still declares `packages = ["src"]` in its
+`pyproject.toml`, so they all install a top-level module named `src` and shadow
+each other in the shared venv — `import src.models` resolves to whichever
+service sorts first. That is tolerable while nothing imports across service
+boundaries, and each of those services should move to a named package as it
+grows code worth importing.
+
 ### packages/hipaa-logger — Design Decisions (locked, do not revisit)
 **Scope note (read first):** this package is NOT a general application logger.
 It writes one specific thing — a compliance audit trail row per PHI access —

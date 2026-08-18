@@ -127,7 +127,7 @@ Claude Code should read this before starting any task to understand current stat
       this package on purpose — the matrix keeps packages under uniform rules, the
       dedicated job stays meaningful on its own.
 
-- [ ] **TASK-005:** Initialize database schema + migrations
+- [x] **TASK-005:** Initialize database schema + migrations
   - Create Alembic setup in `services/track-a-clinical` (owns migration authorship —
     see CLAUDE.md "Migration Ownership vs. Table Write Access" for what this does
     and doesn't mean; other services read/write these tables via the same
@@ -227,6 +227,43 @@ Claude Code should read this before starting any task to understand current stat
     to Synthea patient IDs (requires TASK-052 / local HAPI FHIR to have patients
     loaded first — if run before then, seed with placeholder patient_fhir_id
     values and note that in a code comment)
+  - **Test:** `alembic upgrade head` creates all five tables and all seven indexes
+  - **Test:** `alembic downgrade base` drops all five and leaves audit_log and
+    hipaa-logger's version table standing — the histories are independent in both
+    directions, not just on the way up
+  - **Test:** the namespaced version table exists and `alembic_version` does not
+  - **Test:** `compare_metadata` against the migrated database returns no
+    differences, so the models and the migration cannot drift apart silently
+  - **Test:** seed script smoke — inserts 5 encounters, a second run inserts none,
+    and a missing DATABASE_URL exits non-zero with a message rather than a traceback
+  - Built (28 tests, 100% coverage). Decisions worth knowing before touching this:
+    - The mapped classes live in `src/track_a_clinical/models/`, one module per
+      table, and are the single definition of these tables for the whole monorepo
+      — see CLAUDE.md "Where the shared SQLAlchemy models live." The service builds
+      a named package rather than a bare `src/` precisely so other services can
+      import them; every other service still ships a top-level `src` and they
+      shadow one another in the shared venv.
+    - `env.py` sets `target_metadata = Base.metadata` rather than `None` (which is
+      what hipaa-logger does, since it writes SQL by hand). That is what makes the
+      autogenerate-diff test possible, and it is the only mechanism that catches a
+      model edited without a migration.
+    - `include_object` excludes `audit_log` and `alembic_version_hipaa_logger`.
+      Without it, autogenerate in this service would propose dropping tables that
+      belong to hipaa-logger's history simply because they are absent from these
+      models.
+    - `clinical_nudges` and `prior_auth_requests` have no `deleted_at`, matching
+      the schema above. They are records of what the system did — a nudge shown to
+      a provider, a bundle sent to a payer — so nothing retires them, the same
+      reasoning that keeps audit_log append-only. `encounters` and `clinical_notes`
+      do get the soft-delete column.
+    - The seed script derives every id with `uuid5` from a fixed namespace, so
+      re-running it is a no-op instead of a duplicate. `patient_fhir_id` values are
+      `synthea-placeholder-N` until TASK-052 loads HAPI FHIR; the module docstring
+      says what to swap them for.
+    - CI needed no new job. The existing `test` matrix now runs
+      `scripts/init-db.sh` after `uv sync` and before pytest, so every member finds
+      the schema already applied — `track-a-clinical`'s own integration tests
+      re-run `upgrade head` anyway, which is a no-op on a current database.
 
 - [ ] **TASK-006:** Session lifecycle endpoints
   - Service: `services/track-a-clinical` (owns the encounters table)
