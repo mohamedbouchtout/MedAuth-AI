@@ -36,7 +36,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "T20"]  # T20 bans print() — see 
 [tool.ruff.lint.isort]
 # Workspace packages are installed from source, so isort would otherwise sort them
 # in with third-party imports.
-known-first-party = ["hipaa_logger", "crypto_utils", "fhir_types", "src"]
+known-first-party = ["hipaa_logger", "crypto_utils", "fhir_types", "track_a_clinical", "src"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
