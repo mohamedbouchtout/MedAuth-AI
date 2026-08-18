@@ -243,6 +243,14 @@ jobs:
 
       - run: uv sync --all-packages
 
+      # Every member runs against the same Postgres service container, so the
+      # schema has to exist before any of them collect. init-db.sh applies both
+      # histories in dependency order — hipaa-logger's audit_log first, then
+      # track-a-clinical's core tables. Idempotent, so members whose tests
+      # migrate again themselves are unaffected.
+      - name: Apply migrations
+        run: ./scripts/init-db.sh
+
       - name: pytest ${{ matrix.member }}
         working-directory: ${{ matrix.member }}
         shell: bash
