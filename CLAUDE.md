@@ -32,6 +32,7 @@ medauth-ai/
 │   ├── nudge-service/    # Redis pub/sub → WebSocket relay to clients
 │   └── policy-scraper/   # Nightly insurance policy PDF ingestion CronJob
 ├── packages/
+│   ├── api-envelope/     # Shared HTTP response envelope + FastAPI error handlers
 │   ├── hipaa-logger/     # Shared audit logging — every service imports this
 │   ├── fhir-types/       # Shared FHIR R4 type definitions (Python + TypeScript)
 │   └── crypto-utils/     # AES-256 helpers used across services
@@ -338,6 +339,36 @@ Rename to `src/track_b_rag/` and declare `medauth-track-a-clinical` as a
 dependency in TASK-010, while the service is still empty — cheaper now than
 as churn after TASK-011 through TASK-015 exist.
 
+### packages/api-envelope — Design Decisions (locked, do not revisit)
+**Scope note (read first):** this package is the single definition of the HTTP
+response envelope fixed in the API Design section above — `{"data": ..., "error":
+null}` and `{"data": null, "error": {...}}` — plus the FastAPI exception handlers
+that put FastAPI's own failure paths into it. It is **not** a shared web
+framework: no routes, no authentication, no dependencies, no middleware. A
+service's domain surface stays in that service.
+- **Every service imports it; no service defines its own envelope.** It was
+  extracted in TASK-010, when `track-b-rag` became the second consumer and
+  started as a copy of `track-a-clinical`'s. Two hand-maintained definitions of
+  a cross-service contract drift apart, for exactly the reason given above for
+  centralising the shared SQLAlchemy models. Any service added later imports
+  from here — copying it again is the thing this package exists to prevent.
+- **The validation handler never echoes a rejected value.** FastAPI's
+  `RequestValidationError.errors()` reports the offending field *and can include
+  what was sent*, and request bodies in this monorepo carry patient identifiers
+  and clinical context. The handler reports field *locations* only. This is a
+  HIPAA constraint living inside the primitive, not a rule call sites are
+  trusted to remember.
+- **`error_responses()` carries generic per-status wording, overridable per
+  route.** Pass `descriptions={404: "..."}` when a route's failure means
+  something more specific than the default; an undeclared status raises rather
+  than publishing a spec with an invented description.
+- **`GET /health` is the one documented departure from the envelope's failure
+  half.** A 503 from a health endpoint returns `data` populated with the
+  per-dependency flags and `error: null` — the request succeeded, the answer is
+  "unhealthy", and moving the flags into the error half would discard the only
+  diagnostic the endpoint has. See the hipaa-logger scope note below for the
+  matching audit exemption.
+
 ### packages/hipaa-logger — Design Decisions (locked, do not revisit)
 **Scope note (read first):** this package is NOT a general application logger.
 It writes one specific thing — a compliance audit trail row per PHI access —
@@ -535,6 +566,7 @@ Path filter groups (each maps to a test job):
 - `hipaa-logger`: packages/hipaa-logger/**  (own job — was previously only
   triggering service jobs via the packages/** wildcard below, and never
   actually ran its own tests. Fixed: packages get dedicated jobs too.)
+- `api-envelope`: packages/api-envelope/**
 - `crypto-utils`: packages/crypto-utils/**
 - `fhir-types`: packages/fhir-types/** — this job runs BOTH checks: pytest against
   the Pydantic models AND `tsc --noEmit` against packages/fhir-types/typescript/.
