@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from track_a_clinical.api.envelope import ApiError, ApiResponse
+from api_envelope import ApiError, ApiResponse
 
 __all__ = ["ApiError", "ApiResponse"]
