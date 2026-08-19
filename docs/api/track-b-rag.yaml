@@ -1,0 +1,104 @@
+openapi: 3.1.0
+
+# The published contract for services/track-b-rag.
+#
+# Kept in step with the FastAPI app by
+# services/track-b-rag/tests/unit/api/test_openapi_contract.py, which fails if a
+# route, method or status code here drifts from the application. Update this
+# file in the same change that adds or alters a route.
+
+info:
+  title: MedAuth AI — track-b-rag
+  version: 0.1.0
+  description: >-
+    Insurance policy retrieval-augmented generation. Owns the Qdrant
+    `insurance_policies` collection and the local `BAAI/bge-large-en-v1.5`
+    embedding model. Policy ingestion (`/policies/ingest`) and the query
+    endpoint (`/policies/query`) arrive in TASK-011 and TASK-012.
+
+servers:
+  - url: http://localhost:8002
+    description: Local development (see the port table in CLAUDE.md)
+
+tags:
+  - name: health
+    description: Readiness of this service's backing dependencies.
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      operationId: health
+      summary: Service health
+      description: >-
+        Reports whether Qdrant and the embedding model are both usable. 200 when
+        both are `ok`, 503 when either is `error`. The body is the standard
+        envelope in both cases and always names the individual dependencies, so
+        a failing probe is diagnosable from the response alone — a 503 carries
+        `data`, not `error`, because the request itself succeeded.
+
+        Unauthenticated and deliberately unaudited: this is what the Kubernetes
+        readiness probe calls, it exposes no patient data, and CLAUDE.md exempts
+        health endpoints from the hipaa-logger requirement.
+      responses:
+        '200':
+          description: Readiness of the vector store and the embedding model.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: At least one dependency is unreachable. The body names which.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+components:
+  schemas:
+    ComponentStatus:
+      type: string
+      enum: [ok, error]
+
+    HealthData:
+      type: object
+      required: [qdrant, embedding_model]
+      properties:
+        qdrant:
+          $ref: '#/components/schemas/ComponentStatus'
+          description: Whether the Qdrant vector store answers.
+        embedding_model:
+          $ref: '#/components/schemas/ComponentStatus'
+          description: >-
+            Whether the local sentence-transformers model is loaded and usable.
+            The first probe after startup pays for the load, so it can report
+            `error` briefly while the weights come into memory.
+
+    HealthResponse:
+      type: object
+      description: The standard envelope, carrying health flags.
+      required: [data, error]
+      properties:
+        data:
+          oneOf:
+            - $ref: '#/components/schemas/HealthData'
+            - type: 'null'
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/Error'
+            - type: 'null'
+
+    Error:
+      type: object
+      description: >-
+        The error half of the envelope. Health never populates it; the shared
+        error handlers do, for routes that fail.
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - validation_error
+            - http_error
+        message:
+          type: string
