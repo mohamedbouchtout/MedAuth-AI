@@ -18,6 +18,7 @@ class FakeClient:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
         self.ensured: list[tuple[str, int]] = []
+        self.indexed: list[str] = []
         self.closed = False
 
     def close(self) -> None:
@@ -44,6 +45,12 @@ def fake_client(monkeypatch: pytest.MonkeyPatch) -> FakeClient:
         return True
 
     monkeypatch.setattr(main, "ensure_collection", ensure)
+
+    def ensure_indexes(passed: Any, name: str) -> tuple[str, ...]:
+        client.indexed.append(name)
+        return ()
+
+    monkeypatch.setattr(main, "ensure_payload_indexes", ensure_indexes)
     return client
 
 
@@ -63,6 +70,26 @@ async def test_startup_uses_the_configured_dimensions(
     await initialize_vector_store()
 
     assert fake_client.ensured == [("policies_staging", 768)]
+
+
+async def test_startup_ensures_the_payload_indexes_too(fake_client: FakeClient) -> None:
+    """TASK-011's indexes are get-or-create at startup, same as the collection."""
+    await initialize_vector_store()
+
+    assert fake_client.indexed == ["insurance_policies"]
+
+
+async def test_indexes_are_ensured_after_the_collection_not_before(
+    fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An index cannot be created on a collection that does not exist yet."""
+    order: list[str] = []
+    monkeypatch.setattr(main, "ensure_collection", lambda *_: order.append("collection"))
+    monkeypatch.setattr(main, "ensure_payload_indexes", lambda *_: order.append("indexes"))
+
+    await initialize_vector_store()
+
+    assert order == ["collection", "indexes"]
 
 
 async def test_an_unreachable_qdrant_does_not_stop_the_service(
@@ -87,14 +114,20 @@ async def test_shutdown_releases_the_client_and_the_model(
 ) -> None:
     released: list[str] = []
     monkeypatch.setattr(main, "ensure_collection", lambda *_: True)
+    monkeypatch.setattr(main, "ensure_payload_indexes", lambda *_: ())
     monkeypatch.setattr(main, "get_client", lambda: FakeClient())
     monkeypatch.setattr(main, "close_client", lambda: released.append("qdrant"))
     monkeypatch.setattr(main, "reset_embedder", lambda: released.append("embedder"))
 
+    async def dispose() -> None:
+        released.append("engine")
+
+    monkeypatch.setattr(main, "dispose_engine", dispose)
+
     async with lifespan(create_app()):
         pass
 
-    assert released == ["qdrant", "embedder"]
+    assert released == ["qdrant", "embedder", "engine"]
 
 
 def test_the_app_never_loads_the_model_at_import_time() -> None:
@@ -106,13 +139,14 @@ def test_the_app_never_loads_the_model_at_import_time() -> None:
     assert get_embedder.cache_info().currsize == 0
 
 
-def test_health_is_the_only_route_so_far() -> None:
+def test_the_app_exposes_health_and_ingest() -> None:
     """Read from the generated spec: FastAPI nests included routers in app.routes."""
     paths = set(create_app().openapi()["paths"])
 
-    assert paths == {"/health"}
+    assert paths == {"/health", "/policies/ingest"}
 
 
 def test_vector_store_module_is_the_one_startup_calls() -> None:
     """Guards against main.py growing its own copy of the get-or-create logic."""
     assert main.ensure_collection is vector_store.ensure_collection
+    assert main.ensure_payload_indexes is vector_store.ensure_payload_indexes
