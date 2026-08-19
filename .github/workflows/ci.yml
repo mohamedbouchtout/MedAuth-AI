@@ -232,6 +232,12 @@ jobs:
       REDIS_URL: redis://localhost:6379/0
       QDRANT_HOST: localhost
       QDRANT_PORT: "6333"
+      # Opts track-b-rag's embedding integration tests in. They load the real
+      # BAAI/bge-large-en-v1.5 weights, which is the only way to assert the
+      # (1024,) vector shape the Qdrant collection is built around. Gated by an
+      # env var rather than always-on so a developer running the suite locally
+      # does not trigger a ~1.3GB download they did not ask for.
+      RUN_EMBEDDING_TESTS: "1"
 
     steps:
       - uses: actions/checkout@v7
@@ -240,6 +246,18 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
+
+      # BAAI/bge-large-en-v1.5 is ~1.3GB. Without this it is re-downloaded from
+      # HuggingFace on every run of every matrix member, which is minutes of
+      # wall clock and a hard dependency on hf.co being up for a green build.
+      # Keyed on the pinned model name so a model change busts the cache.
+      - name: Cache HuggingFace model weights
+        if: matrix.member == 'services/track-b-rag'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-BAAI-bge-large-en-v1.5-${{ runner.os }}
+          restore-keys: hf-BAAI-bge-large-en-v1.5-
 
       - run: uv sync --all-packages
 
