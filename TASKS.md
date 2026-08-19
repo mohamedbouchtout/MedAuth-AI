@@ -344,19 +344,82 @@ Claude Code should read this before starting any task to understand current stat
 
 The insurance policy RAG is the technical core. Build and validate before other services.
 
-- [ ] **TASK-010:** Set up Qdrant collection + embedding model
+- [x] **TASK-010:** Set up Qdrant collection + embedding model
   - Service: `services/track-b-rag`
+  - **Package rename, do this first:** rename to `src/track_b_rag/` (not bare
+    `src/`) and declare `medauth-track-a-clinical` as a dependency in
+    `pyproject.toml`. This service is empty right now, so the rename is free —
+    TASK-011 imports the shared SQLAlchemy models from `track_a_clinical.models`
+    to write the `insurance_policies` row, which means track-b-rag crosses the
+    service-import boundary one task from now. See CLAUDE.md's package-naming
+    note for the general rule this follows.
   - Initialize Qdrant `insurance_policies` collection (cosine, 1024 dims) using the
     idempotent get-or-create pattern in CLAUDE.md "Qdrant Initialization — Must Be
     Idempotent." Do NOT use `recreate_collection()` in startup code — it deletes
     all indexed policies on every service restart, which is a real bug carried
     over from an earlier draft of this architecture and must not ship.
-  - Load `BAAI/bge-large-en-v1.5` embedding model via sentence-transformers
-  - `GET /health` returns `{"qdrant": "ok"|"error", "embedding_model": "ok"|"error"}`
-    — 200 only if both are ok, 503 otherwise
-  - **Test:** embed a query string, verify vector shape is (1024,)
-  - **Test:** call ensure_collection() twice in a row against a populated collection,
-    verify no data loss (this is the regression test for the recreate_collection bug)
+  - Load `BAAI/bge-large-en-v1.5` embedding model via sentence-transformers,
+    behind a lazy-loaded singleton — don't load it at import time. Mock it in
+    unit tests; the one test that needs the real (1024,)-shape assertion is an
+    integration test, not a unit test. Add HuggingFace's `~/.cache/huggingface`
+    to the CI workflow's cache config so the ~1.3GB download isn't repeated on
+    every run.
+  - `GET /health` returns the standard envelope, not a bare object:
+    `{"data": {"qdrant": "ok"|"error", "embedding_model": "ok"|"error"}, "error": null}`
+    — 200 only if both are ok, 503 otherwise. track-a-clinical's existing
+    `api/envelope.py` is the pattern to reuse.
+  - `/health` is exempt from the "every route calls hipaa-logger" constraint —
+    see CLAUDE.md's hipaa-logger scope note for why this is a standing
+    exception, not a one-off judgment call for this task.
+  - **Test:** embed a query string (mocked model), verify the call path works
+  - **Test (integration):** embed a query string with the real model, verify
+    vector shape is (1024,)
+  - **Test (integration, requires live Qdrant):** call ensure_collection() twice
+    in a row against a populated collection, verify no data loss — this cannot
+    be proven against a mock, it needs the real container (available in CI and
+    docker-compose). This is the regression test for the recreate_collection bug.
+  - Built (66 tests, 100% coverage: 56 unit, 10 integration). Decisions worth
+    knowing before touching this service:
+    - Run it as `uv run uvicorn track_b_rag.main:app --port 8002` — the rename
+      landed, so `src.main:app` is gone. `medauth-track-a-clinical` is declared
+      as a dependency but not yet imported; TASK-011 is what uses it.
+    - The recreate_collection guard is tested three ways, not one: the unit
+      fake has no `recreate_collection` attribute at all (a call would raise
+      AttributeError rather than silently pass), a source-level assertion
+      rejects any `.recreate_collection(` call site, and the integration test
+      upserts points and re-runs `ensure_collection` five times against a real
+      container. Verified by reintroducing the bug on purpose — all three fail.
+    - `ensure_collection()` returns True/False for created/already-existed, and
+      treats a concurrent create by another replica as success. Several pods
+      booting together all run this; losing that race still means the
+      collection exists, which is what was asked for.
+    - **Startup does not fail on an unreachable Qdrant.** It logs and continues,
+      and `/health` answers 503 until the container is up. A crash loop on a
+      slow dependency hides the cause; a 503 naming `qdrant` shows it.
+    - The embedding model is never loaded at import or at startup — only on
+      first use, which in practice is the first health probe. Loading 1.3GB of
+      weights before the port opens makes every rollout look like a failure to
+      the orchestrator. `sentence_transformers` is imported *inside*
+      `get_embedder()` for the same reason: at module scope it drags in torch.
+    - **A 503 from `/health` still carries `data`, not `error`.** The request
+      succeeded; the answer is "unhealthy". Putting the flags in the error half
+      would discard the only diagnostic the endpoint has. Both checks run
+      concurrently in a worker thread — they are blocking calls and one of them
+      can take seconds.
+    - `docs/api/track-b-rag.yaml` is hand-maintained and drift-tested the same
+      way track-a-clinical's is (`tests/unit/api/test_openapi_contract.py`),
+      comparing routes, methods, status codes and the health payload's fields.
+    - **Known duplication, deliberately not solved here:** `api/envelope.py` is
+      now a near-copy of track-a-clinical's. TASK-010 was scoped to reuse the
+      pattern, not to introduce a shared HTTP package. A third service copying
+      it should instead move it into `packages/` — that is a task of its own,
+      flagged rather than silently absorbed.
+    - CI needed two changes, both in the `test` job: an `actions/cache` step for
+      `~/.cache/huggingface` scoped to this member, and `RUN_EMBEDDING_TESTS=1`.
+      The embedding integration tests are opt-in by env var so a developer
+      running the suite locally does not trigger a 1.3GB download unasked. The
+      Qdrant service container and `QDRANT_HOST`/`QDRANT_PORT` were already
+      there from TASK-001 — this is the first task to use them.
 
 - [ ] **TASK-011:** Policy ingestion pipeline
   - Service: `services/track-b-rag`
