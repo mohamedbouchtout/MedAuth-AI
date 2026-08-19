@@ -69,7 +69,7 @@ jobs:
           echo "$changed"
 
           all_services=(audio-ingestion track-a-clinical track-b-rag fhir-integration prior-auth nudge-service policy-scraper)
-          all_packages=(hipaa-logger crypto-utils fhir-types)
+          all_packages=(api-envelope hipaa-logger crypto-utils fhir-types)
 
           selected=()
 
