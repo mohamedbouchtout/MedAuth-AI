@@ -366,8 +366,8 @@ service's domain surface stays in that service.
   half.** A 503 from a health endpoint returns `data` populated with the
   per-dependency flags and `error: null` — the request succeeded, the answer is
   "unhealthy", and moving the flags into the error half would discard the only
-  diagnostic the endpoint has. See the hipaa-logger scope note below for the
-  matching audit exemption.
+  diagnostic the endpoint has. See the hipaa-logger scope note below for why
+  the same endpoint also writes no audit row.
 
 ### packages/hipaa-logger — Design Decisions (locked, do not revisit)
 **Scope note (read first):** this package is NOT a general application logger.
@@ -378,12 +378,22 @@ PHI access events. Normal application logging (service startup, errors, request
 traces) uses `logging.getLogger(__name__)` per the Python conventions section
 above and goes to stdout/CloudWatch, not this package. Neither one ever logs
 actual PHI content — hipaa-logger records metadata about an access (who, what
-resource type, when), never the patient data itself. **`/health` / liveness
-endpoints are exempt from the "every route calls audit_log()" rule** (Known
-Constraints #6 in TASKS.md) — a health check touches no PHI, and auditing a
-k8s probe on its polling interval is noise, not signal, and directly
-contradicts this package's own scope. Every service's health endpoint skips
-the hipaa-logger call; this is a standing exception, not a per-task judgment call.
+resource type, when), never the patient data itself. **A route calls
+`audit_log()` if and only if it touches PHI** (Known Constraints #6 in
+TASKS.md). This is the rule itself, not a default with exceptions bolted on:
+an earlier phrasing required the call on *every* route, which immediately
+needed a carve-out for `/health` and was about to need a second one for
+`POST /policies/ingest`.
+
+The reason the rule is an "if and only if" in both directions: the audit_log
+table's value comes from every row in it being a PHI access. Mix operational
+writes in and "who accessed patient X" stops being a query you can just run and
+becomes one you have to filter. So a route over public or operational data must
+*not* audit — health and liveness probes touch no PHI and auditing a k8s probe
+on its polling interval is noise; `POST /policies/ingest` (TASK-011) writes
+insurance policy documents, which are public payer publications with no patient
+linkage. Those routes log at INFO through `logging.getLogger(__name__)` instead,
+which still gives the operational trace, in the right place.
 - **Owns its own audit_log table and Alembic migration.** Every service depends on
   this package, so it cannot wait on another service's schema (see TASK-002/TASK-005
   ordering note below). The migration lives in `packages/hipaa-logger/migrations/`
