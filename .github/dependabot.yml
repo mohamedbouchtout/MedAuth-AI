@@ -104,7 +104,14 @@ updates:
           - "*"
 
   # -------------------------------------------------------------------------
-  # Docker — local stack images (postgres, redis, qdrant, hapi-fhir)
+  # Docker — the local stack images (postgres, redis, qdrant, hapi-fhir).
+  #
+  # This also covers CI: the test job brings these services up from
+  # docker-compose.yml rather than declaring its own service containers, so a
+  # bump here updates both at once and the two cannot drift. That arrangement
+  # exists because Dependabot cannot watch images declared as GitHub Actions
+  # service containers (dependabot-core#5819) — when CI had its own pin, a
+  # bump to this file alone put local dev on postgres 18 while CI ran 16.
   # -------------------------------------------------------------------------
   - package-ecosystem: "docker-compose"
     directory: "/"
@@ -116,6 +123,15 @@ updates:
       - "docker"
     commit-message:
       prefix: "chore(deps)"
+    ignore:
+      # A postgres major is a data migration, not a bump. 18 moved the data
+      # directory to a major-version subdirectory, which breaks every existing
+      # local volume against the mount in docker-compose.yml — and CI would not
+      # catch it, because CI starts from an empty volume every run and stays
+      # green. Upgrading means moving the mount and planning a pg_upgrade, so
+      # it starts as a deliberate change rather than an automated PR.
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-major"]
 
   # Terraform is not enabled yet — infrastructure/terraform has no .tf files.
   # Add this block with TASK-0xx when the AWS infrastructure lands:
