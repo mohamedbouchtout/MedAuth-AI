@@ -879,7 +879,21 @@ logic do not change.
 
 5. **SQLAlchemy 2.0 async style.** `async with async_session() as session:` pattern. No sync session calls.
 
-6. **Every new API route needs:** (a) Pydantic request/response models, (b) hipaa-logger call, (c) OpenAPI docstring, (d) at least one integration test.
+6. **Every new API route needs:** (a) Pydantic request/response models, (b) an
+   OpenAPI docstring, (c) at least one integration test, and (d) a hipaa-logger
+   `audit_log()` call **if and only if the route touches PHI**.
+
+   The "if and only if" binds in both directions. A route that reads or writes
+   patient data must audit. A route that does not must *not* — the audit_log
+   table's value comes from every row in it being a PHI access, and mixing
+   operational writes in means "who accessed patient X" becomes a query you have
+   to filter rather than one you can just run. Health and liveness probes touch
+   no PHI; `POST /policies/ingest` (TASK-011) writes insurance policy documents,
+   which are public payer publications with no patient linkage. Those routes log
+   at INFO through `logging.getLogger(__name__)` instead — the operational trace
+   still exists, in the right place. This replaces an earlier phrasing that
+   demanded the call on every route, which needed a carve-out for `/health` and
+   was accumulating more.
 
 7. **TASK numbers must be recorded in commit messages.** Format: `feat(track-b-rag): implement policy query endpoint [TASK-012]`, each commit must follow the Git 50/72 commit rule (See CLAUDE.md for more details).
 
