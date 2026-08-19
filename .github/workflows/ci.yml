@@ -190,36 +190,13 @@ jobs:
       matrix:
         member: ${{ fromJSON(needs.changes.outputs.members) }}
 
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: medauth_test
-          POSTGRES_USER: medauth
-          POSTGRES_PASSWORD: medauth_ci
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U medauth -d medauth_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-      redis:
-        image: redis:8-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-      qdrant:
-        image: qdrant/qdrant:latest
-        ports:
-          - 6333:6333
-
+    # Backing services are NOT declared as job service containers. They come up
+    # from docker-compose.yml in a step below, so the compose file is the only
+    # place their versions are written. Declaring them here too created a
+    # second pin that nothing kept in step: Dependabot watches the compose file
+    # and cannot watch service containers (dependabot-core#5819, open since
+    # 2022), so a bump landed on one side only and put local dev on postgres 18
+    # while CI stayed on 16.
     env:
       ENVIRONMENT: test
       # Dummy values — moto intercepts every AWS call. No real credentials in CI.
@@ -259,10 +236,21 @@ jobs:
           key: hf-BAAI-bge-large-en-v1.5-${{ runner.os }}
           restore-keys: hf-BAAI-bge-large-en-v1.5-
 
+      # The same stack a developer gets from `docker compose up`, with the same
+      # images and the same healthchecks. `--wait` blocks until all three
+      # report healthy, which is what the service containers' --health-cmd
+      # options used to do. hapi-fhir is deliberately not started: nothing
+      # tests against it yet and it is slow to boot.
+      - name: Start backing services
+        env:
+          POSTGRES_DB: medauth_test
+          POSTGRES_PASSWORD: medauth_ci
+        run: docker compose up -d --wait postgres redis qdrant
+
       - run: uv sync --all-packages
 
-      # Every member runs against the same Postgres service container, so the
-      # schema has to exist before any of them collect. init-db.sh applies both
+      # Every member runs against the same Postgres instance, so the schema has
+      # to exist before any of them collect. init-db.sh applies both
       # histories in dependency order — hipaa-logger's audit_log first, then
       # track-a-clinical's core tables. Idempotent, so members whose tests
       # migrate again themselves are unaffected.
