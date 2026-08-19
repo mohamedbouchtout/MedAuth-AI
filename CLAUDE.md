@@ -647,160 +647,74 @@ about: Implement a TASKS.md item
 ```
 
 ### .github/dependabot.yml
-Note: this file goes in .github/ directly, NOT in .github/workflows/.
-GitHub reads it natively — it is not a GitHub Actions workflow file.
+Lives in `.github/` directly, NOT in `.github/workflows/`. GitHub reads it
+natively — it is not a GitHub Actions workflow file.
 
-```yaml
-version: 2
-updates:
+**The file itself is authoritative.** What follows is the shape and the
+reasoning; do not treat this block as a copy to edit. An earlier draft of this
+section inlined the whole YAML, drifted from it completely, and described five
+ecosystems that were never configured.
 
-  # Python — one entry per service and package (uv not yet natively supported,
-  # use pip ecosystem which reads pyproject.toml)
-  - package-ecosystem: "pip"
-    directory: "/packages/hipaa-logger"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    labels: ["dependencies", "python"]
-    open-pull-requests-limit: 3
+Five ecosystems are configured, all weekly on Mondays, all with a
+`chore(deps)` commit prefix:
 
-  - package-ecosystem: "pip"
-    directory: "/packages/crypto-utils"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    labels: ["dependencies", "python"]
-    open-pull-requests-limit: 3
+| Ecosystem | Directory | Covers |
+|---|---|---|
+| `uv` | `/` | Every Python service and package — one uv workspace at the root, so one entry covers all of them |
+| `npm` | `/apps/web` | The React frontend |
+| `npm` | `/apps/mobile` | The React Native app |
+| `github-actions` | `/` | Pinned action versions in `workflows/` |
+| `docker-compose` | `/` | The backing service images — local **and** CI, see below |
 
-  - package-ecosystem: "pip"
-    directory: "/services/audio-ingestion"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    labels: ["dependencies", "python"]
-    open-pull-requests-limit: 3
+Terraform is commented out in the file, waiting on `infrastructure/terraform`
+to actually contain `.tf` files.
 
-  - package-ecosystem: "pip"
-    directory: "/services/track-a-clinical"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    labels: ["dependencies", "python"]
-    open-pull-requests-limit: 3
+Decisions worth knowing before changing it:
+- **One `uv` entry, not one `pip` entry per directory.** uv is the package
+  manager for this repo and the workspace root resolves every member together.
+  Per-directory `pip` entries would open separate PRs for the same transitive
+  bump in nine places and could resolve them inconsistently.
+- **Minor and patch updates are grouped per ecosystem; majors come through
+  individually.** A grouped PR keeps the volume low enough that people actually
+  read them. A major arriving on its own gets a real review.
+- **Majors of the core data and LLM stack are ignored entirely** — `pydantic`,
+  `sqlalchemy`, `langchain*`. These are coordinated migrations, not bumps. Same
+  for `expo` and `react-native` on mobile, and for `postgres` (see below).
+- **Postgres majors are ignored, and this is not squeamishness.** Postgres 18
+  moved its data directory into a major-version subdirectory, which breaks
+  every existing local volume against the mount in `docker-compose.yml`. CI
+  cannot catch that: it starts from an empty volume on every run, so the bump
+  goes green in a pull request and breaks each developer only when they next
+  pull. Upgrading means moving the mount to `/var/lib/postgresql` and planning
+  a `pg_upgrade` or a deliberate reset — a task, not a merge.
 
-  - package-ecosystem: "pip"
-    directory: "/services/track-b-rag"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    labels: ["dependencies", "python"]
-    open-pull-requests-limit: 3
+### Backing service versions live in exactly one file
+`docker-compose.yml` is the single source of truth for the postgres, redis and
+qdrant versions. **CI does not declare its own service containers.** The test
+job runs `docker compose up -d --wait postgres redis qdrant`, so a pull request
+tests against the same images, the same healthchecks and the same configuration
+a developer gets locally — not merely the same version tags.
 
-  - package-ecosystem: "pip"
-    directory: "/services/fhir-integration"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    labels: ["dependencies", "python"]
-    open-pull-requests-limit: 3
+This is deliberate and worth not undoing. Dependabot watches
+`docker-compose.yml` and **cannot** watch images declared as GitHub Actions
+service containers or job containers: that is
+[dependabot-core#5819](https://github.com/dependabot/dependabot-core/issues/5819),
+open since September 2022. While CI carried its own pin, nothing kept the two
+in step and nothing could — a bump landed on the compose side alone and left
+local dev on postgres 18 while every CI run stayed on 16, which is how a
+migration passes on a laptop and fails in a pull request.
 
-  - package-ecosystem: "pip"
-    directory: "/services/nudge-service"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    labels: ["dependencies", "python"]
-    open-pull-requests-limit: 3
+If a future job needs a backing service, add it to `docker-compose.yml` and
+start it from there. Do not add a `services:` block back to `ci.yml`; that
+reintroduces an unwatched second pin.
 
-  - package-ecosystem: "pip"
-    directory: "/services/prior-auth"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    labels: ["dependencies", "python"]
-    open-pull-requests-limit: 3
-
-  - package-ecosystem: "pip"
-    directory: "/services/policy-scraper"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    labels: ["dependencies", "python"]
-    open-pull-requests-limit: 3
-
-  # npm — covers apps/web and apps/mobile (reads root package.json workspaces)
-  - package-ecosystem: "npm"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    labels: ["dependencies", "javascript"]
-    open-pull-requests-limit: 5
-    ignore:
-      # Expo SDK updates are intentional — do manually when ready
-      - dependency-name: "expo"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "expo-*"
-        update-types: ["version-update:semver-major"]
-
-  # GitHub Actions — keeps action versions current (security important)
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    labels: ["dependencies", "github-actions"]
-    open-pull-requests-limit: 3
-
-  # Docker base images
-  - package-ecosystem: "docker"
-    directory: "/services/audio-ingestion"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    labels: ["dependencies", "docker"]
-
-  - package-ecosystem: "docker"
-    directory: "/services/track-b-rag"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    labels: ["dependencies", "docker"]
-
-  # Add remaining services as Dockerfiles are created
-```
-
-Dependabot behavior in this project:
-- Opens PRs automatically on Monday for any outdated dependency
-- CI runs on each Dependabot PR — if tests pass, you can merge with one click
-- `open-pull-requests-limit: 3` per ecosystem prevents getting flooded with 20 PRs at once
-- Expo SDK major versions are ignored because those require intentional migration work,
-  not automatic bumps
-- GitHub Actions versions are monitored separately — a compromised action in ci.yml
-  is a supply chain attack vector, keeping them pinned and current matters
-
-When a Dependabot PR opens:
-1. Check if CI passes
-2. Glance at the changelog link it includes
-3. Merge if green — do not let these pile up
-Security patches (CVE fixes) should be merged same day regardless of other work.
-```markdown
----
-name: Bug report
-about: Something isn't working
----
-**Service affected:** 
-**TASK where this was introduced:** TASK-XXX
-
-## What happened
-
-## What was expected
-
-## Steps to reproduce
-
-## Logs
-<!-- No PHI in logs — redact before pasting -->
-```
+### .github/ISSUE_TEMPLATE/bug_report.md
+See the file for the current template. The one rule that is not obvious from
+reading it: **never paste PHI into an issue.** GitHub is not a HIPAA-eligible
+store — no patient names, MRNs, dates of birth, addresses, real transcripts, or
+real audio. Redact to synthetic values or reference a Synthea patient ID. The
+template carries an "Impact" checkbox for possible PHI exposure; ticking it
+means notifying the security owner directly rather than waiting on triage.
 
 ### packages/crypto-utils — Design Decisions (locked, do not revisit)
 **Scope note:** field-level AES-256-GCM encryption using a KMS-wrapped DEK per
