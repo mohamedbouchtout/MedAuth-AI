@@ -378,8 +378,9 @@ The insurance policy RAG is the technical core. Build and validate before other 
     in a row against a populated collection, verify no data loss — this cannot
     be proven against a mock, it needs the real container (available in CI and
     docker-compose). This is the regression test for the recreate_collection bug.
-  - Built (66 tests, 100% coverage: 56 unit, 10 integration). Decisions worth
-    knowing before touching this service:
+  - Built (80 tests, 100% coverage: 63 in track-b-rag, 17 in the new
+    `packages/api-envelope`). Decisions worth knowing before touching this
+    service:
     - Run it as `uv run uvicorn track_b_rag.main:app --port 8002` — the rename
       landed, so `src.main:app` is gone. `medauth-track-a-clinical` is declared
       as a dependency but not yet imported; TASK-011 is what uses it.
@@ -409,11 +410,13 @@ The insurance policy RAG is the technical core. Build and validate before other 
     - `docs/api/track-b-rag.yaml` is hand-maintained and drift-tested the same
       way track-a-clinical's is (`tests/unit/api/test_openapi_contract.py`),
       comparing routes, methods, status codes and the health payload's fields.
-    - **Known duplication, deliberately not solved here:** `api/envelope.py` is
-      now a near-copy of track-a-clinical's. TASK-010 was scoped to reuse the
-      pattern, not to introduce a shared HTTP package. A third service copying
-      it should instead move it into `packages/` — that is a task of its own,
-      flagged rather than silently absorbed.
+    - The response envelope is **not** in this service. It was extracted to
+      `packages/api-envelope` in this task, once track-b-rag became its second
+      consumer: `from api_envelope import ApiResponse, install_error_handlers`.
+      track-a-clinical was migrated onto it in the same change, so neither
+      service defines its own. `error_responses()` gained a `descriptions=`
+      override so track-a's route-specific 404/503 wording survived the move.
+      Any service added later imports from there — do not copy it again.
     - CI needed two changes, both in the `test` job: an `actions/cache` step for
       `~/.cache/huggingface` scoped to this member, and `RUN_EMBEDDING_TESTS=1`.
       The embedding integration tests are opt-in by env var so a developer
