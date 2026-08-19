@@ -10,6 +10,7 @@ dependencies = [
     "langchain>=0.3",
     "langchain-aws>=0.2",
     "langchain-text-splitters>=0.3",
+    "medauth-api-envelope",
     "medauth-hipaa-logger",
     # Declared in TASK-010 ahead of its first use. TASK-011 imports the shared
     # SQLAlchemy models from track_a_clinical.models to write the

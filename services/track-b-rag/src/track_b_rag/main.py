@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from starlette.concurrency import run_in_threadpool
 
-from track_b_rag.api.envelope import install_error_handlers
+from api_envelope import install_error_handlers
 from track_b_rag.api.health import router as health_router
 from track_b_rag.config import get_settings
 from track_b_rag.embeddings import reset_embedder

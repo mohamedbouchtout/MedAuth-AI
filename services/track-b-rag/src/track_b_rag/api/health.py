@@ -34,9 +34,9 @@ from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from starlette.concurrency import run_in_threadpool
 
+from api_envelope import ApiResponse
 from track_b_rag import embeddings, vector_store
 from track_b_rag.api.dependencies import get_qdrant
-from track_b_rag.api.envelope import ApiResponse
 
 router = APIRouter(tags=["health"])
 

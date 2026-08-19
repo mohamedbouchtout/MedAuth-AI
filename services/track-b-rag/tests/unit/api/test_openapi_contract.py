@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 import yaml
 
-from track_b_rag.api.envelope import ERROR_CODE_HTTP, ERROR_CODE_VALIDATION
+from api_envelope import ERROR_CODE_HTTP, ERROR_CODE_VALIDATION
 from track_b_rag.main import create_app
 
 SPEC_PATH = Path(__file__).resolve().parents[5] / "docs" / "api" / "track-b-rag.yaml"

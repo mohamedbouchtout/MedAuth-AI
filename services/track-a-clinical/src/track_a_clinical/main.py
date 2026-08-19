@@ -19,8 +19,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from api_envelope import install_error_handlers
 from track_a_clinical.api.dependencies import close_redis
-from track_a_clinical.api.envelope import install_error_handlers
 from track_a_clinical.api.sessions import router as sessions_router
 from track_a_clinical.db import dispose_engine
 

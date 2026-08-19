@@ -23,9 +23,9 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api_envelope import ApiHTTPException, ApiResponse, error_responses
 from track_a_clinical import audit
 from track_a_clinical.api.dependencies import get_db_session, get_redis
-from track_a_clinical.api.envelope import ApiHTTPException, ApiResponse, error_responses
 from track_a_clinical.api.schemas import (
     EndSessionData,
     StartSessionData,
@@ -46,6 +46,16 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 ERROR_CODE_SESSION_NOT_FOUND = "session_not_found"
 ERROR_CODE_SIGNAL_NOT_PUBLISHED = "signal_not_published"
 
+#: What these statuses mean on *these* routes. api_envelope carries generic
+#: wording for each; a 404 here is more specific than "the resource does not
+#: exist", and the published spec is better for saying so.
+SESSION_ERROR_DESCRIPTIONS = {
+    status.HTTP_404_NOT_FOUND: "The session is unknown or its encounter is soft-deleted.",
+    status.HTTP_503_SERVICE_UNAVAILABLE: (
+        "The session ended but its signal could not be published."
+    ),
+}
+
 
 def session_ended_channel(session_id: uuid.UUID) -> str:
     """Return the Redis channel for a session's end signal."""
@@ -63,7 +73,10 @@ def _client_ip(request: Request) -> str | None:
     response_model=ApiResponse[StartSessionData],
     summary="Start a session",
     response_description="The new session's id and its short-lived JWT.",
-    responses=error_responses(status.HTTP_422_UNPROCESSABLE_CONTENT),
+    responses=error_responses(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        descriptions=SESSION_ERROR_DESCRIPTIONS,
+    ),
 )
 async def start_session(
     body: StartSessionRequest,
@@ -124,6 +137,7 @@ async def start_session(
         status.HTTP_404_NOT_FOUND,
         status.HTTP_422_UNPROCESSABLE_CONTENT,
         status.HTTP_503_SERVICE_UNAVAILABLE,
+        descriptions=SESSION_ERROR_DESCRIPTIONS,
     ),
 )
 async def end_session(
