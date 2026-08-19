@@ -5,7 +5,7 @@
 # Every Python service and shared package is a workspace member.
 #
 # Install everything:      uv sync --all-packages
-# Run one service:         cd services/track-b-rag && uv run uvicorn src.main:app --reload --port 8002
+# Run one service:         cd services/track-b-rag && uv run uvicorn track_b_rag.main:app --reload --port 8002
 
 [tool.uv.workspace]
 members = ["services/*", "packages/*"]
@@ -14,6 +14,10 @@ members = ["services/*", "packages/*"]
 medauth-hipaa-logger = { workspace = true }
 medauth-crypto-utils = { workspace = true }
 medauth-fhir-types = { workspace = true }
+# Services are workspace members too. track-b-rag depends on track-a-clinical
+# for the shared SQLAlchemy models (see CLAUDE.md, "Where the shared SQLAlchemy
+# models live") — the only service-to-service dependency so far.
+medauth-track-a-clinical = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -38,7 +42,14 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "T20"]  # T20 bans print() — see 
 [tool.ruff.lint.isort]
 # Workspace packages are installed from source, so isort would otherwise sort them
 # in with third-party imports.
-known-first-party = ["hipaa_logger", "crypto_utils", "fhir_types", "track_a_clinical", "src"]
+known-first-party = [
+    "hipaa_logger",
+    "crypto_utils",
+    "fhir_types",
+    "track_a_clinical",
+    "track_b_rag",
+    "src",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
