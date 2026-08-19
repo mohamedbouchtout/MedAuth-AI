@@ -1,0 +1,206 @@
+openapi: 3.1.0
+
+# The published contract for services/track-a-clinical.
+#
+# Kept in step with the FastAPI app by
+# services/track-a-clinical/tests/unit/api/test_openapi_contract.py, which fails
+# if a route, method, status code or required request field here drifts from the
+# application. Update this file in the same change that adds or alters a route.
+
+info:
+  title: MedAuth AI — track-a-clinical
+  version: 0.1.0
+  description: >-
+    SOAP note generation and session lifecycle. Owns the `encounters` table and
+    is the only issuer of session JWTs — `audio-ingestion` and `nudge-service`
+    validate the token minted here and never mint their own.
+
+servers:
+  - url: http://localhost:8003
+    description: Local development (see the port table in CLAUDE.md)
+
+tags:
+  - name: sessions
+    description: Start and end a clinical encounter.
+
+paths:
+  /sessions/start:
+    post:
+      tags: [sessions]
+      operationId: startSession
+      summary: Start a session
+      description: >-
+        Creates an `encounters` row with `status='active'` and mints the session
+        JWT. `session_id` is generated server-side and is never accepted from the
+        client. The encounter row and its `audit_log` row commit together.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartSessionRequest'
+      responses:
+        '201':
+          description: The new session's id and its short-lived JWT.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartSessionResponse'
+        '422':
+          description: The request body or path parameter is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /sessions/{session_id}/end:
+    post:
+      tags: [sessions]
+      operationId: endSession
+      summary: End a session
+      description: >-
+        Sets `status='completed'` and `ended_at`, then publishes an empty message
+        to the Redis channel `session:ended:{session_id}`. TASK-030 (SOAP
+        generation) and TASK-060 (prior auth bundle assembly) both subscribe to
+        it.
+
+
+        Idempotent: repeating the call on an already-completed session returns
+        200 with `already_ended: true` and publishes nothing, because a second
+        signal would produce a second SOAP note and a second prior-auth bundle
+        for one visit.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          description: The `session_id` returned by `POST /sessions/start`.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The session's final status and end time.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EndSessionResponse'
+        '404':
+          description: The session is unknown or its encounter is soft-deleted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: The request body or path parameter is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: >-
+            The session ended but its signal could not be published. The
+            encounter is already `completed`; retrying will not re-send the
+            signal, so replaying it is an operator action.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    StartSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [patient_id, provider_id]
+      properties:
+        patient_id:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: >-
+            The patient's FHIR resource id. Stored as `encounters.patient_fhir_id`
+            — the wire name and the column name differ deliberately.
+          examples: ['synthea-placeholder-1']
+        provider_id:
+          type: string
+          format: uuid
+          description: The provider starting the visit.
+        ehr_encounter_id:
+          type: [string, 'null']
+          maxLength: 100
+          default: null
+          description: The EHR's own Encounter resource id, when launched from one.
+          examples: ['athena-enc-9001']
+
+    StartSessionData:
+      type: object
+      required: [session_id, jwt]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        jwt:
+          type: string
+          description: >-
+            HS256, signed with `JWT_SIGNING_KEY`. Claims are exactly
+            `{session_id, provider_id, exp}` — no `iss` or `aud` in v1. Expires
+            after `SESSION_TTL_SECONDS` (900 by default).
+
+    EndSessionData:
+      type: object
+      required: [session_id, status, ended_at, already_ended]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [completed]
+        ended_at:
+          type: string
+          format: date-time
+          description: ISO 8601 UTC, written by the database as `NOW()`.
+        already_ended:
+          type: boolean
+          description: True when this call was a no-op repeat and published no signal.
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [session_not_found, signal_not_published, validation_error, http_error]
+        message:
+          type: string
+          description: >-
+            Human-readable and PHI-free. A rejected request body is described by
+            field location only; its values are never echoed back.
+
+    StartSessionResponse:
+      type: object
+      required: [data, error]
+      description: The standard envelope from CLAUDE.md's API Design section.
+      properties:
+        data:
+          $ref: '#/components/schemas/StartSessionData'
+        error:
+          type: 'null'
+
+    EndSessionResponse:
+      type: object
+      required: [data, error]
+      properties:
+        data:
+          $ref: '#/components/schemas/EndSessionData'
+        error:
+          type: 'null'
+
+    ErrorResponse:
+      type: object
+      required: [data, error]
+      properties:
+        data:
+          type: 'null'
+        error:
+          $ref: '#/components/schemas/Error'
