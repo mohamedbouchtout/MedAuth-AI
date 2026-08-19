@@ -11,6 +11,7 @@
 members = ["services/*", "packages/*"]
 
 [tool.uv.sources]
+medauth-api-envelope = { workspace = true }
 medauth-hipaa-logger = { workspace = true }
 medauth-crypto-utils = { workspace = true }
 medauth-fhir-types = { workspace = true }
@@ -43,6 +44,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "T20"]  # T20 bans print() — see 
 # Workspace packages are installed from source, so isort would otherwise sort them
 # in with third-party imports.
 known-first-party = [
+    "api_envelope",
     "hipaa_logger",
     "crypto_utils",
     "fhir_types",

@@ -1,0 +1,16 @@
+[project]
+name = "medauth-api-envelope"
+version = "0.1.0"
+description = "The shared HTTP response envelope and error handlers every service returns. See TASK-010."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "pydantic>=2.9",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/api_envelope"]
