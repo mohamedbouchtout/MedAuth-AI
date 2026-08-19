@@ -11,7 +11,20 @@
 
 services:
   postgres:
-    image: postgres:18-alpine
+    # This file is the single source of truth for backing service versions:
+    # CI brings the stack up from here rather than declaring its own service
+    # containers, so whatever is pinned below is what pull requests test
+    # against. Do not add a second pin anywhere else.
+    #
+    # Moving to 18+ is a real upgrade, not a version bump. 18 stores data in a
+    # major-version subdirectory, so with the /var/lib/postgresql/data mount
+    # below the container refuses to start against any volume created by an
+    # earlier version — CI would stay green on its fresh volumes while every
+    # existing local checkout broke. The mount has to move to
+    # /var/lib/postgresql and everyone needs a pg_upgrade or a deliberate
+    # reset. Dependabot is configured not to propose postgres majors for this
+    # reason.
+    image: postgres:16-alpine
     container_name: medauth-postgres
     restart: unless-stopped
     environment:
