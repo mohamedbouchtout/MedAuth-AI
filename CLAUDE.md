@@ -214,15 +214,26 @@ otherwise has no issuer. Fixed here:
 - `services/track-a-clinical` owns session lifecycle, because it owns the
   `encounters` table (TASK-005).
 - `POST /sessions/start` — body: `{patient_id, provider_id, ehr_encounter_id}`.
-  Creates an `encounters` row (`status='active'`), mints a short-lived JWT
-  (15 min, matching the auth conventions in Security section) with claims
-  `{session_id, provider_id, exp}`, returns `{session_id, jwt}`.
-  This is what apps/web and apps/mobile call when a provider taps "start visit."
+  Creates an `encounters` row (`status='active'`, wire field `patient_id` maps
+  to the model's `patient_fhir_id` column), mints a short-lived JWT with claims
+  `{session_id, provider_id, exp}` — no `iss`/`aud` claims for v1, even though
+  `.env.example` has `JWT_ISSUER`/`JWT_AUDIENCE` vars sitting unused from an
+  earlier scaffold pass. Adding them means TASK-020's and TASK-041's validators
+  grow too — defer that to a later hardening task rather than expanding the
+  claim set here. Lifetime is driven by `SESSION_TTL_SECONDS` (default 900,
+  i.e. 15 min) — not a hardcoded literal. `session_id` is generated server-side
+  (UUID), never client-supplied, per the UUID convention in Code Conventions.
+  Returns `{session_id, jwt}`. This is what apps/web and apps/mobile call when
+  a provider taps "start visit."
 - `POST /sessions/{session_id}/end` — sets `encounters.status='completed'`,
   `ended_at=NOW()`, and publishes `session:ended:{session_id}` to Redis
   (empty payload — it's a signal, not a data carrier). This is the trigger
   TASK-030 (SOAP generation) and TASK-060 (prior auth bundle assembly) both
-  subscribe to.
+  subscribe to. Semantics: unknown or soft-deleted `session_id` → 404.
+  Repeat-ending an already-completed session → 200, idempotent, does NOT
+  publish a second Redis signal (TASK-030 and TASK-060 both react to that
+  signal — a duplicate publish would trigger duplicate SOAP generation or
+  duplicate bundle assembly, so idempotency here isn't just tidiness).
 - The JWT is what `audio-ingestion` (TASK-020) and `nudge-service` (TASK-041)
   validate before accepting a WebSocket connection. Signing secret is
   `JWT_SIGNING_KEY` in `.env.example` — symmetric (HS256) is fine for v1,

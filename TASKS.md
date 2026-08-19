@@ -265,20 +265,78 @@ Claude Code should read this before starting any task to understand current stat
       the schema already applied — `track-a-clinical`'s own integration tests
       re-run `upgrade head` anyway, which is a no-op on a current database.
 
-- [ ] **TASK-006:** Session lifecycle endpoints
+- [x] **TASK-006:** Session lifecycle endpoints
   - Service: `services/track-a-clinical` (owns the encounters table)
   - Full spec is in CLAUDE.md "Session Lifecycle & JWT Issuance" — read that first,
     this task did not exist in earlier drafts and several later tasks assume it:
     TASK-020, TASK-021, TASK-030, TASK-041, and TASK-060 all depend on this.
-  - `POST /sessions/start` — body: `{patient_id, provider_id, ehr_encounter_id}`.
-    Creates `encounters` row, mints a 15-min HS256 JWT with claims
-    `{session_id, provider_id, exp}` signed with `JWT_SIGNING_KEY`, returns
-    `{session_id, jwt}`. All accesses logged via hipaa-logger.
-  - `POST /sessions/{session_id}/end` — sets status/ended_at, publishes
-    `session:ended:{session_id}` to Redis (empty payload, signal only)
-  - Add `JWT_SIGNING_KEY` to `.env.example`
-  - **Test:** start a session, verify JWT decodes with correct claims and 15-min expiry
+  - **This is the first HTTP surface in the repo.** track-a-clinical currently
+    ships only models, db.py, and migrations (TASK-005) — no FastAPI app exists
+    yet anywhere in the monorepo. This task also creates:
+    - `services/track-a-clinical/src/main.py` — FastAPI app entrypoint, port 8003
+      per the Local Development port table
+    - `docs/api/track-a-clinical.yaml` — OpenAPI spec (docs/api/ is currently empty)
+  - Add `pyjwt` to `services/track-a-clinical/pyproject.toml` — not yet a dependency
+  - Import `Encounter` from `track_a_clinical.models` (TASK-005) — do not define
+    a second model class against the same table
+  - `POST /sessions/start` — body: `{patient_id, provider_id, ehr_encounter_id}`
+    (Pydantic request model). `patient_id` on the wire maps to the model's
+    `patient_fhir_id` column — names differ deliberately, see CLAUDE.md.
+    Creates `encounters` row (`session_id` generated server-side as a UUID,
+    never client-supplied). Mints JWT: claims `{session_id, provider_id, exp}`
+    only — no `iss`/`aud` for v1 even though those env vars exist unused in
+    .env.example (see CLAUDE.md for why). Lifetime from `SESSION_TTL_SECONDS`
+    (default 900), not a hardcoded literal. Signed with `JWT_SIGNING_KEY`.
+    Response: `{"data": {"session_id": ..., "jwt": ...}, "error": null}` per
+    the standard API envelope. All PHI access logged via hipaa-logger.
+  - `POST /sessions/{session_id}/end` — sets `status='completed'`, `ended_at`,
+    publishes `session:ended:{session_id}` to Redis (empty payload, signal only).
+    404 if `session_id` unknown or belongs to a soft-deleted encounter. Idempotent:
+    ending an already-completed session returns 200 without publishing a second
+    Redis signal (downstream consumers would otherwise double-fire).
+  - `JWT_SIGNING_KEY` already exists in `.env.example` — confirm it's there
+    rather than re-adding it. `JWT_ISSUER`, `JWT_AUDIENCE`, `SESSION_TTL_SECONDS`
+    also already exist from an earlier scaffold pass — only `SESSION_TTL_SECONDS`
+    is used by this task; leave the other two unused/undocumented for now per
+    the v1 claim-set decision above.
+  - Both routes: Pydantic request/response models, hipaa-logger call, OpenAPI
+    docstring, at least one integration test — per the per-route requirements
+    in Known Constraints.
+  - **Test:** start a session, verify JWT decodes with correct claims (session_id,
+    provider_id, exp) and expiry matches SESSION_TTL_SECONDS
   - **Test:** end a session, verify Redis subscriber receives the signal
+  - **Test:** end an unknown session_id, verify 404
+  - **Test:** end an already-completed session twice, verify second call
+    returns 200 and does not publish a second Redis signal
+  - Built (76 tests, 100% coverage). Decisions worth knowing before touching this:
+    - `main.py` lives at `src/track_a_clinical/main.py`, not `src/main.py`. This
+      service ships a named package so other services can import its models, and
+      a top-level `src` module here would shadow the one every other service
+      installs into the shared venv. Run it as
+      `uv run uvicorn track_a_clinical.main:app --port 8003`.
+    - The audit write joins the request's own transaction rather than running on
+      hipaa-logger's pool: `db.raw_asyncpg_connection()` hands the session's
+      asyncpg connection to `audit_log(conn=...)`. An encounter therefore cannot
+      exist without its audit row, and neither can survive the other's failure.
+    - `POST /sessions/start` returns **201**, not 200 — it creates a resource.
+      TASK-070's "start visit" button should expect 201.
+    - `JWT_SIGNING_KEY` must be at least 32 bytes; `Settings` rejects anything
+      shorter. HS256 with a secret below the digest length is a weak MAC, and
+      PyJWT warns about it. Set a real value in `.env.local` before running.
+    - Idempotent end returns the *original* `ended_at`, not a new one, and audits
+      as `READ_ENCOUNTER` rather than `END_SESSION` — the row was read, not
+      changed. `already_ended` in the response tells a client which happened.
+    - Known gap, deliberately not solved here: the Redis publish follows the
+      commit, so a broker failure ends the encounter without signalling it, and
+      the idempotent retry will not re-send. The endpoint answers 503 so the
+      failure is visible instead of silently stranding TASK-030 and TASK-060.
+      A durable outbox is the real fix and belongs with the consumers.
+    - `docs/api/track-a-clinical.yaml` is hand-maintained but not unchecked:
+      `tests/unit/api/test_openapi_contract.py` compares it to the app's
+      generated schema on routes, methods, status codes and required request
+      fields, so the spec cannot drift silently. Descriptions are not compared.
+    - CI needed no change. `pyyaml` moved into the root dev group for that drift
+      test rather than being relied on transitively through moto.
 
 ---
 
