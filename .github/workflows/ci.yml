@@ -230,7 +230,7 @@ jobs:
       # Keyed on the pinned model name so a model change busts the cache.
       - name: Cache HuggingFace model weights
         if: matrix.member == 'services/track-b-rag'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/huggingface
           key: hf-BAAI-bge-large-en-v1.5-${{ runner.os }}
