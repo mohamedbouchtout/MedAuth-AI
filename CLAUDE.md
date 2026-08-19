@@ -288,14 +288,17 @@ human runs deliberately — never in application startup code.
 
 ### Bedrock Model Assignment (concrete, per call site)
 The "Haiku for extraction, Sonnet for reasoning" rule above, made specific:
-| Call site | Model | Why |
-|---|---|---|
-| TASK-012 policy query analysis | Sonnet | Multi-step reasoning over retrieved policy text |
-| TASK-030 SOAP note generation | Sonnet | Long-form structured clinical writing |
-| TASK-030 ICD-10/CPT extraction (LLM pass) | Haiku | Extraction, not reasoning — validated against Comprehend Medical in TASK-031 anyway |
-| TASK-013 policy scraper (if any LLM cleanup used) | Haiku | Simple text cleanup, not analysis |
-Reference `BEDROCK_MODEL_SONNET` / `BEDROCK_MODEL_HAIKU` from `.env.example` —
-never hardcode a model ID string in application code.
+| Call site | Model | Env var | Why |
+|---|---|---|---|
+| TASK-012 policy query analysis | Sonnet | `BEDROCK_MODEL_ID_REASONING` | Multi-step reasoning over retrieved policy text |
+| TASK-030 SOAP note generation | Sonnet | `BEDROCK_MODEL_ID_REASONING` | Long-form structured clinical writing |
+| TASK-030 ICD-10/CPT extraction (LLM pass) | Haiku | `BEDROCK_MODEL_ID_FAST` | Extraction, not reasoning — validated against Comprehend Medical in TASK-031 anyway |
+| TASK-013 policy scraper (if any LLM cleanup used) | Haiku | `BEDROCK_MODEL_ID_FAST` | Simple text cleanup, not analysis |
+The actual `.env.example` vars are `BEDROCK_MODEL_ID_FAST` and
+`BEDROCK_MODEL_ID_REASONING` — an earlier draft of this table named them
+`BEDROCK_MODEL_SONNET`/`BEDROCK_MODEL_HAIKU`, which never matched the repo.
+Fixed here; use the `_FAST`/`_REASONING` names in code, never hardcode a
+model ID string.
 
 ### Migration Ownership vs. Table Write Access (clarifies TASK-005)
 "Owns the schema" means owns the Alembic migration history for those tables —
@@ -328,7 +331,12 @@ do. Every other service still declares `packages = ["src"]` in its
 each other in the shared venv — `import src.models` resolves to whichever
 service sorts first. That is tolerable while nothing imports across service
 boundaries, and each of those services should move to a named package as it
-grows code worth importing.
+grows code worth importing. **track-b-rag is that case as of TASK-010**: it
+crosses the boundary one task later (TASK-011 imports the shared SQLAlchemy
+models from `track_a_clinical.models` to write the `insurance_policies` row).
+Rename to `src/track_b_rag/` and declare `medauth-track-a-clinical` as a
+dependency in TASK-010, while the service is still empty — cheaper now than
+as churn after TASK-011 through TASK-015 exist.
 
 ### packages/hipaa-logger — Design Decisions (locked, do not revisit)
 **Scope note (read first):** this package is NOT a general application logger.
@@ -339,7 +347,12 @@ PHI access events. Normal application logging (service startup, errors, request
 traces) uses `logging.getLogger(__name__)` per the Python conventions section
 above and goes to stdout/CloudWatch, not this package. Neither one ever logs
 actual PHI content — hipaa-logger records metadata about an access (who, what
-resource type, when), never the patient data itself.
+resource type, when), never the patient data itself. **`/health` / liveness
+endpoints are exempt from the "every route calls audit_log()" rule** (Known
+Constraints #6 in TASKS.md) — a health check touches no PHI, and auditing a
+k8s probe on its polling interval is noise, not signal, and directly
+contradicts this package's own scope. Every service's health endpoint skips
+the hipaa-logger call; this is a standing exception, not a per-task judgment call.
 - **Owns its own audit_log table and Alembic migration.** Every service depends on
   this package, so it cannot wait on another service's schema (see TASK-002/TASK-005
   ordering note below). The migration lives in `packages/hipaa-logger/migrations/`
