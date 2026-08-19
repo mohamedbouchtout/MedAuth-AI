@@ -25,11 +25,12 @@ members = [
 [manifest.dependency-groups]
 dev = [
     { name = "httpx", specifier = ">=0.28" },
-    { name = "moto", extras = ["all"], specifier = ">=5.0" },
+    { name = "moto", extras = ["all"], specifier = ">=5.2.2" },
     { name = "mypy", specifier = ">=2.3.0" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
-    { name = "pytest-cov", specifier = ">=6.0" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", specifier = ">=0.8" },
 ]
 
@@ -1638,14 +1639,14 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "amazon-transcribe", specifier = ">=0.6" },
-    { name = "boto3", specifier = ">=1.35" },
+    { name = "boto3", specifier = ">=1.43.71" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "medauth-hipaa-logger", editable = "packages/hipaa-logger" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
-    { name = "pyjwt", specifier = ">=2.9" },
+    { name = "pyjwt", specifier = ">=2.13.0" },
     { name = "redis", specifier = ">=8.1.0" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.2" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.3" },
     { name = "websockets", specifier = ">=13.1" },
 ]
 
@@ -1661,7 +1662,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "boto3", specifier = ">=1.35" },
+    { name = "boto3", specifier = ">=1.43.71" },
     { name = "cryptography", specifier = ">=43.0" },
     { name = "pydantic", specifier = ">=2.9" },
 ]
@@ -1690,9 +1691,9 @@ requires-dist = [
     { name = "medauth-hipaa-logger", editable = "packages/hipaa-logger" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
-    { name = "pyjwt", specifier = ">=2.9" },
+    { name = "pyjwt", specifier = ">=2.13.0" },
     { name = "redis", specifier = ">=8.1.0" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.2" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.3" },
 ]
 
 [[package]]
@@ -1746,9 +1747,9 @@ requires-dist = [
     { name = "medauth-hipaa-logger", editable = "packages/hipaa-logger" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
-    { name = "pyjwt", specifier = ">=2.9" },
+    { name = "pyjwt", specifier = ">=2.13.0" },
     { name = "redis", specifier = ">=8.1.0" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.2" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.3" },
     { name = "websockets", specifier = ">=13.1" },
 ]
 
@@ -1805,7 +1806,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "redis", specifier = ">=8.1.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.2" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.3" },
 ]
 
 [[package]]
@@ -1823,6 +1824,7 @@ dependencies = [
     { name = "medauth-hipaa-logger" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "pyjwt" },
     { name = "redis" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "uvicorn", extra = ["standard"] },
@@ -1832,7 +1834,7 @@ dependencies = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.14" },
     { name = "asyncpg", specifier = ">=0.30" },
-    { name = "boto3", specifier = ">=1.35" },
+    { name = "boto3", specifier = ">=1.43.71" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "langchain", specifier = ">=0.3" },
     { name = "langchain-aws", specifier = ">=0.2" },
@@ -1840,9 +1842,10 @@ requires-dist = [
     { name = "medauth-hipaa-logger", editable = "packages/hipaa-logger" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
+    { name = "pyjwt", specifier = ">=2.10" },
     { name = "redis", specifier = ">=8.1.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.2" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.3" },
 ]
 
 [[package]]
@@ -1871,7 +1874,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.30" },
-    { name = "boto3", specifier = ">=1.35" },
+    { name = "boto3", specifier = ">=1.43.71" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "langchain", specifier = ">=0.3" },
     { name = "langchain-aws", specifier = ">=0.2" },
@@ -1885,7 +1888,7 @@ requires-dist = [
     { name = "redis", specifier = ">=8.1.0" },
     { name = "sentence-transformers", specifier = ">=3.3" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.2" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.3" },
 ]
 
 [[package]]

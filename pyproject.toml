@@ -22,6 +22,8 @@ dev = [
     "pytest-cov>=7.1.0",
     "httpx>=0.28",
     "moto[all]>=5.2.2",
+    # Reads the committed OpenAPI spec in the docs/api drift test.
+    "pyyaml>=6.0",
     "ruff>=0.8",
     "mypy>=2.3.0",
 ]
