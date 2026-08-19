@@ -13,8 +13,8 @@ info:
   description: >-
     Insurance policy retrieval-augmented generation. Owns the Qdrant
     `insurance_policies` collection and the local `BAAI/bge-large-en-v1.5`
-    embedding model. Policy ingestion (`/policies/ingest`) and the query
-    endpoint (`/policies/query`) arrive in TASK-011 and TASK-012.
+    embedding model. Policy ingestion (`/policies/ingest`) landed in TASK-011;
+    the query endpoint (`/policies/query`) arrives in TASK-012.
 
 servers:
   - url: http://localhost:8002
@@ -23,6 +23,10 @@ servers:
 tags:
   - name: health
     description: Readiness of this service's backing dependencies.
+  - name: policies
+    description: >-
+      Ingestion of payer policy documents. Internal service-to-service only —
+      reachable from inside the cluster, never through an ingress.
 
 paths:
   /health:
@@ -53,6 +57,55 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
+
+  /policies/ingest:
+    post:
+      tags: [policies]
+      operationId: ingest
+      summary: Ingest a policy document
+      description: >-
+        Chunks a payer policy PDF, embeds it, writes the vectors to Qdrant and
+        records the document in `insurance_policies`. Dedup is keyed on the
+        SHA-256 digest of the uploaded bytes: a new `policy_id` is `created`, a
+        matching digest is `unchanged` and does no work at all, and a changed
+        digest is `updated` — which removes the document's existing chunks
+        before writing the new ones, so a superseded revision cannot linger in
+        retrieval. All three are 200; the `status` field says which happened.
+
+        Internal service-to-service endpoint, called by the policy scraper
+        (TASK-013) and `scripts/seed-policies.py` (TASK-014). It carries no
+        authentication of its own — access control is network isolation, and
+        service-to-service auth is a separate future task. Writes no audit row:
+        policy documents are public payer publications with no patient linkage,
+        and Known Constraints #6 makes the audit write conditional on touching
+        PHI.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/IngestPolicyRequest'
+      responses:
+        '200':
+          description: What the ingest did, and how many chunks it wrote.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestPolicyResponse'
+        '400':
+          description: >-
+            The upload is not a readable PDF, or holds no extractable text to
+            index.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: The request body or path parameter is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
 components:
   schemas:
@@ -88,6 +141,99 @@ components:
             - $ref: '#/components/schemas/Error'
             - type: 'null'
 
+    IngestPolicyRequest:
+      type: object
+      description: >-
+        The policy document and its metadata, as one multipart body. The file is
+        a field of this model rather than a separate parameter because FastAPI
+        only flattens a form model into individual fields when that model is the
+        sole body parameter.
+      required: [policy_id, payer, file]
+      properties:
+        policy_id:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: The payer's own identifier for the document. Unique per policy.
+        payer:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Issuing payer, e.g. 'Aetna' or 'CMS'.
+        plan_type:
+          type: [string, 'null']
+          maxLength: 100
+          description: >-
+            Plan type the policy applies to, e.g. 'PPO'. Omit if it applies to
+            all.
+        state:
+          type: [string, 'null']
+          pattern: '^[A-Z]{2}$'
+          description: >-
+            Two-letter state code, or omitted for a policy that applies
+            nationally. Lowercase input is normalised to uppercase.
+        source_url:
+          type: [string, 'null']
+          description: Where the document was retrieved from, recorded for provenance.
+        effective_date:
+          type: [string, 'null']
+          format: date
+          description: The payer's stated effective date for this version of the policy.
+        file:
+          type: string
+          format: binary
+          description: The policy document, as a PDF.
+
+    IngestPolicyData:
+      type: object
+      required: [policy_id, status, content_hash, chunks_indexed, collection]
+      properties:
+        policy_id:
+          type: string
+        status:
+          type: string
+          enum: [created, updated, unchanged]
+          description: >-
+            'created' for a new policy_id, 'updated' when the content hash
+            changed, 'unchanged' when the document was already indexed.
+        content_hash:
+          type: string
+          description: SHA-256 hex digest of the uploaded PDF bytes.
+        chunks_indexed:
+          type: integer
+          minimum: 0
+          description: >-
+            Chunks written by this call. Zero when the document was unchanged,
+            which means it was skipped — not that the collection holds nothing
+            for it.
+        collection:
+          type: string
+          description: Qdrant collection the chunks were written to.
+
+    IngestPolicyResponse:
+      type: object
+      description: The standard envelope, carrying the ingest outcome.
+      required: [data, error]
+      properties:
+        data:
+          oneOf:
+            - $ref: '#/components/schemas/IngestPolicyData'
+            - type: 'null'
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/Error'
+            - type: 'null'
+
+    ErrorResponse:
+      type: object
+      description: The standard envelope with its error half populated.
+      required: [data, error]
+      properties:
+        data:
+          type: 'null'
+        error:
+          $ref: '#/components/schemas/Error'
+
     Error:
       type: object
       description: >-
@@ -100,5 +246,7 @@ components:
           enum:
             - validation_error
             - http_error
+            - invalid_pdf
+            - empty_document
         message:
           type: string

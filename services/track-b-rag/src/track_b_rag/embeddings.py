@@ -13,6 +13,7 @@ means the RAG path has no external dependency to fail, rate-limit, or leak to.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -58,6 +59,21 @@ def embed_query(text: str) -> list[float]:
     embedder = get_embedder()
     vector = embedder.encode(text, normalize_embeddings=True)
     return [float(value) for value in vector]
+
+
+def embed_documents(texts: Sequence[str]) -> list[list[float]]:
+    """Return one embedding per input text, in the same order.
+
+    Batched through a single ``encode`` call rather than looped: the model
+    parallelises a batch internally, and a policy PDF chunks into dozens or
+    hundreds of texts. Normalised for the same reason :func:`embed_query` is —
+    the collection compares with cosine distance.
+    """
+    if not texts:
+        return []
+    embedder = get_embedder()
+    vectors = embedder.encode(list(texts), normalize_embeddings=True)
+    return [[float(value) for value in vector] for vector in vectors]
 
 
 def check_health() -> bool:

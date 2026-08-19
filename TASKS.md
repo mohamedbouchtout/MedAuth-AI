@@ -424,7 +424,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
       Qdrant service container and `QDRANT_HOST`/`QDRANT_PORT` were already
       there from TASK-001 — this is the first task to use them.
 
-- [ ] **TASK-011:** Policy ingestion pipeline
+- [x] **TASK-011:** Policy ingestion pipeline
   - Service: `services/track-b-rag`
   - `POST /policies/ingest` accepts PDF file + metadata (payer, plan_type, state, policy_id)
     — internal service-to-service endpoint only (called by policy-scraper and by
@@ -441,11 +441,78 @@ The insurance policy RAG is the technical core. Build and validate before other 
     If `policy_id` is new, ingest and return `{"status": "created"}`.
   - Embed chunks + upsert to Qdrant with metadata payload
   - Store metadata record in `insurance_policies` table
+  - **Write Qdrant first, Postgres second.** The two stores are not in one
+    transaction, so the ordering decides which way a partial failure fails. With
+    Qdrant first, a crash between the two leaves the stored `content_hash` stale
+    and the next scrape re-ingests — wasteful and self-correcting. Reversed, the
+    row would claim to be current while the vectors are missing or half-written,
+    and nothing would ever retry. Do not "optimize" this into a single
+    write-the-row-first pass.
+  - **Qdrant payload schema, fixed here** — every point carries `policy_id`,
+    `payer`, `plan_type`, `state`, `chunk_index`, and the chunk `text`. Two
+    payload indexes, both keyword: `policy_id` for this task's delete-by-filter
+    path, and `payer` + `state` for TASK-012's retrieval filter. Create them with
+    the same get-or-create shape as the collection itself — never unconditionally.
+  - **Point IDs are deterministic:** `uuid5(namespace, f"{policy_id}:{chunk_index}")`
+    against a fixed module-level namespace, the same trick
+    `scripts/seed-test-encounters.py` uses. Re-ingesting the same document
+    overwrites its own points rather than accumulating a second copy, so the
+    dedup path is belt-and-braces instead of the only thing standing between a
+    retry and duplicated chunks.
+  - No `audit_log()` call — insurance policies are public payer publications with
+    no patient linkage. See Known Constraints #6; log the ingest at INFO instead.
+  - Access control is network isolation only, stated in the route docstring. No
+    service-to-service auth is invented here; that is its own future task.
   - **Test:** ingest a sample 10-page PDF, verify chunks appear in Qdrant
   - **Test:** ingest the same PDF twice, verify second call returns "unchanged" and
     does not duplicate Qdrant points
   - **Test:** ingest a modified version of an existing policy_id, verify old points
     are removed and "updated" is returned
+  - Built (179 tests, 100% coverage). Decisions worth knowing before touching this:
+    - The route takes **one** body parameter — `Annotated[IngestPolicyRequest,
+      File()]` — with the `UploadFile` as a *field of that model*. This is not a
+      style choice: FastAPI only flattens a form model into its individual form
+      fields when the model is the sole body parameter. Declaring `UploadFile`
+      as a second parameter alongside it makes FastAPI look for a form field
+      literally named `metadata`, and every well-formed request 422s. `File()`
+      rather than `Form()` is what makes the published spec say
+      `multipart/form-data` instead of `application/x-www-form-urlencoded`.
+    - Optional form fields go through a `BeforeValidator` that maps blank to
+      None. A multipart client renders an unset field as `name=""`, which would
+      otherwise fail `min_length` or store an empty `plan_type`. `state` is
+      uppercased the same way, for the `CHAR(2)` column and TASK-012's filter.
+    - `source_url` and `effective_date` are accepted beyond TASK-011's four-field
+      metadata list. Both columns exist on `insurance_policies` and TASK-013's
+      scraper knows both values at call time — real optional parameters rather
+      than columns permanently NULL, the same call CLAUDE.md makes for
+      hipaa-logger's `ip_address`/`user_agent`.
+    - The Postgres write is `INSERT ... ON CONFLICT DO UPDATE`, not
+      read-then-branch. Two scrapers racing on the same new policy would both see
+      no row and both insert, and the loser would surface an integrity error on
+      an ordinary retry. The created/updated label comes from the read that
+      already happened — the race can make the label optimistic, never the write
+      wrong.
+    - **An empty document is refused before anything is deleted.** A scanned PDF
+      with no text layer parses cleanly and yields nothing; accepting it would
+      write a `content_hash` saying "current" with zero vectors behind it, and
+      every later ingest of those same bytes would then report `unchanged`. That
+      is the one state the dedup logic cannot recover from on its own.
+    - Imported as `pymupdf`, not `fitz`. Same library, but only the `pymupdf`
+      module ships a `py.typed` marker, so this keeps the module inside mypy
+      strict instead of needing an `ignore_missing_imports` override for the
+      whole package. Its `Document` constructor is still unannotated, hence one
+      targeted `type: ignore` at that single call site.
+    - The integration tests stub the embedder with deterministic 1024-wide
+      vectors rather than loading the real weights. What they test is the
+      pipeline's effect on the two stores; requiring the real model would put
+      them behind `RUN_EMBEDDING_TESTS` and leave TASK-011's three dedup claims
+      unverified on most runs. TASK-010's suite covers the real model.
+    - CI needed no change. The test job already starts postgres/redis/qdrant from
+      docker-compose, applies both migration histories via `scripts/init-db.sh`,
+      and sets `DATABASE_URL` and `QDRANT_HOST` — this is the first task in this
+      service to use the database half.
+    - Local-dev note: on Windows, `QDRANT_HOST=localhost` resolves to IPv6 first
+      and hangs. Use `127.0.0.1`. CI is unaffected.
 
 - [ ] **TASK-012:** Policy query endpoint
   - Service: `services/track-b-rag`
