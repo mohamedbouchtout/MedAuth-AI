@@ -426,14 +426,39 @@ The insurance policy RAG is the technical core. Build and validate before other 
 
 - [x] **TASK-011:** Policy ingestion pipeline
   - Service: `services/track-b-rag`
+  - **First Postgres touch in this service** — no `db.py` exists here yet. Create
+    one mirroring `track_a_clinical/db.py` (engine + async_sessionmaker reading
+    `DATABASE_URL`) but WITHOUT the Alembic pieces: track-a-clinical owns
+    migration authorship for `insurance_policies`, track-b-rag only writes rows.
+    Import the `InsurancePolicy` model from `track_a_clinical.models` — do not
+    define a second mapped class.
   - `POST /policies/ingest` accepts PDF file + metadata (payer, plan_type, state, policy_id)
     — internal service-to-service endpoint only (called by policy-scraper and by
-    scripts/seed-policies.py), not exposed to any frontend app
+    scripts/seed-policies.py), not exposed to any frontend app.
+    **"Internal only" is currently network-level isolation only — no code
+    enforcement.** The only auth in the repo is TASK-006's session JWT, which is
+    scoped to a clinical encounter and makes no sense for a scraper CronJob.
+    Do NOT invent a service-to-service auth scheme inside this task; document
+    the assumption in the route docstring and leave it. A real internal-auth
+    mechanism is its own future task.
+  - No `audit_log()` call — insurance policies are public payer publications with
+    no patient linkage, so this route touches no PHI (see corrected Known
+    Constraints #6). Log the ingest at INFO via `logging.getLogger(__name__)`
+    with policy_id, payer, and resulting status — the operational trace belongs
+    there, not in the compliance table.
   - PDF parsing via PyMuPDF (fitz) — handles multi-column medical policy docs
   - Chunking: RecursiveCharacterTextSplitter, chunk_size=800, overlap=150
   - `content_hash` = SHA-256 hex digest of the raw PDF bytes (not the extracted
     text — two PDFs with identical text but different formatting should still be
     treated as distinct source files for audit purposes)
+  - **Qdrant payload schema and indexes — decide here, not in TASK-012.** Payload
+    fields per point: `policy_id`, `payer`, `plan_type`, `state`, `effective_date`,
+    `chunk_index`, `text`. Create payload indexes on `policy_id` (needed by this
+    task's delete-old-points path) and on `payer` + `state` (needed by TASK-012's
+    query filter) — defining both now avoids reworking the collection a task later.
+  - **Deterministic point IDs:** `uuid5(NAMESPACE, f"{policy_id}:{chunk_index}")`,
+    the same trick `scripts/seed-test-encounters.py` already uses. Makes re-ingest
+    naturally idempotent — a re-upsert overwrites in place rather than duplicating.
   - Dedup behavior: if `policy_id` already exists in `insurance_policies` with a
     matching `content_hash`, skip re-ingestion and return 200 with `{"status": "unchanged"}`.
     If `policy_id` exists with a different hash, re-ingest (delete old Qdrant points
@@ -514,30 +539,137 @@ The insurance policy RAG is the technical core. Build and validate before other 
     - Local-dev note: on Windows, `QDRANT_HOST=localhost` resolves to IPv6 first
       and hangs. Use `127.0.0.1`. CI is unaffected.
 
-- [ ] **TASK-012:** Policy query endpoint
+- [x] **TASK-012:** Policy query endpoint
   - Service: `services/track-b-rag`
+  - **First Redis and Bedrock touch in this service.** `redis` and `langchain-aws`
+    are declared in pyproject.toml but unused; Settings has only Qdrant and
+    embedding fields. This task adds the Redis client module, the Bedrock client
+    module, and their config fields. Redis joins `/health`'s dependency flags
+    alongside `qdrant` and `embedding_model` — a route now hard-depends on it,
+    so an unreachable Redis should surface as a named 503, not as latency.
   - `POST /policies/query` — Pydantic request model:
-    `{procedure: str, cpt_code: str, payer: str, plan_type: str, state: str, clinical_context: dict}`
+    `{procedure: str, cpt_code: str, payer: str, plan_type: str, state: str,
+    clinical_context: dict, session_id: UUID, provider_id: UUID}`
+    — `session_id` and `provider_id` are new relative to earlier drafts of this
+    task: this route touches PHI (clinical_context carries encounter detail),
+    so it needs an `audit_log()` call, and an audit row needs actor_id/session_id.
+    TASK-021 is the caller and has both available.
   - Response model: `{requires_auth: bool, auth_criteria: list[str], missing_criteria: list[str],
     denial_risk: Literal["low","medium","high"], nudge_message: str, step_therapy_required: bool,
-    step_therapy_details: str | None}`
-  - Cache key: `rag:{payer}:{plan_type}:{state}:{cpt_code}` per CLAUDE.md's Redis key list, TTL 24h
-  - If cache miss: embed query, search Qdrant (top 8, payer+state filter), call Claude
-    **Sonnet** via Bedrock (see CLAUDE.md "Bedrock Model Assignment" — this call site
-    is Sonnet, not Haiku, because it's multi-step reasoning over retrieved text)
+    step_therapy_details: str | None}` — wrapped in the standard envelope
+  - **Calls `audit_log()`** — this route touches PHI, unlike `/policies/ingest`.
+    Never log `clinical_context` contents; the audit row records the access
+    (actor, session, resource type), not the clinical detail.
+  - **Two-stage design — the cache holds payer-policy data only, never
+    patient-specific data.** This is a correctness requirement, not an
+    optimization detail. See CLAUDE.md's cache note in Key Architectural
+    Constraints.
+    - **Stage 1 (cached, 24h TTL, key `rag:{payer}:{plan_type}:{state}:{cpt_code}`):**
+      resolve the payer's rules for this procedure — `requires_auth`,
+      `auth_criteria`, `step_therapy_required`, `step_therapy_details`. On cache
+      miss: embed query, search Qdrant (top 8, payer+state filter), call Claude
+      **Sonnet** via `BEDROCK_MODEL_ID_REASONING` (multi-step reasoning over
+      retrieved policy text — see CLAUDE.md's Bedrock Model Assignment table).
+      Cache the result. These fields are identical for every patient with the
+      same payer/plan/state/CPT.
+    - **Stage 2 (never cached, runs every call):** compare the Stage 1
+      `auth_criteria` against this request's `clinical_context` to produce
+      `missing_criteria`, `denial_risk`, and `nudge_message`. These are
+      properties of *this patient's documentation* — caching them across
+      patients would serve patient B the gaps computed for patient A, which is
+      a patient-safety bug, not a stale-cache annoyance.
+    - Earlier drafts of this task cached the entire response under the Stage 1
+      key. That was wrong and is corrected here. Do not "simplify" it back.
+  - **Build Stage 1 behind a seam** — a single `resolve_policy_rules(...)`
+    function that TASK-015 can put the Da Vinci CRD path in front of, falling
+    through to this RAG implementation unchanged. Same response shape either
+    way; callers never branch on which path answered. Cheaper to define the
+    seam now than to refactor one task later.
   - Claude is instructed to return only JSON. If the response fails to parse as valid
-    JSON matching the response model: retry once with the same prompt. If the retry
+    JSON matching the Stage 1 shape: retry once with the same prompt. If the retry
     also fails, return a safe fallback: `{requires_auth: true, auth_criteria: [],
     missing_criteria: [], denial_risk: "high", nudge_message: "Unable to verify
     authorization requirements — confirm manually", step_therapy_required: false,
     step_therapy_details: null}` and log the parse failure (no PHI in that log line —
     log the payer/procedure/cpt_code, never clinical_context contents). Fail toward
     "flag for manual review," never toward "assume no auth needed."
-  - Cache the result only on a real (non-fallback) response — don't cache the fallback
+  - Cache the Stage 1 result only on a real (non-fallback) response — don't cache the fallback
+  - Update `docs/api/track-b-rag.yaml` (drift test compares routes/methods/status codes)
   - **Test:** query for "knee MRI" + "Aetna PPO MA" — verify structured JSON returned
-  - **Test:** second identical query — verify Redis cache hit (no Bedrock call)
+  - **Test:** second identical query — verify Stage 1 cache hit (no Bedrock call)
+  - **Test (the correctness test for the two-stage split):** two queries with
+    identical payer/plan/state/CPT but *different* `clinical_context` — verify
+    Stage 1 is served from cache (no second Bedrock call for policy rules) AND
+    that `missing_criteria` differs between the two responses. A single cached
+    blob would fail this test; that's the point of it.
   - **Test:** mock Bedrock returning malformed JSON — verify retry, then fallback,
     verify fallback is not cached
+  - **Test:** verify `audit_log()` is called with the request's session_id and
+    provider_id, and that no clinical_context content appears in the audit row
+  - Built (344 tests, 100% coverage). Decisions worth knowing before touching this:
+    - The two stages live in separate modules and the split is enforced by a
+      signature, not a comment: `policy_rules.resolve_policy_rules()` has no
+      `clinical_context` parameter at all, so nothing patient-specific can reach
+      the prompt, the retrieval or the cached value. A unit test asserts the
+      parameter list, so adding one back fails the build rather than review.
+    - `gap_analysis` (Stage 2) is **deterministic Python, not a second Bedrock
+      call.** It has to be: TASK-012's cache-hit test says "no Bedrock call" on
+      the second query, and a model call in Stage 2 would make that false. It
+      also keeps the per-nudge latency inside what a live encounter tolerates
+      and makes the output reproducible in a test. The matcher itself is an
+      explicit term-overlap heuristic with a documented threshold, biased toward
+      reporting a criterion missing — the replaceable part; the determinism and
+      the bias are not.
+    - Step therapy raises the denial-risk *floor* to medium rather than
+      appearing in `missing_criteria`. A plan with a step therapy prerequisite
+      is never a low-risk submission, but escalating every level would flag
+      well-documented requests as high.
+    - **The safe fallback covers more than a parse failure.** TASK-012 specifies
+      it for an answer that will not parse; it is also returned for an
+      unreachable Qdrant, a Bedrock error, and a retrieval that matched nothing.
+      The endpoint therefore has no 5xx path. That is deliberate: TASK-021 fires
+      nudges during a live encounter and reads an error as silence, and silence
+      reads as "no authorization concern" — the one thing this service must
+      never imply by accident. Outages surface through `/health` and an ERROR
+      log instead. A fallback is never cached, and Stage 2 does not run on one:
+      an empty `missing_criteria` from a real answer means "nothing is missing",
+      from a fallback it would mean "nothing is known".
+    - Nothing indexed for a payer short-circuits to the fallback without calling
+      Bedrock at all. Asking Sonnet to answer from zero retrieved passages is an
+      invitation to invent a policy.
+    - The state filter is not an equality check. A policy ingested with no state
+      applies nationally — every CMS national coverage determination is one — so
+      the filter is `payer AND (state = X OR state IS NULL)`. An equality filter
+      would hide every national policy and look exactly like "nothing indexed".
+    - The cache key uses the request values verbatim, and `state`/`cpt_code` are
+      uppercased in the request model the same way ingestion uppercases them.
+      The same values build the Qdrant filter, so a key and the retrieval it
+      stands for cannot disagree about which payer they mean.
+    - `procedure` is in the prompt and the embedded query but *not* in the cache
+      key, which is keyed on the CPT code. Two transcript labels for one code
+      therefore share an entry, and whichever label produced the miss is the one
+      that built the query. The prompt names the code as authoritative and the
+      label as a hint for that reason. Worth knowing before assuming the label
+      changes the answer.
+    - Redis failures degrade rather than fail: a read error is a miss, a write
+      error is an uncached answer. The dependency is still on `/health`, because
+      paying Bedrock for every query is an outage worth naming.
+    - The query route lives in `api/query.py` rather than alongside ingest in
+      `api/policies.py`. Both mount `/policies`, but one must write an audit row
+      and the other must not, and each module carries an AST-level test
+      asserting its own direction. One module would have made that pair of
+      standing decisions a comment.
+    - No new environment variable. `REDIS_URL`, `AWS_REGION` and
+      `BEDROCK_MODEL_ID_REASONING` were already in `.env.example`, unused.
+    - The boto3/botocore mypy suppression moved from `packages/crypto-utils`'s
+      import site to the root `pyproject.toml` overrides, which is what that
+      file's own comment asked for once a second package started calling AWS.
+    - CI needed no change: the test job already sets `REDIS_URL`, `AWS_REGION`
+      and dummy AWS credentials, and starts redis from docker-compose. Note that
+      moto's `bedrock-runtime` backend returns an *empty* body from
+      `invoke_model`, so it can verify the client is built and addressed
+      correctly and cannot stand in for a completion — the retry, fallback and
+      parsing paths are tested against a stubbed `invoke_reasoning`.
 
 - [ ] **TASK-013:** Policy scraper (background CronJob)
   - Service: `services/policy-scraper`
@@ -641,7 +773,9 @@ The insurance policy RAG is the technical core. Build and validate before other 
     echocardiogram, stress test, biologic, chemotherapy, referral to [specialist]
   - On keyword detected: extract surrounding context (the sentence or two
     containing the keyword), call TASK-012's `/policies/query` endpoint with
-    that context as `clinical_context`
+    that context as `clinical_context`, plus the `session_id` and `provider_id`
+    for the active encounter — TASK-012 audits this call as a PHI access and
+    needs both for the audit row
   - **Test:** publish transcript with "let's order an MRI" — verify policy
     query fires with the correct extracted context
 
@@ -949,18 +1083,17 @@ logic do not change.
 6. **Every new API route needs:** (a) Pydantic request/response models, (b) an
    OpenAPI docstring, (c) at least one integration test, and (d) a hipaa-logger
    `audit_log()` call **if and only if the route touches PHI**.
-
-   The "if and only if" binds in both directions. A route that reads or writes
-   patient data must audit. A route that does not must *not* — the audit_log
-   table's value comes from every row in it being a PHI access, and mixing
-   operational writes in means "who accessed patient X" becomes a query you have
-   to filter rather than one you can just run. Health and liveness probes touch
-   no PHI; `POST /policies/ingest` (TASK-011) writes insurance policy documents,
-   which are public payer publications with no patient linkage. Those routes log
-   at INFO through `logging.getLogger(__name__)` instead — the operational trace
-   still exists, in the right place. This replaces an earlier phrasing that
-   demanded the call on every route, which needed a carve-out for `/health` and
-   was accumulating more.
+   The audit_log table is a compliance artifact, not a general write log — its
+   value in an audit comes from every row being a PHI access. Diluting it with
+   operational events makes "who accessed patient X" a query you have to filter
+   rather than just run. Routes that touch no PHI use standard
+   `logging.getLogger(__name__)` at INFO instead — you still get the operational
+   trace, in the right place.
+   Known non-PHI routes as of now: `/health` on every service, and
+   `/policies/ingest` (TASK-011 — insurance policies are public payer
+   publications with no patient linkage). Judge new routes by the same test
+   rather than adding to this list reflexively; if a route's PHI status is
+   genuinely unclear, flag it rather than guessing either way.
 
 7. **TASK numbers must be recorded in commit messages.** Format: `feat(track-b-rag): implement policy query endpoint [TASK-012]`, each commit must follow the Git 50/72 commit rule (See CLAUDE.md for more details).
 

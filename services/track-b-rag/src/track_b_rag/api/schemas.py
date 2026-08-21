@@ -19,7 +19,8 @@ say ``multipart/form-data`` instead of ``application/x-www-form-urlencoded``.
 from __future__ import annotations
 
 import datetime
-from typing import Annotated, Literal
+import uuid
+from typing import Annotated, Any, Literal
 
 from fastapi import UploadFile
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
@@ -45,6 +46,13 @@ def _upper(value: object) -> object:
 OptionalFormStr = Annotated[str | None, BeforeValidator(_empty_to_none)]
 OptionalFormDate = Annotated[datetime.date | None, BeforeValidator(_empty_to_none)]
 StateCode = Annotated[str | None, BeforeValidator(_empty_to_none), BeforeValidator(_upper)]
+
+#: The query endpoint takes JSON rather than a form, so an omitted field is
+#: absent rather than empty and only the case normalisation applies. It matches
+#: what ingestion stores, which is what makes the Qdrant filter and the cache key
+#: agree about which payer and which state a request means.
+RequiredStateCode = Annotated[str, BeforeValidator(_upper)]
+CptCode = Annotated[str, BeforeValidator(_upper)]
 
 
 class IngestPolicyRequest(BaseModel):
@@ -111,3 +119,89 @@ class IngestPolicyData(BaseModel):
         description="Chunks written by this call. Zero when the document was unchanged.",
     )
     collection: str = Field(description="Qdrant collection the chunks were written to.")
+
+
+class PolicyQueryRequest(BaseModel):
+    """Body of ``POST /policies/query`` — one procedure, one encounter.
+
+    ``session_id`` and ``provider_id`` are here because this route touches PHI
+    and therefore audits: an ``audit_log`` row needs to name the actor and the
+    session, and the caller (TASK-021) has both for the encounter it is watching.
+    They are not used to authenticate anything — session JWT validation belongs
+    to the WebSocket endpoints TASK-006 issues tokens for, and inventing a
+    second auth mechanism here is what Known Constraints #8 rules out.
+
+    ``clinical_context`` is free-form on purpose. It carries whatever the
+    transcript scan extracted around a procedure keyword, and pinning a schema
+    to it now would freeze a shape TASK-021 has not settled yet. It is typed as
+    a mapping rather than a string so a structured context stays structured.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    procedure: str = Field(
+        min_length=1,
+        max_length=200,
+        description="The procedure as the clinician described it, e.g. 'knee MRI'.",
+    )
+    cpt_code: CptCode = Field(
+        min_length=1,
+        max_length=10,
+        description="CPT or HCPCS code for the procedure. Lowercase input is uppercased.",
+    )
+    payer: str = Field(
+        min_length=1,
+        max_length=200,
+        description="Issuing payer, spelled as the payer's policies were ingested.",
+    )
+    plan_type: str = Field(
+        min_length=1,
+        max_length=100,
+        description="Plan type, e.g. 'PPO'. Part of the cache key, so it is required here.",
+    )
+    state: RequiredStateCode = Field(
+        pattern=r"^[A-Z]{2}$",
+        description="Two-letter state code for the encounter. Lowercase input is uppercased.",
+    )
+    clinical_context: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "What this encounter has documented so far. Compared against the payer's "
+            "criteria on every call and never cached."
+        ),
+    )
+    session_id: uuid.UUID = Field(description="The encounter session, for the audit row.")
+    provider_id: uuid.UUID = Field(description="The acting provider, for the audit row.")
+
+
+class PolicyQueryData(BaseModel):
+    """``data`` payload returned by ``POST /policies/query``.
+
+    The first four fields describe the payer's policy and are the half that is
+    cached; the middle three describe this encounter's documentation and are
+    recomputed on every call. The response does not say which half came from
+    where — a caller that behaved differently on a cache hit would be reading
+    something into it that is not there.
+    """
+
+    requires_auth: bool = Field(
+        description="Whether the payer requires prior authorization for this procedure.",
+    )
+    auth_criteria: list[str] = Field(
+        description="What the payer requires to be documented before it will authorize.",
+    )
+    missing_criteria: list[str] = Field(
+        description="Criteria this encounter has not yet documented.",
+    )
+    denial_risk: Literal["low", "medium", "high"] = Field(
+        description="How likely a claim is to be denied given what is documented so far.",
+    )
+    nudge_message: str = Field(
+        description="The message to put in front of the provider, mid-encounter.",
+    )
+    step_therapy_required: bool = Field(
+        description="Whether the plan requires a first-line therapy to be tried first.",
+    )
+    step_therapy_details: str | None = Field(
+        description="What the step therapy requirement is, when there is one.",
+    )

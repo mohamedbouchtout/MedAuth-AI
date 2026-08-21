@@ -7,7 +7,7 @@ from collections.abc import Callable
 import pytest
 from httpx import AsyncClient
 
-from tests.unit.api.conftest import FakeQdrant
+from tests.unit.api.conftest import FakeQdrant, FakeRedis
 
 
 async def test_both_up_is_200_in_the_standard_envelope(client: AsyncClient) -> None:
@@ -15,7 +15,7 @@ async def test_both_up_is_200_in_the_standard_envelope(client: AsyncClient) -> N
 
     assert response.status_code == 200
     assert response.json() == {
-        "data": {"qdrant": "ok", "embedding_model": "ok"},
+        "data": {"qdrant": "ok", "embedding_model": "ok", "redis": "ok"},
         "error": None,
     }
 
@@ -28,7 +28,11 @@ async def test_qdrant_down_is_503_and_names_qdrant(
     response = await client.get("/health")
 
     assert response.status_code == 503
-    assert response.json()["data"] == {"qdrant": "error", "embedding_model": "ok"}
+    assert response.json()["data"] == {
+        "qdrant": "error",
+        "embedding_model": "ok",
+        "redis": "ok",
+    }
 
 
 async def test_the_model_down_is_503_and_names_the_model(
@@ -39,19 +43,51 @@ async def test_the_model_down_is_503_and_names_the_model(
     response = await client.get("/health")
 
     assert response.status_code == 503
-    assert response.json()["data"] == {"qdrant": "ok", "embedding_model": "error"}
+    assert response.json()["data"] == {
+        "qdrant": "ok",
+        "embedding_model": "error",
+        "redis": "ok",
+    }
 
 
-async def test_both_down_is_503(
-    client: AsyncClient, fake_qdrant: FakeQdrant, embedding_health: Callable[[bool], None]
+async def test_redis_down_is_503_and_names_redis(
+    client: AsyncClient, fake_redis: FakeRedis
+) -> None:
+    """Redis joined the flags in TASK-012, when /policies/query started using it.
+
+    A query still answers without the cache, at full Bedrock cost per call. That
+    is an outage worth naming rather than one to discover on an invoice.
+    """
+    fake_redis.healthy = False
+
+    response = await client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["data"] == {
+        "qdrant": "ok",
+        "embedding_model": "ok",
+        "redis": "error",
+    }
+
+
+async def test_everything_down_is_503(
+    client: AsyncClient,
+    fake_qdrant: FakeQdrant,
+    fake_redis: FakeRedis,
+    embedding_health: Callable[[bool], None],
 ) -> None:
     fake_qdrant.healthy = False
+    fake_redis.healthy = False
     embedding_health(False)
 
     response = await client.get("/health")
 
     assert response.status_code == 503
-    assert response.json()["data"] == {"qdrant": "error", "embedding_model": "error"}
+    assert response.json()["data"] == {
+        "qdrant": "error",
+        "embedding_model": "error",
+        "redis": "error",
+    }
 
 
 @pytest.mark.parametrize("qdrant_up", [True, False])
@@ -64,7 +100,7 @@ async def test_a_503_still_carries_data_not_an_error(
     body = (await client.get("/health")).json()
 
     assert body["error"] is None
-    assert set(body["data"]) == {"qdrant", "embedding_model"}
+    assert set(body["data"]) == {"qdrant", "embedding_model", "redis"}
 
 
 async def test_health_writes_no_audit_row(

@@ -28,6 +28,9 @@ from starlette.concurrency import run_in_threadpool
 from api_envelope import install_error_handlers
 from track_b_rag.api.health import router as health_router
 from track_b_rag.api.policies import router as policies_router
+from track_b_rag.api.query import router as query_router
+from track_b_rag.bedrock import reset_clients as reset_bedrock_clients
+from track_b_rag.cache import close_client as close_redis
 from track_b_rag.config import get_settings
 from track_b_rag.db import dispose_engine
 from track_b_rag.embeddings import reset_embedder
@@ -84,6 +87,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
     close_client()
     reset_embedder()
+    reset_bedrock_clients()
+    await close_redis()
     await dispose_engine()
 
 
@@ -93,7 +98,8 @@ def create_app() -> FastAPI:
         title="MedAuth AI — track-b-rag",
         description=(
             "Insurance policy retrieval-augmented generation. Owns the Qdrant "
-            "insurance_policies collection and the local embedding model."
+            "insurance_policies collection and the local embedding model, and "
+            "answers prior authorization questions during a live encounter."
         ),
         version="0.1.0",
         lifespan=lifespan,
@@ -101,6 +107,10 @@ def create_app() -> FastAPI:
     install_error_handlers(app)
     app.include_router(health_router)
     app.include_router(policies_router)
+    # Two routers share the /policies prefix. The ingest route writes no audit
+    # row and the query route must — keeping them in separate modules keeps that
+    # difference, and the tests that assert it, unambiguous.
+    app.include_router(query_router)
     return app
 
 
