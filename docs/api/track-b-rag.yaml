@@ -13,8 +13,9 @@ info:
   description: >-
     Insurance policy retrieval-augmented generation. Owns the Qdrant
     `insurance_policies` collection and the local `BAAI/bge-large-en-v1.5`
-    embedding model. Policy ingestion (`/policies/ingest`) landed in TASK-011;
-    the query endpoint (`/policies/query`) arrives in TASK-012.
+    embedding model, and answers prior authorization questions during a live
+    encounter. Policy ingestion (`/policies/ingest`) landed in TASK-011, the
+    query endpoint (`/policies/query`) in TASK-012.
 
 servers:
   - url: http://localhost:8002
@@ -25,8 +26,9 @@ tags:
     description: Readiness of this service's backing dependencies.
   - name: policies
     description: >-
-      Ingestion of payer policy documents. Internal service-to-service only —
-      reachable from inside the cluster, never through an ingress.
+      Ingestion of payer policy documents and queries against them. Internal
+      service-to-service only — reachable from inside the cluster, never
+      through an ingress.
 
 paths:
   /health:
@@ -35,18 +37,20 @@ paths:
       operationId: health
       summary: Service health
       description: >-
-        Reports whether Qdrant and the embedding model are both usable. 200 when
-        both are `ok`, 503 when either is `error`. The body is the standard
-        envelope in both cases and always names the individual dependencies, so
-        a failing probe is diagnosable from the response alone — a 503 carries
-        `data`, not `error`, because the request itself succeeded.
+        Reports whether Qdrant, the embedding model and Redis are all usable.
+        200 when all three are `ok`, 503 when any is `error`. The body is the
+        standard envelope in both cases and always names the individual
+        dependencies, so a failing probe is diagnosable from the response alone
+        — a 503 carries `data`, not `error`, because the request itself
+        succeeded.
 
         Unauthenticated and deliberately unaudited: this is what the Kubernetes
         readiness probe calls, it exposes no patient data, and CLAUDE.md exempts
         health endpoints from the hipaa-logger requirement.
       responses:
         '200':
-          description: Readiness of the vector store and the embedding model.
+          description: >-
+            Readiness of the vector store, the embedding model and the cache.
           content:
             application/json:
               schema:
@@ -107,6 +111,64 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /policies/query:
+    post:
+      tags: [policies]
+      operationId: query_policies
+      summary: Query prior authorization requirements
+      description: >-
+        Answers whether a payer requires prior authorization for a procedure,
+        what it requires to be documented, what this encounter has not yet
+        documented, and what to tell the provider. Called by TASK-021's
+        transcript consumer the moment a procedure keyword is heard.
+
+        The answer is assembled in two stages that are cached differently. The
+        payer half — `requires_auth`, `auth_criteria`, `step_therapy_required`,
+        `step_therapy_details` — is resolved from indexed policy text with
+        Claude Sonnet on Bedrock and cached for 24h under
+        `rag:{payer}:{plan_type}:{state}:{cpt_code}`. The patient half —
+        `missing_criteria`, `denial_risk`, `nudge_message` — is recomputed on
+        every call from `clinical_context` and never cached, because those
+        fields describe one encounter's documentation and sharing them between
+        patients would report one patient's gaps for another.
+
+        Always 200 on a well-formed request. When the payer's rules cannot be
+        established — nothing indexed, an unreachable dependency, or an answer
+        that will not parse — the response is the safe default: authorization
+        assumed required, `denial_risk` high, and a message asking for a manual
+        check. An error status is not used, because the caller fires nudges
+        during a live encounter and would read one as "nothing to worry about".
+
+        Writes an `audit_log` row, unlike `/policies/ingest`: the request
+        carries a live encounter's clinical context, which is PHI. The row
+        names the provider and the session only — never the clinical detail,
+        the procedure or the code.
+
+        Internal service-to-service endpoint. Access control is network
+        isolation; it carries no authentication of its own.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyQueryRequest'
+      responses:
+        '200':
+          description: >-
+            The payer's requirements and this encounter's gaps against them.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyQueryResponse'
+        '422':
+          description: >-
+            The request body is invalid — a missing field, a malformed state
+            code, or a session_id or provider_id that is not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   schemas:
     ComponentStatus:
@@ -115,7 +177,7 @@ components:
 
     HealthData:
       type: object
-      required: [qdrant, embedding_model]
+      required: [qdrant, embedding_model, redis]
       properties:
         qdrant:
           $ref: '#/components/schemas/ComponentStatus'
@@ -126,6 +188,11 @@ components:
             Whether the local sentence-transformers model is loaded and usable.
             The first probe after startup pays for the load, so it can report
             `error` briefly while the weights come into memory.
+        redis:
+          $ref: '#/components/schemas/ComponentStatus'
+          description: >-
+            Whether the Redis cache behind `/policies/query` answers. A query
+            still succeeds without it, at full Bedrock cost on every call.
 
     HealthResponse:
       type: object
@@ -218,6 +285,118 @@ components:
         data:
           oneOf:
             - $ref: '#/components/schemas/IngestPolicyData'
+            - type: 'null'
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/Error'
+            - type: 'null'
+
+    PolicyQueryRequest:
+      type: object
+      description: >-
+        One procedure, for one encounter. `session_id` and `provider_id` are
+        carried for the audit row this route writes; they authenticate nothing.
+      required: [procedure, cpt_code, payer, plan_type, state, session_id, provider_id]
+      properties:
+        procedure:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: The procedure as the clinician described it, e.g. 'knee MRI'.
+        cpt_code:
+          type: string
+          minLength: 1
+          maxLength: 10
+          description: >-
+            CPT or HCPCS code for the procedure. Lowercase input is normalised
+            to uppercase.
+        payer:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Issuing payer, spelled as the payer's policies were ingested.
+        plan_type:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: >-
+            Plan type, e.g. 'PPO'. Part of the cache key, so it is required
+            here even though ingestion treats it as optional.
+        state:
+          type: string
+          pattern: '^[A-Z]{2}$'
+          description: >-
+            Two-letter state code for the encounter. Lowercase input is
+            normalised to uppercase. Policies ingested with no state apply
+            nationally and are searched alongside the state-specific ones.
+        clinical_context:
+          type: object
+          additionalProperties: true
+          description: >-
+            What this encounter has documented so far. Compared against the
+            payer's criteria on every call and never cached, never embedded,
+            and never sent to Bedrock.
+        session_id:
+          type: string
+          format: uuid
+          description: The encounter session, recorded in the audit row.
+        provider_id:
+          type: string
+          format: uuid
+          description: The acting provider, recorded as the audit row's actor.
+
+    PolicyQueryData:
+      type: object
+      required:
+        - requires_auth
+        - auth_criteria
+        - missing_criteria
+        - denial_risk
+        - nudge_message
+        - step_therapy_required
+        - step_therapy_details
+      properties:
+        requires_auth:
+          type: boolean
+          description: >-
+            Whether the payer requires prior authorization for this procedure.
+        auth_criteria:
+          type: array
+          items:
+            type: string
+          description: >-
+            What the payer requires to be documented before it will authorize.
+        missing_criteria:
+          type: array
+          items:
+            type: string
+          description: >-
+            The criteria this encounter has not yet documented. Recomputed on
+            every call — never served from cache.
+        denial_risk:
+          type: string
+          enum: [low, medium, high]
+          description: >-
+            How likely a claim is to be denied given what is documented so far.
+        nudge_message:
+          type: string
+          description: The message to put in front of the provider, mid-encounter.
+        step_therapy_required:
+          type: boolean
+          description: >-
+            Whether the plan requires a first-line therapy to be tried first.
+        step_therapy_details:
+          type: [string, 'null']
+          description: What the step therapy requirement is, when there is one.
+
+    PolicyQueryResponse:
+      type: object
+      description: The standard envelope, carrying the policy answer.
+      required: [data, error]
+      properties:
+        data:
+          oneOf:
+            - $ref: '#/components/schemas/PolicyQueryData'
             - type: 'null'
         error:
           oneOf:

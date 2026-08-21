@@ -197,7 +197,21 @@ Authored-By: ...
 - **Claude is called via AWS Bedrock only** (not Anthropic's direct API). This is the HIPAA-eligible path.
 - **No Kafka until >20 providers.** Redis pub/sub for now. The service interfaces are identical so swapping later is a config change.
 - **Qdrant for vector store.** Do not use Pinecone or Weaviate — we self-host for PHI control even though insurance policy text is not PHI (defense in depth).
-- **Cache RAG results in Redis** with 24h TTL keyed by `rag:{payer}:{plan_type}:{state}:{cpt_code}`. This is a major cost lever — implement it from the start.
+- **Cache the payer-policy half of RAG results in Redis** with 24h TTL keyed by
+  `rag:{payer}:{plan_type}:{state}:{cpt_code}`. This is a major cost lever —
+  implement it from the start. **Cache only the payer-policy fields, never the
+  patient-specific ones.** `/policies/query`'s response mixes two kinds of data:
+  `requires_auth`, `auth_criteria`, `step_therapy_required`, and
+  `step_therapy_details` are properties of the payer's policy and are identical
+  for every patient with that payer/plan/state/CPT — those are what the key
+  above caches. `missing_criteria`, `denial_risk`, and `nudge_message` are
+  properties of *this patient's documentation* and differ per encounter;
+  caching them across patients would serve patient B the gaps computed for
+  patient A. Run that comparison fresh on every call against the cached policy
+  rules. The expensive work (Qdrant search + Sonnet reasoning over retrieved
+  policy text) is the cacheable half, so this preserves the full cost benefit.
+  Adding `clinical_context` to the key instead would be correct but would
+  collapse the hit rate to near zero, defeating the point.
 - **Haiku for extraction tasks, Sonnet for reasoning.** ICD/CPT entity extraction → Haiku. SOAP generation and payer policy analysis → Sonnet. Costs 15x less per extraction call.
 - **Policy lookup is two-tier, not RAG-only.** For payers covered by the CMS-0057-F
   mandate (Medicare Advantage, Medicaid managed care, CHIP, ACA marketplace),
@@ -257,8 +271,14 @@ session:ended:{session_id}       pub/sub — empty-payload signal, published by
                                  track-a-clinical itself (TASK-030) and
                                  prior-auth (TASK-060)
 rag:{payer}:{plan_type}:{state}:{cpt_code}
-                                  cache, 24h TTL — policy query results
-                                  (TASK-012)
+                                  cache, 24h TTL — payer-policy fields ONLY
+                                  (requires_auth, auth_criteria,
+                                  step_therapy_required, step_therapy_details).
+                                  Never the patient-specific fields
+                                  (missing_criteria, denial_risk,
+                                  nudge_message) — those are recomputed per
+                                  call. See the cache note in Key
+                                  Architectural Constraints. (TASK-012)
 fhir_session:{state_param}       cache, TTL = OAuth flow timeout (~10 min) —
                                   transient SMART launch state (TASK-051)
 fhir_token:{session_id}          cache, TTL = token expiry — EHR access token

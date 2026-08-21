@@ -118,16 +118,21 @@ async def test_shutdown_releases_the_client_and_the_model(
     monkeypatch.setattr(main, "get_client", lambda: FakeClient())
     monkeypatch.setattr(main, "close_client", lambda: released.append("qdrant"))
     monkeypatch.setattr(main, "reset_embedder", lambda: released.append("embedder"))
+    monkeypatch.setattr(main, "reset_bedrock_clients", lambda: released.append("bedrock"))
+
+    async def close_redis() -> None:
+        released.append("redis")
 
     async def dispose() -> None:
         released.append("engine")
 
+    monkeypatch.setattr(main, "close_redis", close_redis)
     monkeypatch.setattr(main, "dispose_engine", dispose)
 
     async with lifespan(create_app()):
         pass
 
-    assert released == ["qdrant", "embedder", "engine"]
+    assert released == ["qdrant", "embedder", "bedrock", "redis", "engine"]
 
 
 def test_the_app_never_loads_the_model_at_import_time() -> None:
@@ -139,11 +144,25 @@ def test_the_app_never_loads_the_model_at_import_time() -> None:
     assert get_embedder.cache_info().currsize == 0
 
 
-def test_the_app_exposes_health_and_ingest() -> None:
+def test_the_app_exposes_health_ingest_and_query() -> None:
     """Read from the generated spec: FastAPI nests included routers in app.routes."""
     paths = set(create_app().openapi()["paths"])
 
-    assert paths == {"/health", "/policies/ingest"}
+    assert paths == {"/health", "/policies/ingest", "/policies/query"}
+
+
+def test_the_app_never_builds_a_bedrock_client_at_startup() -> None:
+    """Same reasoning as the embedding model: a rollout must not wait on AWS.
+
+    Building the client resolves credentials and loads service metadata, and a
+    replica that never answers a query should never pay for either.
+    """
+    create_app()
+
+    from track_b_rag.bedrock import get_reasoning_model, get_runtime_client
+
+    assert get_runtime_client.cache_info().currsize == 0
+    assert get_reasoning_model.cache_info().currsize == 0
 
 
 def test_vector_store_module_is_the_one_startup_calls() -> None:
