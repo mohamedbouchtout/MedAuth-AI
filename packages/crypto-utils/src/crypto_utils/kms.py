@@ -19,11 +19,12 @@ from collections.abc import Mapping
 from typing import Any, Final, NamedTuple
 
 # boto3 and botocore ship no py.typed marker, so mypy has no stubs for them. The
-# ignore is local to this one import site rather than a workspace-wide mypy
-# override because this package is the only KMS caller; if a second package starts
-# using boto3, move it to the root pyproject's mypy overrides instead.
-import boto3  # type: ignore[import-untyped]
-from botocore.exceptions import BotoCoreError, ClientError  # type: ignore[import-untyped]
+# suppression lives in the root pyproject's mypy overrides rather than here: this
+# package was the only AWS caller until track-b-rag started calling Bedrock in
+# TASK-012, and two import sites carrying the same local ignore is how a
+# workspace-wide decision ends up written down in two places that can disagree.
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 
 from .context import context_keys, validate_context
 from .errors import CryptoConfigurationError, DecryptionError, EncryptionError

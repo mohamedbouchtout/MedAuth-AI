@@ -67,8 +67,16 @@ fail_under = 80
 python_version = "3.12"
 strict = true
 
-# asyncpg and alembic do not ship complete type information; strict mode would
-# otherwise fail on the import itself rather than on any of our own code.
+# asyncpg, alembic, boto3 and botocore do not ship complete type information;
+# strict mode would otherwise fail on the import itself rather than on any of our
+# own code.
+#
+# boto3 and botocore moved here in TASK-012, when track-b-rag became the second
+# package to call an AWS service and crypto-utils' per-import-site ignores stopped
+# being the whole story — its own comment asked for exactly this move. boto3
+# builds its clients dynamically, so even the published stub packages describe
+# them as generic service objects; track-b-rag confines the resulting Any to one
+# factory function rather than spreading it across call sites.
 [[tool.mypy.overrides]]
-module = ["asyncpg.*", "alembic.*"]
+module = ["asyncpg.*", "alembic.*", "boto3.*", "botocore.*"]
 ignore_missing_imports = true
