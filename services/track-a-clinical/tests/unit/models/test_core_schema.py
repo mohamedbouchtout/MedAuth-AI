@@ -92,6 +92,7 @@ EXPECTED_COLUMNS = {
         "payer",
         "plan_type",
         "state",
+        "jurisdiction_states",
         "policy_id",
         "source_url",
         "content_hash",
