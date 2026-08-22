@@ -5,11 +5,17 @@ description = "Nightly CronJob that scrapes public payer policy PDFs and feeds t
 requires-python = ">=3.12"
 dependencies = [
     "asyncpg>=0.30",
-    "beautifulsoup4>=4.15.0",
     "httpx>=0.28",
+    # TASK-013 reads insurance_policies.content_hash before uploading, which
+    # crosses the service-import boundary. See CLAUDE.md, "Where the shared
+    # SQLAlchemy models live" — this is why the package is src/policy_scraper/
+    # rather than a bare src/.
+    "medauth-track-a-clinical",
+    # Canonical payer slugs and USPS state codes. CMS documents ingest as
+    # cms-medicare, and MAC jurisdiction codes are not all USPS codes.
+    "medauth-payer-vocab",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
-    "pymupdf>=1.24",
     "sqlalchemy[asyncio]>=2.0.52",
 ]
 
@@ -18,4 +24,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["src/policy_scraper"]
