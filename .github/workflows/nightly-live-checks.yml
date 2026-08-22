@@ -1,0 +1,75 @@
+name: Nightly live checks
+
+# Runs the tests that talk to real external sources, with their gate turned on.
+#
+# Those tests are skipped by default so an unrelated pull request never goes red
+# because a government site was slow or a vendor sandbox was being rebuilt. But a
+# gate nobody ever opens is not a deferral, it is a deletion: drift in the
+# upstream source would then be discovered whenever someone happened to set the
+# flag, which is no better than loosening the assertions until they stop failing.
+# This workflow is what makes the gate honest.
+#
+# A failure here is a real signal about the outside world, not a flake to re-run
+# until green. Fix the scraper or the fixtures; do not relax the assertion.
+#
+# Currently: the CMS Medicare Coverage Database (TASK-013). Payer and EHR
+# sandboxes join this workflow as their tasks land — each one as its own job, so
+# a red nightly names the upstream that moved without anyone opening the log.
+
+on:
+  schedule:
+    # 05:00 UTC. After the policy scraper's own 03:30 CronJob slot, and well
+    # after CMS regenerates its exports at about 02:00 UTC — checking while the
+    # archives are being rewritten would produce failures about our timing
+    # rather than about their structure.
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  cms-coverage-database:
+    name: CMS Medicare Coverage Database
+    runs-on: ubuntu-latest
+    env:
+      # The gate the tests check. Without it they skip, exactly as they do on a
+      # pull request.
+      RUN_CMS_LIVE_TESTS: "1"
+      # cms.gov answers 403 to some clients on User-Agent alone, and the config
+      # refuses to start without a contact address in it.
+      POLICY_SCRAPER_USER_AGENT: "MedAuthAI-PolicyScraper/0.1 (+https://github.com/mohamedbouchtout/MedAuth-AI; mohamedbouchtout@gmail.com)"
+      DATABASE_URL: postgresql+asyncpg://medauth:medauth_ci@localhost:5432/medauth_test
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+
+      # Same stack, same images, same healthchecks as CI and as a laptop —
+      # docker-compose.yml is the single place backing service versions are
+      # written. See CLAUDE.md, "Backing service versions live in exactly one
+      # file".
+      - name: Start backing services
+        env:
+          POSTGRES_DB: medauth_test
+          POSTGRES_PASSWORD: medauth_ci
+        run: docker compose up -d --wait postgres
+
+      - run: uv sync --all-packages
+
+      - name: Apply migrations
+        run: ./scripts/init-db.sh
+
+      # Only the live checks. The rest of the suite already ran on the pull
+      # request that introduced it, and re-running it here would bury a real
+      # CMS failure in a hundred lines of unrelated passes.
+      - name: Live CMS export checks
+        working-directory: services/policy-scraper
+        run: uv run pytest tests/integration/test_cms_live.py -v --no-cov
