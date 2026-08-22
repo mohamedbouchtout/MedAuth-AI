@@ -115,10 +115,67 @@ async def test_every_field_reaches_the_pipeline(client: AsyncClient, recorder: R
     assert recorder.query_kwargs is not None
     assert recorder.query_kwargs["procedure"] == "knee MRI"
     assert recorder.query_kwargs["cpt_code"] == "73721"
-    assert recorder.query_kwargs["payer"] == "Aetna"
+    assert recorder.query_kwargs["payer"] == "aetna"  # normalised, see TASK-016
     assert recorder.query_kwargs["plan_type"] == "PPO"
     assert recorder.query_kwargs["state"] == "MA"
     assert recorder.query_kwargs["clinical_context"] == {"hpi": "knee pain after a fall"}
+
+
+async def test_the_payer_is_normalised_before_the_pipeline_sees_it(
+    client: AsyncClient, recorder: Recorder
+) -> None:
+    """The whole point of TASK-016: a Coverage display name has to reach the same
+    slug the ingest wrote, or retrieval filters on a string nothing was indexed
+    under and the caller cannot tell that from "no policy on file"."""
+    await client.post("/policies/query", json=body(payer="Medicare Part B"))
+
+    assert recorder.query_kwargs is not None
+    assert recorder.query_kwargs["payer"] == "cms-medicare"
+
+
+@pytest.mark.parametrize("spelling", ["Aetna", "AETNA", "aetna, inc.", "  Aetna Inc  "])
+async def test_every_spelling_of_one_payer_queries_the_same_slug(
+    client: AsyncClient, recorder: Recorder, spelling: str
+) -> None:
+    """One slug means one Qdrant filter value and one `rag:` cache key."""
+    await client.post("/policies/query", json=body(payer=spelling))
+
+    assert recorder.query_kwargs is not None
+    assert recorder.query_kwargs["payer"] == "aetna"
+
+
+async def test_an_unrecognised_payer_is_answered_and_logged(
+    client: AsyncClient, recorder: Recorder, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Not an error — it answers. The WARNING is what keeps "the name did not line
+    up" distinguishable from "this payer has no policy on file"."""
+    with caplog.at_level("WARNING", logger="track_b_rag.api.query"):
+        response = await client.post(
+            "/policies/query", json=body(payer="Sierra Valley Regional Health Plan")
+        )
+
+    assert response.status_code == 200
+    assert recorder.query_kwargs is not None
+    assert recorder.query_kwargs["payer"] == "sierra-valley-regional-health-plan"
+    assert "Sierra Valley Regional Health Plan" in caplog.text
+    assert "sierra-valley-regional-health-plan" in caplog.text
+
+
+async def test_a_known_payer_logs_no_warning(
+    client: AsyncClient, recorder: Recorder, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("WARNING", logger="track_b_rag.api.query"):
+        await client.post("/policies/query", json=body(payer="Medicare Part B"))
+
+    assert caplog.text == ""
+
+
+async def test_a_payer_name_with_no_slug_is_a_422(client: AsyncClient, recorder: Recorder) -> None:
+    """Caught at the boundary, so the field is named rather than failing deeper in."""
+    response = await client.post("/policies/query", json=body(payer="---"))
+
+    assert response.status_code == 422
+    assert recorder.query_kwargs is None
 
 
 async def test_the_configured_collection_is_used(

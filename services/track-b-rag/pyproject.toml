@@ -12,6 +12,9 @@ dependencies = [
     "langchain-text-splitters>=0.3",
     "medauth-api-envelope",
     "medauth-hipaa-logger",
+    # TASK-016. The payer slug is what the Qdrant filter matches on and what the
+    # rag: cache key is built from, so ingest and query have to agree about it.
+    "medauth-payer-vocab",
     # Declared in TASK-010 ahead of its first use. TASK-011 imports the shared
     # SQLAlchemy models from track_a_clinical.models to write the
     # insurance_policies row; the dependency belongs in the diff that renames

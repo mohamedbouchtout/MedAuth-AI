@@ -207,6 +207,17 @@ def build_points(
 ) -> list[PointStruct]:
     """Pair chunks with their vectors into points carrying the payload schema.
 
+    Args:
+        policy_id: The payer's identifier for the document.
+        payer: The **canonical payer slug**, not a display name — this is the
+            value ``policy_query_filter`` matches by exact equality, so it has to
+            be what a query's payer normalises to. See :mod:`payer_vocab`.
+        plan_type: Plan type the policy applies to, or None for all.
+        state: Two-letter state code, or None for a policy that applies
+            nationally.
+        chunks: The document's text chunks, in order.
+        vectors: One embedding per chunk, in the same order.
+
     Raises:
         ValueError: The chunk and vector counts disagree, which would otherwise
             silently pair a chunk with another chunk's embedding.

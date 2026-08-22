@@ -54,6 +54,11 @@ def policy_query_filter(*, payer: str, state: str) -> Filter:
     National policies — those ingested with no state — match every state, so
     they are included alongside the state-specific ones rather than filtered
     out. See the module docstring.
+
+    ``payer`` is a canonical slug from :mod:`payer_vocab`, matching what
+    ingestion wrote into the payload. Passing a display name here matches
+    nothing and reads, from the outside, as a payer we hold no policies for —
+    which is the failure TASK-016 exists to prevent.
     """
     return Filter(
         must=[FieldCondition(key="payer", match=MatchValue(value=payer))],

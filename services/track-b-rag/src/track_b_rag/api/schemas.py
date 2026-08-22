@@ -23,7 +23,9 @@ import uuid
 from typing import Annotated, Any, Literal
 
 from fastapi import UploadFile
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field
+
+from payer_vocab import normalize_payer
 
 
 def _empty_to_none(value: object) -> object:
@@ -55,6 +57,26 @@ RequiredStateCode = Annotated[str, BeforeValidator(_upper)]
 CptCode = Annotated[str, BeforeValidator(_upper)]
 
 
+def _must_be_normalizable(value: str) -> str:
+    """Reject a payer name that cannot produce a slug, and keep the rest as sent.
+
+    The stored and matched form is the slug (TASK-016), but the payer's own
+    spelling is what goes into the `insurance_policies` row, so the field keeps
+    the raw value and the models below leave normalisation to the call sites
+    that need it. What this validator adds is the boundary check: a "name" made
+    only of punctuation has no slug, and finding that out here returns a 422
+    naming the field rather than a 500 from somewhere deeper in.
+    """
+    normalize_payer(value)
+    return value
+
+
+#: A payer name in any spelling. Both endpoints accept whatever the caller has —
+#: "Aetna", "AETNA, Inc.", "Medicare Part B" — because both sides resolve it
+#: through the same vocabulary before anything is matched or keyed on it.
+PayerName = Annotated[str, AfterValidator(_must_be_normalizable)]
+
+
 class IngestPolicyRequest(BaseModel):
     """Body of ``POST /policies/ingest`` — the document and its metadata.
 
@@ -72,10 +94,13 @@ class IngestPolicyRequest(BaseModel):
         max_length=200,
         description="The payer's own identifier for the document. Unique per policy.",
     )
-    payer: str = Field(
+    payer: PayerName = Field(
         min_length=1,
         max_length=200,
-        description="Issuing payer, e.g. 'Aetna' or 'CMS'.",
+        description=(
+            "Issuing payer, e.g. 'Aetna' or 'CMS'. Recorded as sent; indexed under "
+            "its canonical slug so any spelling of the same payer retrieves it."
+        ),
     )
     plan_type: OptionalFormStr = Field(
         default=None,
@@ -149,10 +174,13 @@ class PolicyQueryRequest(BaseModel):
         max_length=10,
         description="CPT or HCPCS code for the procedure. Lowercase input is uppercased.",
     )
-    payer: str = Field(
+    payer: PayerName = Field(
         min_length=1,
         max_length=200,
-        description="Issuing payer, spelled as the payer's policies were ingested.",
+        description=(
+            "Issuing payer, in any spelling — including a FHIR Coverage display name "
+            "such as 'Medicare Part B'. Resolved to the same slug ingestion used."
+        ),
     )
     plan_type: str = Field(
         min_length=1,

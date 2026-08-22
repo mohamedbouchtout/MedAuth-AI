@@ -25,6 +25,7 @@ during a live encounter reads an error as silence, and silence reads as
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, status
@@ -32,10 +33,13 @@ from qdrant_client import QdrantClient
 from redis.asyncio import Redis
 
 from api_envelope import ApiResponse, error_responses
+from payer_vocab import is_known_payer, normalize_payer
 from track_b_rag import audit, query
 from track_b_rag.api.dependencies import get_qdrant, get_redis
 from track_b_rag.api.schemas import PolicyQueryData, PolicyQueryRequest
 from track_b_rag.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/policies", tags=["policies"])
 
@@ -52,6 +56,27 @@ QUERY_ERROR_DESCRIPTIONS = {
 def _client_ip(request: Request) -> str | None:
     """Return the requesting client's IP, or None when the transport has no peer."""
     return request.client.host if request.client else None
+
+
+def _resolve_payer(raw: str) -> str:
+    """Return the canonical slug for a payer name, logging one we do not recognise.
+
+    An unfamiliar payer is not an error — it queries, retrieves nothing we have
+    indexed for it, and gets the safe fallback answer, which is honest. What is
+    *not* honest is leaving that outcome indistinguishable from a payer whose
+    policies we hold but whose name failed to line up, which is what happened
+    before TASK-016: the caller sees "no policy found" either way. The WARNING is
+    the only thing separating the two after the fact, so it names both spellings.
+    """
+    slug = normalize_payer(raw)
+    if not is_known_payer(slug):
+        logger.warning(
+            "Policy query for unrecognised payer %r (normalised to %r) — "
+            "retrieval will only match documents ingested under that same slug",
+            raw,
+            slug,
+        )
+    return slug
 
 
 @router.post(
@@ -105,7 +130,7 @@ async def query_policies(
         collection=get_settings().qdrant_collection,
         procedure=body.procedure,
         cpt_code=body.cpt_code,
-        payer=body.payer,
+        payer=_resolve_payer(body.payer),
         plan_type=body.plan_type,
         state=body.state,
         clinical_context=body.clinical_context,
