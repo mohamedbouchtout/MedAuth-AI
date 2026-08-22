@@ -28,12 +28,17 @@ from api_envelope import ApiHTTPException, ApiResponse, error_responses
 from track_b_rag.api.dependencies import get_db_session, get_qdrant
 from track_b_rag.api.schemas import IngestPolicyData, IngestPolicyRequest
 from track_b_rag.config import get_settings
+from track_b_rag.documents import DocumentParseError
 from track_b_rag.ingestion import EmptyDocumentError, PolicyMetadata, ingest_policy
-from track_b_rag.pdf import PdfParseError
 
 router = APIRouter(prefix="/policies", tags=["policies"])
 
-ERROR_CODE_INVALID_PDF = "invalid_pdf"
+#: Renamed from ``invalid_pdf`` when HTML ingestion landed — the endpoint takes
+#: two formats now, and a malformed HTML upload answering "invalid_pdf" would
+#: send a caller looking at the wrong thing. Both callers are internal (the
+#: TASK-013 scraper and TASK-014's seed script), so nothing published depends on
+#: the old spelling.
+ERROR_CODE_INVALID_DOCUMENT = "invalid_document"
 ERROR_CODE_EMPTY_DOCUMENT = "empty_document"
 
 #: What these statuses mean on this route specifically. api_envelope's generic
@@ -41,7 +46,7 @@ ERROR_CODE_EMPTY_DOCUMENT = "empty_document"
 #: scraper author whether to fix the fetch or the document.
 POLICY_ERROR_DESCRIPTIONS = {
     status.HTTP_400_BAD_REQUEST: (
-        "The upload is not a readable PDF, or holds no extractable text to index."
+        "The upload is not readable in its declared format, or holds no extractable text to index."
     ),
 }
 
@@ -62,7 +67,7 @@ async def ingest(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     client: Annotated[QdrantClient, Depends(get_qdrant)],
 ) -> ApiResponse[IngestPolicyData]:
-    """Index a payer policy PDF, skipping the work when the document is unchanged.
+    """Index a payer policy document, skipping the work when it is unchanged.
 
     Chunks the document, embeds it, writes the vectors to Qdrant and records the
     document in `insurance_policies`. Dedup is keyed on the SHA-256 digest of the
@@ -72,7 +77,8 @@ async def ingest(
     superseded revision cannot linger in retrieval.
 
     Returns 200 in all three cases; the `status` field says which happened.
-    Answers 400 when the upload is not a readable PDF or yields no text.
+    Takes a PDF or HTML, declared by `content_type`. Answers 400 when the upload
+    is not readable in that format or yields no text.
 
     Internal service-to-service endpoint. Not for frontend use — see the module
     docstring on why it carries no authentication of its own.
@@ -80,14 +86,14 @@ async def ingest(
     Annotated `File()` rather than `Form()`: both accept the multipart body, but
     only `File()` makes the published spec declare `multipart/form-data`.
     """
-    pdf_bytes = await body.file.read()
+    document_bytes = await body.file.read()
 
     try:
         result = await ingest_policy(
             session=session,
             client=client,
             collection=get_settings().qdrant_collection,
-            pdf_bytes=pdf_bytes,
+            document_bytes=document_bytes,
             metadata=PolicyMetadata(
                 policy_id=body.policy_id,
                 payer=body.payer,
@@ -95,12 +101,13 @@ async def ingest(
                 state=body.state,
                 source_url=body.source_url,
                 effective_date=body.effective_date,
+                content_type=body.content_type,
             ),
         )
-    except PdfParseError as exc:
+    except DocumentParseError as exc:
         raise ApiHTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            code=ERROR_CODE_INVALID_PDF,
+            code=ERROR_CODE_INVALID_DOCUMENT,
             message=str(exc),
         ) from exc
     except EmptyDocumentError as exc:

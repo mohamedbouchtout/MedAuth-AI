@@ -1,14 +1,9 @@
-"""Reading a policy PDF: its digest, and its text.
+"""Reading a policy PDF: getting its text out.
 
-Two operations, deliberately kept apart, because they answer different
-questions. The digest identifies the *source file*; the text is what gets
-chunked and embedded.
-
-The digest is taken over the raw PDF bytes rather than the extracted text
-(TASK-011). Two documents whose text happens to be identical but whose bytes
-differ are distinct source files for audit purposes — a payer that re-issues a
-policy with new letterhead has issued a new document, and the ingestion record
-should say so.
+One of the two document readers :mod:`track_b_rag.documents` dispatches to; the
+other is :mod:`track_b_rag.markup`, for the HTML that CMS publishes instead of
+PDFs. The digest that identifies a source file lives in ``documents`` with the
+dispatcher, because it is the same question whatever the format.
 
 Imported as ``pymupdf`` rather than the ``fitz`` name TASKS.md uses. They are the
 same library — ``fitz`` is the legacy alias — but only the ``pymupdf`` module
@@ -18,10 +13,11 @@ instead of needing an ``ignore_missing_imports`` override for the whole package.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 
 import pymupdf
+
+from track_b_rag.documents import DocumentParseError
 
 logger = logging.getLogger(__name__)
 
@@ -30,17 +26,8 @@ logger = logging.getLogger(__name__)
 PAGE_SEPARATOR = "\n\n"
 
 
-class PdfParseError(ValueError):
+class PdfParseError(DocumentParseError):
     """Raised when the uploaded bytes are not a readable PDF."""
-
-
-def content_digest(pdf_bytes: bytes) -> str:
-    """Return the SHA-256 hex digest of the raw PDF bytes.
-
-    This is the value stored as ``insurance_policies.content_hash`` and the one
-    the scraper (TASK-013) compares against to decide whether to re-ingest.
-    """
-    return hashlib.sha256(pdf_bytes).hexdigest()
 
 
 def extract_text(pdf_bytes: bytes) -> str:

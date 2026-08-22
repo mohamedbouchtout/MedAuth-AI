@@ -68,8 +68,11 @@ paths:
       operationId: ingest
       summary: Ingest a policy document
       description: >-
-        Chunks a payer policy PDF, embeds it, writes the vectors to Qdrant and
-        records the document in `insurance_policies`. Dedup is keyed on the
+        Chunks a payer policy document, embeds it, writes the vectors to
+        Qdrant and records the document in `insurance_policies`. Takes a PDF or
+        HTML, declared by `content_type` — payers publish PDFs, and CMS's
+        Medicare Coverage Database publishes HTML and offers no PDF at all.
+        Dedup is keyed on the
         SHA-256 digest of the uploaded bytes: a new `policy_id` is `created`, a
         matching digest is `unchanged` and does no work at all, and a changed
         digest is `updated` — which removes the document's existing chunks
@@ -249,10 +252,17 @@ components:
           type: [string, 'null']
           format: date
           description: The payer's stated effective date for this version of the policy.
+        content_type:
+          type: string
+          enum: [application/pdf, text/html]
+          default: application/pdf
+          description: >-
+            The format of the uploaded document, declared by the caller rather
+            than sniffed. Defaults to PDF, which is what payers publish.
         file:
           type: string
           format: binary
-          description: The policy document, as a PDF.
+          description: The policy document, in the declared format.
 
     IngestPolicyData:
       type: object
