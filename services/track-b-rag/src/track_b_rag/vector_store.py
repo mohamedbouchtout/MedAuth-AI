@@ -201,7 +201,7 @@ def build_points(
     policy_id: str,
     payer: str,
     plan_type: str | None,
-    state: str | None,
+    state: str | list[str] | None,
     chunks: Sequence[str],
     vectors: Sequence[Sequence[float]],
 ) -> list[PointStruct]:
@@ -213,8 +213,12 @@ def build_points(
             value ``policy_query_filter`` matches by exact equality, so it has to
             be what a query's payer normalises to. See :mod:`payer_vocab`.
         plan_type: Plan type the policy applies to, or None for all.
-        state: Two-letter state code, or None for a policy that applies
-            nationally.
+        state: A two-letter state code, a list of them for a policy issued
+            per contractor jurisdiction, or None for one that applies
+            nationally. A list is stored as a list rather than as one point per
+            state: ``MatchValue`` matches any element of a list-valued payload,
+            so retrieval needs no change, and copying the chunks per state would
+            multiply identical text a dozen times over in the collection.
         chunks: The document's text chunks, in order.
         vectors: One embedding per chunk, in the same order.
 

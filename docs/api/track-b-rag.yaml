@@ -252,6 +252,17 @@ components:
           type: [string, 'null']
           format: date
           description: The payer's stated effective date for this version of the policy.
+        jurisdiction_states:
+          type: array
+          items:
+            type: string
+            pattern: '^[A-Za-z]{2}$'
+          description: >-
+            USPS state codes for a policy issued per contractor jurisdiction — a
+            Medicare LCD applies across its contractor's whole jurisdiction, a
+            median of twelve states. Sent as repeated form fields. Use this or
+            `state`, never both; omit both for a national policy. Lowercase
+            input is normalised to uppercase.
         content_type:
           type: string
           enum: [application/pdf, text/html]

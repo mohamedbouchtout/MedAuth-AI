@@ -189,6 +189,69 @@ async def test_a_changed_document_is_updated_whatever_the_format(
     assert qdrant.deleted == [METADATA.policy_id]
 
 
+# --- contractor jurisdictions ----------------------------------------------
+
+
+async def test_a_jurisdiction_reaches_the_payload_as_a_list(qdrant: FakeQdrant) -> None:
+    """One document with a list of states, not one copy per state. MatchValue
+    matches any element of a list-valued payload, so retrieval needs no change
+    and the collection does not hold the same text a dozen times over."""
+    metadata = replace(METADATA, state=None, jurisdiction_states=["MA", "ME", "NY"])
+
+    await ingest_policy(
+        session=FakeSession(),  # type: ignore[arg-type]
+        client=qdrant,  # type: ignore[arg-type]
+        collection=COLLECTION,
+        document_bytes=DOCUMENT,
+        metadata=metadata,
+    )
+
+    assert all(point.payload["state"] == ["MA", "ME", "NY"] for point in qdrant.upserted)
+
+
+def test_a_single_state_policy_still_carries_a_string() -> None:
+    """Commercial plan documents (TASK-014) name one state, and the payload
+    shape they have always had keeps working."""
+    assert replace(METADATA, jurisdiction_states=[]).qdrant_state == "NY"
+
+
+def test_a_national_policy_carries_no_state() -> None:
+    """Null is what the retrieval filter's IsNullCondition looks for, which is
+    how an NCD is returned alongside whichever local policy matched."""
+    assert replace(METADATA, state=None, jurisdiction_states=[]).qdrant_state is None
+
+
+def test_a_jurisdiction_wins_over_a_stray_state() -> None:
+    """The request model rejects both being set, so this only decides what the
+    pipeline does if some other caller sets both anyway: the wider answer, since
+    narrowing silently is the failure that hides."""
+    assert replace(METADATA, jurisdiction_states=["MA"]).qdrant_state == ["MA"]
+
+
+async def test_the_jurisdiction_is_recorded_on_the_row(qdrant: FakeQdrant) -> None:
+    session = FakeSession()
+
+    await ingest_policy(
+        session=session,  # type: ignore[arg-type]
+        client=qdrant,  # type: ignore[arg-type]
+        collection=COLLECTION,
+        document_bytes=DOCUMENT,
+        metadata=replace(METADATA, state=None, jurisdiction_states=["MA", "ME"]),
+    )
+
+    assert session.executed[0].compile().params["jurisdiction_states"] == ["MA", "ME"]
+
+
+async def test_no_jurisdiction_is_recorded_as_null(qdrant: FakeQdrant) -> None:
+    """Null rather than an empty array, so "not a jurisdiction policy" is one
+    value in the column and not two."""
+    session = FakeSession()
+
+    await ingest(session, qdrant)
+
+    assert session.executed[0].compile().params["jurisdiction_states"] is None
+
+
 # --- created ---------------------------------------------------------------
 
 

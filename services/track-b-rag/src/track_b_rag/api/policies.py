@@ -101,6 +101,7 @@ async def ingest(
                 state=body.state,
                 source_url=body.source_url,
                 effective_date=body.effective_date,
+                jurisdiction_states=body.jurisdiction_states,
                 content_type=body.content_type,
             ),
         )
