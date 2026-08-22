@@ -694,6 +694,13 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - Ingest into local Qdrant via TASK-011 `/policies/ingest` endpoint — reuses the
     same dedup logic, so re-running this script is safe and idempotent
   - Focus on: orthopedic MRI (CPT 72148), knee arthroscopy (CPT 29881), biologic injections
+  - Ingest under canonical payer slugs from `packages/payer-vocab` (TASK-016),
+    not display names — `aetna`, not "Aetna Inc." See CLAUDE.md, "Payer and
+    jurisdiction identity".
+  - Unlike CMS (TASK-013), Aetna and BCBS do publish real PDFs, so this script
+    uses `/policies/ingest`'s original PDF path. It is also where the codes CMS
+    has no coverage document for — 29881, and the dermatology biologics — are
+    actually covered, since those are commercial and pharmacy-benefit territory.
 
 - [ ] **TASK-015:** Da Vinci CRD/DTR client — two-tier policy lookup
   - Service: `services/track-b-rag`
@@ -733,6 +740,84 @@ The insurance policy RAG is the technical core. Build and validate before other 
     for unsupported payers)
   - **Test:** simulate a CRD timeout/error, verify fallback to RAG succeeds and
     the caller gets a normal response, not an error
+
+- [x] **TASK-016:** Create shared `packages/payer-vocab`
+  - Prerequisite for TASK-013 and TASK-014; a retrofit of TASK-011 and TASK-012,
+    both of which shipped before this problem was spotted.
+  - Full reasoning is in CLAUDE.md, "Payer and jurisdiction identity — one
+    canonical vocabulary". The short version: `payer` is matched by exact string
+    equality in `policy_query_filter`'s Qdrant filter and interpolated raw into
+    the `rag:{payer}:{plan_type}:{state}:{cpt_code}` cache key, and nothing
+    normalises it on either side. At query time the string comes from a FHIR
+    `Coverage` resource's free-text display — "Medicare Part B", "AETNA" — which
+    never equals the "CMS" or "Aetna" an ingest wrote. Retrieval then returns
+    nothing and the service reports "no policy found", which is indistinguishable
+    from the payer genuinely having no policy on file.
+  - `normalize_payer(raw: str) -> str` — deterministic slug (casefold, strip
+    legal suffixes and punctuation, collapse whitespace, hyphenate) layered over
+    a curated alias table for what slugging cannot reach: "Medicare", "Medicare
+    Part A", "Medicare Part B", "Original Medicare" and "CMS" all resolve to
+    `cms-medicare`.
+  - `is_known_payer(slug: str) -> bool` — an unrecognised payer still gets a slug
+    and still queries, because a payer we have never seen is not an error. The
+    query path logs at WARNING when this returns False, so a name that failed to
+    line up is visible in the operational trace instead of looking like an empty
+    result.
+  - `normalize_state(raw: str) -> str` — the jurisdiction half. CMS's state
+    vocabulary carries territories, a four-character `CNMI`, and the sub-state
+    codes `DN`/`QN`/`UN`, `NF`/`SF` and `EM`/`WM`. Map each to the USPS code of
+    its parent state.
+  - Retrofit both track-b-rag routes to normalise on the way in — ingest before
+    it writes Qdrant and Postgres, query before it builds the filter and the
+    cache key. Keep the payer's own spelling in the `insurance_policies` row for
+    humans; slugs are for matching.
+  - Re-ingest the local dev corpus after the change. Doing this now costs one
+    re-run of a dev-only index; doing it after TASK-014 seeds a real corpus
+    means re-ingesting that instead. Same argument as TASK-010's package rename.
+  - Its own path-filter entry and CI job, per the packages rule in CLAUDE.md's CI
+    section — a new package's CI wiring ships with the package.
+  - **Test:** the alias table's known pairs, including every Medicare spelling.
+  - **Test:** two spellings of one payer produce one slug, hence one cache key
+    and one Qdrant filter value.
+  - **Test:** an unknown payer normalises without raising and reports
+    `is_known_payer() == False`.
+  - **Test:** every CMS sub-state and territory code maps to a two-character USPS
+    code, `CNMI` included.
+  - Built (64 package tests at 100% coverage; track-b-rag holds at 360 tests and
+    100% after the retrofit). Decisions worth knowing before touching this:
+    - **Display name and slug are different fields, and no migration was
+      needed.** `insurance_policies.payer` keeps the payer's own spelling; the
+      Qdrant payload and the `rag:` cache key carry the slug. That split works
+      only because nothing selects from `insurance_policies` by payer — dedup is
+      by `policy_id` — which was checked rather than assumed.
+    - Normalisation happens at the two boundaries and nowhere else:
+      `PolicyMetadata.payer_slug` on the ingest side, `_resolve_payer()` in the
+      query route. `retrieval`, `policy_rules`, `cache` and `query` never see a
+      display name, so there is one place to look when a payer does not match.
+    - A payer name with no alphanumerics — `"---"` — is a 422 from the request
+      model rather than a 500 from inside `normalize_payer`. An *unfamiliar*
+      payer is not an error and never becomes one; only an unusable one is.
+    - The alias table is keyed on the slug, not the raw string, so every casing
+      and punctuation variant resolves through a single row. Three self-tests
+      hold that shape: every alias key is its own slug, every alias target is a
+      known payer, and every target is a fixed point under `normalize_payer`.
+    - **Medicare Advantage deliberately does not collapse into `cms-medicare`.**
+      MA plans layer their own prior-authorization rules over the national ones
+      and TASK-015 routes them down the Da Vinci CRD path instead; merging them
+      would answer an MA query out of traditional Medicare's policy text.
+    - `tests/integration/test_policy_query.py`'s `index_policy` fixture indexes
+      under the slug now. It exists to do what ingestion does, and indexing a
+      display name there would have every retrieval in that module exercising a
+      filter production never uses.
+    - Trap worth knowing in that same module: it gives each test its own payer so
+      each writes its own `rag:` key. A cross-spelling test written with a
+      hardcoded "CMS"/"Medicare Part B" pair passed once and then failed on the
+      next run — the first run's cache entry survived, the second run was served
+      from it, and Bedrock was never called. Derive spellings from the `payer`
+      fixture; do not hardcode a payer in a test that reaches the cache.
+    - CI: `payer-vocab` added to `all_packages` in ci.yml, so it gets its own
+      test and mypy jobs and a change to it re-tests every service. No new
+      environment variables.
 
 ---
 
