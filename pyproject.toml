@@ -15,6 +15,7 @@ medauth-api-envelope = { workspace = true }
 medauth-hipaa-logger = { workspace = true }
 medauth-crypto-utils = { workspace = true }
 medauth-fhir-types = { workspace = true }
+medauth-payer-vocab = { workspace = true }
 # Services are workspace members too. track-b-rag depends on track-a-clinical
 # for the shared SQLAlchemy models (see CLAUDE.md, "Where the shared SQLAlchemy
 # models live") — the only service-to-service dependency so far.
@@ -48,6 +49,7 @@ known-first-party = [
     "hipaa_logger",
     "crypto_utils",
     "fhir_types",
+    "payer_vocab",
     "track_a_clinical",
     "track_b_rag",
     "src",

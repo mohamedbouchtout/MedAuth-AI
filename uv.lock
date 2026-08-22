@@ -17,6 +17,7 @@ members = [
     "medauth-fhir-types",
     "medauth-hipaa-logger",
     "medauth-nudge-service",
+    "medauth-payer-vocab",
     "medauth-policy-scraper",
     "medauth-prior-auth",
     "medauth-track-a-clinical",
@@ -1773,6 +1774,11 @@ requires-dist = [
 ]
 
 [[package]]
+name = "medauth-payer-vocab"
+version = "0.1.0"
+source = { editable = "packages/payer-vocab" }
+
+[[package]]
 name = "medauth-policy-scraper"
 version = "0.1.0"
 source = { editable = "services/policy-scraper" }
@@ -1882,6 +1888,7 @@ dependencies = [
     { name = "langchain-text-splitters" },
     { name = "medauth-api-envelope" },
     { name = "medauth-hipaa-logger" },
+    { name = "medauth-payer-vocab" },
     { name = "medauth-track-a-clinical" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -1904,6 +1911,7 @@ requires-dist = [
     { name = "langchain-text-splitters", specifier = ">=0.3" },
     { name = "medauth-api-envelope", editable = "packages/api-envelope" },
     { name = "medauth-hipaa-logger", editable = "packages/hipaa-logger" },
+    { name = "medauth-payer-vocab", editable = "packages/payer-vocab" },
     { name = "medauth-track-a-clinical", editable = "services/track-a-clinical" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
