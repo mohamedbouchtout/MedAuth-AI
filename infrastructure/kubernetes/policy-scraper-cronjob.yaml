@@ -1,0 +1,84 @@
+# The nightly CMS coverage-policy scrape (TASK-013).
+#
+# Schedule: 03:30 UTC, deliberately not 02:00. CMS regenerates its Medicare
+# Coverage Database exports at about 02:00 UTC — confirmed from the Last-Modified
+# header on the archives — so a job starting at 02:00 races the regeneration for
+# a stale or half-written file. Ninety minutes is enough slack for a slow
+# regeneration without pushing the run into the working day.
+#
+# The job downloads three archives (~75 MB), filters them to the procedure codes
+# in policy_scraper.codes, and POSTs what changed to track-b-rag's
+# /policies/ingest. It writes no audit row: coverage determinations are public
+# payer publications with no patient linkage.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: policy-scraper
+  namespace: medauth
+  labels:
+    app.kubernetes.io/name: policy-scraper
+    app.kubernetes.io/part-of: medauth-ai
+spec:
+  schedule: "30 3 * * *"
+  timeZone: Etc/UTC
+  # A run that overslept must not overlap the next one: two scrapes uploading
+  # the same documents would race on the dedup read and do the same work twice.
+  concurrencyPolicy: Forbid
+  # A job that has not started within an hour of its slot has missed its window;
+  # the next night's run will pick up whatever changed anyway.
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # One retry. A transient network failure deserves a second attempt; a CMS
+      # export that changed shape will fail identically however many times it is
+      # retried, and the failed job is the signal.
+      backoffLimit: 1
+      # Well clear of a slow 75 MB transfer, short enough that a hung run does
+      # not still be holding the Forbid lock the next night.
+      activeDeadlineSeconds: 5400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: policy-scraper
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: policy-scraper
+              image: medauth/policy-scraper:latest
+              command: ["python", "-m", "policy_scraper"]
+              env:
+                - name: LOG_LEVEL
+                  value: INFO
+                - name: TRACK_B_RAG_URL
+                  value: http://track-b-rag.medauth.svc.cluster.local:8002
+                # Identifies this scraper to CMS and gives them someone to
+                # contact. Not decoration: cms.gov answers 403 to some clients
+                # on User-Agent alone, and the config refuses to start if this
+                # carries no contact address.
+                - name: POLICY_SCRAPER_USER_AGENT
+                  valueFrom:
+                    configMapKeyRef:
+                      name: policy-scraper-config
+                      key: user-agent
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: medauth-database
+                      key: url
+              resources:
+                requests:
+                  cpu: 100m
+                  # The archives are read into memory and the largest expands to
+                  # roughly 100 MB of CSV rows.
+                  memory: 512Mi
+                limits:
+                  cpu: "1"
+                  memory: 1Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                capabilities:
+                  drop: ["ALL"]
