@@ -24,6 +24,7 @@ accesses. The INFO log below is the operational record instead.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import logging
 from dataclasses import dataclass
@@ -72,9 +73,24 @@ class PolicyMetadata:
     state: str | None = None
     source_url: str | None = None
     effective_date: datetime.date | None = None
+    #: The states a contractor-jurisdiction policy applies in. Empty for a
+    #: single-state policy (which uses ``state``) and for a national one.
+    jurisdiction_states: list[str] = dataclasses.field(default_factory=list)
     #: What the caller says the upload is. Declared rather than sniffed — see
     #: :mod:`track_b_rag.documents`.
     content_type: ContentType = DEFAULT_CONTENT_TYPE
+
+    @property
+    def qdrant_state(self) -> str | list[str] | None:
+        """What goes in the payload's ``state`` field.
+
+        A list for a contractor jurisdiction, a string for a single state, and
+        None for a national policy. The retrieval filter needs no branch for
+        this: Qdrant's ``MatchValue`` matches any element of a list-valued
+        payload field, and the ``IsNullCondition`` beside it still picks up the
+        national documents.
+        """
+        return self.jurisdiction_states or self.state
 
     @property
     def payer_slug(self) -> str:
@@ -161,7 +177,7 @@ async def ingest_policy(
         policy_id=metadata.policy_id,
         payer=metadata.payer_slug,
         plan_type=metadata.plan_type,
-        state=metadata.state,
+        state=metadata.qdrant_state,
         chunks=chunks,
         vectors=vectors,
     )
@@ -228,6 +244,7 @@ async def _record_policy(
         "payer": metadata.payer,
         "plan_type": metadata.plan_type,
         "state": metadata.state,
+        "jurisdiction_states": metadata.jurisdiction_states or None,
         "source_url": metadata.source_url,
         "effective_date": metadata.effective_date,
         "content_hash": digest,

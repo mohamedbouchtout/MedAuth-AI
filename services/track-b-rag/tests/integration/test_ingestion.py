@@ -25,6 +25,7 @@ import datetime
 import os
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
+from dataclasses import replace
 
 import pymupdf
 import pytest
@@ -249,6 +250,91 @@ async def test_the_payload_slug_is_what_a_query_filter_would_match(
 
     assert points, "a query spelling the payer differently found nothing"
     assert (points[0].payload or {})["policy_id"] == policy_id
+
+
+# --- TASK-013: a policy issued per contractor jurisdiction ------------------
+
+
+@pytest.mark.parametrize("queried_state", ["MA", "ME", "NY"])
+async def test_a_jurisdiction_policy_is_found_in_every_state_it_covers(
+    session: AsyncSession,
+    qdrant: QdrantClient,
+    collection: str,
+    policy_id: str,
+    queried_state: str,
+) -> None:
+    """The claim the one-row-per-LCD decision rests on, against a real Qdrant.
+
+    A Medicare LCD covers its contractor's whole jurisdiction, stored as one
+    document carrying a list of states. `MatchValue` matches any element of a
+    list-valued payload, so the retrieval filter needs no branch for it — and
+    this is that filter, unmodified.
+    """
+    await ingest_policy(
+        session=session,
+        client=qdrant,
+        collection=collection,
+        document_bytes=ten_page_policy(),
+        metadata=replace(
+            metadata_for(policy_id), state=None, jurisdiction_states=["MA", "ME", "NY"]
+        ),
+    )
+
+    points, _ = qdrant.scroll(
+        collection_name=collection,
+        scroll_filter=policy_query_filter(payer=normalize_payer("CMS"), state=queried_state),
+        limit=1,
+        with_payload=True,
+    )
+
+    assert points, f"the jurisdiction policy was not retrievable in {queried_state}"
+    assert (points[0].payload or {})["policy_id"] == policy_id
+
+
+async def test_a_jurisdiction_policy_is_not_found_outside_it(
+    session: AsyncSession, qdrant: QdrantClient, collection: str, policy_id: str
+) -> None:
+    """A list that matched every state would be worse than a single code."""
+    await ingest_policy(
+        session=session,
+        client=qdrant,
+        collection=collection,
+        document_bytes=ten_page_policy(),
+        metadata=replace(metadata_for(policy_id), state=None, jurisdiction_states=["MA", "ME"]),
+    )
+
+    points, _ = qdrant.scroll(
+        collection_name=collection,
+        scroll_filter=policy_query_filter(payer=normalize_payer("CMS"), state="TX"),
+        limit=1,
+        with_payload=True,
+    )
+
+    assert points == []
+
+
+async def test_the_jurisdiction_is_stored_on_the_policy_row(
+    session: AsyncSession, qdrant: QdrantClient, collection: str, policy_id: str
+) -> None:
+    """One row per document, with the jurisdiction in a column — not one row per
+    state with a composite policy_id."""
+    await ingest_policy(
+        session=session,
+        client=qdrant,
+        collection=collection,
+        document_bytes=ten_page_policy(),
+        metadata=replace(metadata_for(policy_id), state=None, jurisdiction_states=["MA", "ME"]),
+    )
+
+    rows = (
+        await session.scalars(
+            sa.select(InsurancePolicy).where(InsurancePolicy.policy_id == policy_id)
+        )
+    ).all()
+
+    assert len(rows) == 1
+    assert rows[0].jurisdiction_states == ["MA", "ME"]
+    assert rows[0].state is None
 
 
 # --- TASK-011: the same document twice is "unchanged" and does not duplicate -

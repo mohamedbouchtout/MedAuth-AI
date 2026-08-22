@@ -16,9 +16,11 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from pydantic import TypeAdapter, ValidationError
 
 from track_b_rag.api import policies
 from track_b_rag.api.dependencies import get_db_session, get_qdrant
+from track_b_rag.api.schemas import JurisdictionStates
 from track_b_rag.config import get_settings
 from track_b_rag.ingestion import EmptyDocumentError, IngestResult, PolicyMetadata
 from track_b_rag.main import create_app
@@ -87,8 +89,10 @@ async def client(recorder: Recorder) -> AsyncIterator[AsyncClient]:
         yield http
 
 
-def form(**overrides: str) -> dict[str, str]:
-    fields = {"policy_id": "L33575", "payer": "CMS"}
+def form(**overrides: str | list[str]) -> dict[str, str | list[str]]:
+    """The multipart metadata fields. A list value becomes repeated fields,
+    which is how `jurisdiction_states` carries a whole contractor jurisdiction."""
+    fields: dict[str, str | list[str]] = {"policy_id": "L33575", "payer": "CMS"}
     fields.update(overrides)
     return fields
 
@@ -318,6 +322,85 @@ async def test_the_rejected_content_type_is_not_echoed(
     )
 
     assert "secret-format" not in response.text
+
+
+# --- contractor jurisdictions ----------------------------------------------
+
+
+async def test_a_jurisdiction_is_forwarded_as_a_list(
+    client: AsyncClient, recorder: Recorder
+) -> None:
+    """A Medicare LCD applies across its contractor's whole jurisdiction — a
+    median of twelve states — and arrives as repeated form fields."""
+    await client.post(
+        "/policies/ingest",
+        data=form(jurisdiction_states=["MA", "ME", "NY"]),
+        files=upload(),
+    )
+
+    assert recorder.metadata is not None
+    assert recorder.metadata.jurisdiction_states == ["MA", "ME", "NY"]
+    assert recorder.metadata.state is None
+
+
+async def test_jurisdiction_codes_are_uppercased(client: AsyncClient, recorder: Recorder) -> None:
+    """The same normalisation `state` gets, since both end up in the payload the
+    retrieval filter matches on."""
+    await client.post(
+        "/policies/ingest",
+        data=form(jurisdiction_states=["ma"]),
+        files=upload(),
+    )
+
+    assert recorder.metadata is not None
+    assert recorder.metadata.jurisdiction_states == ["MA"]
+
+
+async def test_no_jurisdiction_is_an_empty_list(client: AsyncClient, recorder: Recorder) -> None:
+    """A commercial single-state policy and a national one both omit it."""
+    await client.post("/policies/ingest", data=form(), files=upload())
+
+    assert recorder.metadata is not None
+    assert recorder.metadata.jurisdiction_states == []
+
+
+async def test_a_state_and_a_jurisdiction_together_are_rejected(
+    client: AsyncClient, recorder: Recorder
+) -> None:
+    """They answer the same question. Picking one silently would leave retrieval
+    quietly narrower than the caller believes."""
+    response = await client.post(
+        "/policies/ingest",
+        data=form(state="MA", jurisdiction_states=["ME"]),
+        files=upload(),
+    )
+
+    assert response.status_code == 422
+    assert recorder.metadata is None
+
+
+@pytest.mark.parametrize("bad", ["MASS", "M", "1A"])
+async def test_a_malformed_jurisdiction_code_is_rejected(
+    client: AsyncClient, recorder: Recorder, bad: str
+) -> None:
+    """`state` has a pattern; a list needs the check spelled out separately, and
+    a code that slipped through would match nothing at query time."""
+    response = await client.post(
+        "/policies/ingest",
+        data=form(jurisdiction_states=[bad]),
+        files=upload(),
+    )
+
+    assert response.status_code == 422
+    assert recorder.metadata is None
+
+
+def test_a_non_list_jurisdiction_value_is_left_for_the_type_check() -> None:
+    """The uppercasing validator passes a non-list through untouched rather than
+    wrapping it, so "MA" is reported as the wrong type instead of quietly
+    becoming a one-state jurisdiction."""
+    with pytest.raises(ValidationError):
+        TypeAdapter(JurisdictionStates).validate_python("MA")
 
 
 # --- error mapping ---------------------------------------------------------

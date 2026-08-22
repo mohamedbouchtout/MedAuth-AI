@@ -23,7 +23,15 @@ import uuid
 from typing import Annotated, Any, Literal
 
 from fastapi import UploadFile
-from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from payer_vocab import normalize_payer
 from track_b_rag.documents import DEFAULT_CONTENT_TYPE, ContentType
@@ -49,6 +57,19 @@ def _upper(value: object) -> object:
 OptionalFormStr = Annotated[str | None, BeforeValidator(_empty_to_none)]
 OptionalFormDate = Annotated[datetime.date | None, BeforeValidator(_empty_to_none)]
 StateCode = Annotated[str | None, BeforeValidator(_empty_to_none), BeforeValidator(_upper)]
+
+
+def _upper_codes(value: object) -> object:
+    """Uppercase a list of state codes, leaving anything else for the validator."""
+    if isinstance(value, list):
+        return [item.upper() if isinstance(item, str) else item for item in value]
+    return value
+
+
+#: A contractor jurisdiction: the states a Medicare LCD applies in. Repeated
+#: form fields rather than one delimited string, so the wire format needs no
+#: parsing convention of its own.
+JurisdictionStates = Annotated[list[str], BeforeValidator(_upper_codes)]
 
 #: The query endpoint takes JSON rather than a form, so an omitted field is
 #: absent rather than empty and only the case normalisation applies. It matches
@@ -121,6 +142,14 @@ class IngestPolicyRequest(BaseModel):
         default=None,
         description="The payer's stated effective date for this version of the policy.",
     )
+    jurisdiction_states: JurisdictionStates = Field(
+        default_factory=list,
+        description=(
+            "USPS state codes for a policy issued per contractor jurisdiction, as "
+            "repeated fields. Use this or `state`, not both; omit both for a "
+            "national policy."
+        ),
+    )
     content_type: ContentType = Field(
         default=DEFAULT_CONTENT_TYPE,
         description=(
@@ -129,6 +158,32 @@ class IngestPolicyRequest(BaseModel):
         ),
     )
     file: UploadFile = Field(description="The policy document, in the declared format.")
+
+    @field_validator("jurisdiction_states", mode="after")
+    @classmethod
+    def _codes_are_two_letters(cls, value: list[str]) -> list[str]:
+        """Each entry is a USPS code. The `state` field's pattern cannot reach
+        inside a list, so the same check is spelled out here."""
+        for code in value:
+            if len(code) != 2 or not code.isalpha():
+                raise ValueError("Each jurisdiction state must be a two-letter code.")
+        return value
+
+    @model_validator(mode="after")
+    def _one_way_of_saying_where(self) -> IngestPolicyRequest:
+        """Reject a document that names both a state and a jurisdiction.
+
+        They answer the same question and a caller setting both has two ideas
+        about where the policy applies. Picking one silently would store the
+        loser nowhere and leave retrieval quietly narrower than the caller
+        believes.
+        """
+        if self.state and self.jurisdiction_states:
+            raise ValueError(
+                "Set either state or jurisdiction_states, not both: a policy applies "
+                "in one state or across a contractor jurisdiction."
+            )
+        return self
 
 
 class IngestPolicyData(BaseModel):
