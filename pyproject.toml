@@ -50,6 +50,7 @@ known-first-party = [
     "crypto_utils",
     "fhir_types",
     "payer_vocab",
+    "policy_scraper",
     "track_a_clinical",
     "track_b_rag",
     "src",
