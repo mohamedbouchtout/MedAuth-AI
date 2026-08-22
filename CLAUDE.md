@@ -709,6 +709,30 @@ jobs:
       - run: echo "Deploy pipeline not yet configured"
 ```
 
+### .github/workflows/nightly-live-checks.yml — gated tests actually run
+Some tests depend on a live external source: the CMS Medicare Coverage Database
+(TASK-013), and later the payer and EHR sandboxes. Those belong out of the
+per-PR suite — an unrelated pull request should not go red because a government
+site is down or a vendor sandbox is being rebuilt — so they sit behind an
+environment-variable gate and are skipped by default.
+
+**A gated test must be paired with a scheduled run that turns the gate on.**
+This workflow runs nightly on `schedule:` with the gate set, plus
+`workflow_dispatch` for running it by hand. Without it the gate is not a
+deferral, it is a deletion: nothing ever executes the test, and drift in the
+external source surfaces whenever someone happens to flip the flag, which is to
+say at random. A scheduled failure naming the source that changed is the honest
+version of "don't loosen the test to mask drift".
+
+Rules for anything added here:
+- The gate's default is off, so `pytest` on a laptop and in CI behaves the same.
+- The job names the external dependency in its own name, so a red nightly says
+  *which* upstream moved without anyone opening the log.
+- A failure here is a real signal about the outside world, not a flake to
+  re-run until green. Fix the code or the fixtures; do not relax the assertion.
+- Never put a test here to escape the per-PR suite. Only genuine external
+  dependencies qualify; anything that can run against a fixture stays on in CI.
+
 ### .github/PULL_REQUEST_TEMPLATE.md
 PR template enforces task linkage and HIPAA checklist on every merge:
 ```markdown
