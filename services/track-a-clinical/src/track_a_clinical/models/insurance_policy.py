@@ -16,6 +16,7 @@ import datetime
 import uuid
 
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Mapped, mapped_column
 
 from track_a_clinical.models.base import Base, timestamp_column, uuid_primary_key
@@ -37,8 +38,19 @@ class InsurancePolicy(Base):
 
     payer: Mapped[str] = mapped_column(sa.String(200), nullable=False)
     plan_type: Mapped[str | None] = mapped_column(sa.String(100), nullable=True)
-    #: Two-letter state code, or null for a policy that applies nationally.
+    #: Two-letter state code for a policy that applies in exactly one state, or
+    #: null. Null alone means national; see ``jurisdiction_states`` for the
+    #: middle case, a policy issued per Medicare contractor jurisdiction.
     state: Mapped[str | None] = mapped_column(sa.CHAR(2), nullable=True)
+
+    #: The USPS state codes a contractor-jurisdiction policy applies in — a
+    #: median of twelve for a Medicare LCD, up to forty-eight. One row per
+    #: document with a list here, rather than one row per state with a composite
+    #: policy_id, which would duplicate the same policy text a dozen times over
+    #: in Qdrant. Null for single-state and national documents.
+    jurisdiction_states: Mapped[list[str] | None] = mapped_column(
+        postgresql.ARRAY(sa.Text()), nullable=True
+    )
 
     #: The payer's own identifier for the document. Unique, so a re-scrape updates
     #: the existing row instead of accumulating duplicates.
