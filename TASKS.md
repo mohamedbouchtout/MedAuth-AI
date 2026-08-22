@@ -714,22 +714,223 @@ The insurance policy RAG is the technical core. Build and validate before other 
       correctly and cannot stand in for a completion — the retry, fallback and
       parsing paths are tested against a stubbed `invoke_reasoning`.
 
-- [ ] **TASK-013:** Policy scraper (background CronJob)
+- [x] **TASK-013:** Policy scraper (background CronJob)
   - Service: `services/policy-scraper`
-  - Scrape CMS Medicare coverage database (NCD/LCD pages) — public, no auth required
-  - Respect the source: set a real User-Agent identifying this as MedAuth AI's scraper
-    with a contact email, add a delay between requests (1-2s), check for and honor
-    robots.txt. This is a research/dev-stage scraper against a public government
-    database, not a high-volume crawler — no need to parallelize aggressively.
-  - Download PDFs, hash content (SHA-256, matching TASK-011's content_hash), skip
-    if hash matches existing record for that policy_id
-  - Trigger ingestion via the TASK-011 `/policies/ingest` endpoint (internal call,
-    not duplicating ingestion logic here)
-  - Kubernetes CronJob manifest: runs nightly at 2am UTC
-  - **Test:** run against CMS sandbox/public pages, verify at least one policy is
-    downloaded + hashed. If CMS's page structure changes and this test starts
-    failing, that's a real signal the scraper needs updating — don't loosen the
-    test to mask it.
+  - Prerequisite: **TASK-016** (`packages/payer-vocab`). Everything this task
+    writes is keyed on a canonical payer slug — CMS documents ingest as
+    `cms-medicare`, never as "CMS" or "Medicare".
+  - **Package rename, do this first** — the same move TASK-010 made for
+    track-b-rag: rename to `src/policy_scraper/` and declare
+    `medauth-track-a-clinical` as a dependency. This service reads
+    `insurance_policies.content_hash` before uploading, which crosses the
+    service-import boundary. The service is still empty, so the rename is free
+    now and churn later.
+
+  **Source: the MCD bulk exports, not a page crawl.** This replaces the original
+  "scrape NCD/LCD pages", which was written before anyone checked what CMS
+  actually publishes.
+  - `https://downloads.cms.gov/medicare-coverage-database/downloads/exports/`
+    serves `ncd.zip` (~1 MB), `current_lcd.zip` (~32 MB) and
+    `current_article.zip` (~41 MB), each a set of CSV tables with a published
+    data dictionary, regenerated daily at about 02:00 UTC.
+  - **The export carries the full document text, so there are no per-document
+    fetches at all** — three archive downloads a night, against crawling 949 LCD
+    pages. `lcd.csv` holds the body in `indication`, `summary_of_evidence`,
+    `analysis_of_evidence`, `associated_info`, `cms_cov_policy`, `issue` and
+    `bibliography`, one row per LCD; `ncd_trkg.csv` holds it in `itm_srvc_desc`
+    and `indctn_lmtn` across 357 NCDs. Verified against the rendered page for
+    L39529: 45 of the 46 sentences in its coverage-criteria section appear
+    verbatim in `indication`, the 46th being the section heading. What the page
+    has and the export does not is AMA/AHA licence boilerplate and navigation
+    chrome — noise this pipeline is better off without.
+  - **Schedule the CronJob at 03:30 UTC, not 02:00.** CMS regenerates the
+    exports at 02:00 UTC (confirmed from `Last-Modified`); running at exactly
+    that hour races the regeneration for a stale or half-written file.
+  - Still send a real User-Agent naming MedAuth AI with a contact email, keep a
+    1-2s delay between requests, and fetch and honour robots.txt. Three verified
+    facts to build against:
+    - `www.cms.gov/robots.txt` carries `Disallow: /*?` but an explicit
+      `Allow: /medicare-coverage-database/*?` ahead of it. Under the
+      longest-match rule the MCD's query-string URLs are permitted; a naive
+      "does any Disallow match" check would wrongly refuse the entire database.
+    - There is no `Crawl-delay` directive, so the 1-2s delay is our own
+      politeness policy rather than a published requirement. Keep it anyway.
+    - `downloads.cms.gov` serves no robots.txt at all. Treat missing or
+      unparseable as allow, and keep the delay regardless. cms.gov also answers
+      403 to some clients based on User-Agent, so the UA is load-bearing rather
+      than decoration.
+
+  **Scope (settled): a curated CPT/HCPCS filter, not the whole database.**
+  - Filter to the codes MedAuth actually targets. Against the current export
+    that resolves to **18 LCDs** — few enough to be polite, specific enough to
+    be a real dev corpus.
+  - Keep the list in one module-level constant with a comment per code saying
+    why it is there. Start from: 72148/72149 (lumbar spine MRI), 73721/73718
+    (lower-extremity joint MRI), 20610 (major joint injection), J7321/J7325
+    (hyaluronan knee injections), 64483/62323 (epidural steroid injections),
+    Q5121 (infliximab biosimilar).
+  - **Two corrections to earlier drafts, both load-bearing:**
+    - 72148 is MRI of the *lumbar spine*, not a knee MRI. Knee MRI without
+      contrast is 73721. Both belong in the list — the label was wrong, not the
+      code.
+    - **29881 (knee arthroscopy with meniscectomy) has no CMS coverage document
+      at all** — no LCD, no article. Neither do the dermatology biologics
+      (Cosentyx, Taltz, Skyrizi, Stelara, Dupixent). They are not missing from
+      our filter, they are absent from Medicare's coverage database, because
+      they are commercial and pharmacy-benefit territory. Do not widen the CMS
+      filter hunting for them; that is TASK-014's job, against Aetna and BCBS.
+  - **The code-to-document index lives in the Articles, not the LCDs.** CMS moved
+    code lists out of LCDs into companion Billing & Coding Articles, so only 66
+    LCDs (all DME) carry inline HCPCS codes and essentially no physician CPT
+    codes at all. The join is `article_x_hcpc_code` →
+    `article_related_documents` → `lcd_id`, and then fetch that LCD. Filtering
+    `lcd_x_hcpc_code` alone matches almost nothing, and looks exactly like a
+    working scraper that found no work to do.
+
+  **LCD jurisdiction (settled): one document carrying a list of states.**
+  - An LCD is issued per MAC jurisdiction and applies across it — a median of 12
+    states over the 949 current LCDs, up to 48 for the widest. Resolve with
+    `lcd_x_contractor` → `contractor_jurisdiction` (skipping rows that have a
+    `term_date`) → `state_lookup`, then normalise every code to a USPS state per
+    CLAUDE.md. CMS's `state_abbrev` includes `CNMI`, `DN`, `QN`, `UN`, `NF`,
+    `SF`, `EM` and `WM` — none of which a FHIR `Coverage` will ever produce, and
+    one of which does not even fit `CHAR(2)`.
+  - **Qdrant:** one set of chunks per LCD, with the payload `state` holding the
+    *list* of normalised states. This needs no change to the retrieval filter —
+    `MatchValue` matches any element of a list-valued payload, verified against
+    the running Qdrant using `policy_query_filter` itself, both with and without
+    the keyword payload index TASK-011 creates. NCDs stay `state: null` and go
+    on matching every state through the existing `IsNullCondition`.
+  - **Postgres:** one row per LCD, `policy_id` of the form `cms-lcd-L39529`. Add
+    a nullable `jurisdiction_states TEXT[]` column to `insurance_policies` for
+    the resolved list. `state CHAR(2)` stays for genuinely single-state
+    documents (the commercial plan policies TASK-014 ingests) and NULL keeps
+    meaning national. The migration is authored in track-a-clinical per the
+    migration-ownership rule, even though this service writes the rows.
+  - Rejected: one row per state with a composite `policy_id`
+    (`cms-lcd-L39529-MA`). It turns 18 documents into 230 rows, and worse,
+    duplicates identical policy text about 12 times over in Qdrant — 12x the
+    embedding cost, and near-identical chunks crowding each other out of the
+    eight retrieval slots.
+
+  **Document format — this one changes TASK-011's ingest contract.**
+  - CMS does not publish LCDs or NCDs as PDFs. The MCD's "PDF" affordance is the
+    browser's own print-to-PDF, and the document body is HTML — carried as HTML
+    fragments inside the export's CSV fields. `/policies/ingest` accepts PDF
+    only, so this task cannot use it as written.
+  - **Extend `/policies/ingest` to accept a declared content type** —
+    `application/pdf` as today, plus `text/html` — and hash the bytes the payer
+    published. That keeps `content_hash` meaning "the document the payer
+    published", which is what TASK-011 says it means.
+  - **What gets hashed, precisely:** the document's content fields from the
+    export, concatenated in a fixed field order and encoded UTF-8, exactly as
+    CMS serves them and with no reformatting. Volatile row metadata —
+    `last_updated`, `lcd_version` — is *not* part of the digest; it describes the
+    export, not the document, and folding it in would re-ingest a policy whose
+    text never changed.
+  - **Never hash a raw MCD page response.** Verified: fetching
+    `view/lcd.aspx?lcdid=39529` twice, seconds apart, returns two responses of
+    identical length whose SHA-256 digests differ — 478 bytes differ, all of them
+    the per-request CSP `nonce` attribute on the page's script tags. A live-page
+    digest would therefore change on every fetch and mark every policy `updated`
+    every night, re-embedding the whole corpus. This is the same failure the
+    rejected PDF-rendering option below has, arrived at from a different
+    direction. If anyone ever adds a live-page fallback, it must hash extracted
+    document text, never the HTTP body.
+  - Rejected: rendering the HTML to PDF inside the scraper so ingest can stay
+    PDF-only. PyMuPDF's output is not byte-deterministic — the same content
+    rendered twice yields two different SHA-256 digests (verified). Every
+    nightly run would then look like an update, for the same reason and with the
+    same cost.
+  - **The TASK-011 change is a discriminator, not a second pipeline.** One
+    `content_type` field on `IngestPolicyRequest`, kept as the single body
+    parameter so FastAPI still flattens the form — the shape that task's notes
+    warn against breaking. `pdf.extract_text()` gains an HTML sibling
+    (fragments, not whole documents — the export's fields are not full pages),
+    and `ingest_policy()` dispatches on the declared type. Everything downstream
+    is unchanged.
+  - **Chunking is unchanged and this is deliberate:** `chunk_size=800`,
+    `chunk_overlap=150` apply to extracted HTML text exactly as they do to
+    extracted PDF text. Both paths hand `chunk_text()` a plain string, the
+    constants are module-level for the reason `chunking.py` gives — changing
+    either invalidates every chunk already indexed — and policy prose does not
+    become differently shaped for having arrived as HTML.
+  - **Update TASK-011's existing tests, do not append a parallel suite.** The
+    cases that matter are in `tests/unit/test_pdf.py` (10),
+    `tests/unit/test_ingestion.py` (18), `tests/unit/api/test_policies.py` (20)
+    and `tests/integration/test_ingestion.py` (11). Each one that asserts
+    PDF-specific behaviour becomes a case over both content types, so the three
+    dedup claims — created, unchanged, updated — are proven on the HTML path
+    too rather than inherited from the PDF path. `test_openapi_contract.py`
+    compares `docs/api/track-b-rag.yaml` against the generated schema, so the
+    spec is updated in the same change or that test fails.
+  - Ingest remains the only thing that chunks, embeds or writes Qdrant. This
+    service fetches, filters, resolves jurisdictions, and uploads.
+
+  - Hash locally before uploading: read `insurance_policies.content_hash` and
+    skip the upload when it matches. This is a bandwidth optimisation only.
+    Ingest's own dedup stays the authority, and losing a race costs one
+    redundant upload, never a wrong result.
+  - No `audit_log()` call anywhere in this service — public payer publications,
+    no patient linkage, the same call `/policies/ingest` makes. Log at INFO
+    through `logging.getLogger(__name__)` instead.
+  - Kubernetes CronJob manifest at 03:30 UTC. This is the first file under
+    `infrastructure/kubernetes/`.
+  - Env: `CMS_COVERAGE_DB_BASE_URL` and `POLICY_SCRAPER_USER_AGENT` already
+    exist in `.env.example`, unused. Add `CMS_MCD_EXPORTS_BASE_URL` — the
+    exports live on a different host from the database UI. Put the contact
+    email inside the User-Agent value rather than adding a var for it.
+  - **Test (always on):** the filter, the article-to-LCD join, jurisdiction
+    resolution and state normalisation, against recorded fixture CSVs and one
+    recorded LCD document. These carry the 80% coverage gate.
+  - **Test (gated on `RUN_CMS_LIVE_TESTS=1`):** fetch the real exports, verify at
+    least one policy is downloaded and hashed, and assert the CSV tables the
+    join depends on still carry the columns it reads. If CMS's structure changes
+    this must fail — do not loosen it to mask the drift.
+  - **Nightly workflow:** add `.github/workflows/nightly-live-checks.yml`,
+    scheduled with `RUN_CMS_LIVE_TESTS=1` set, plus `workflow_dispatch`. A gate
+    with no scheduled run is a deleted test — see CLAUDE.md's section on this.
+  - CI: `policy-scraper` is already in ci.yml's service matrix, so the per-PR job
+    needs no change. The nightly workflow is the only new CI file.
+  - Built (127 tests, 99% coverage; the live checks pass against CMS as of
+    2026-08-22). Decisions worth knowing before touching this:
+    - **robots.txt is parsed here rather than with `urllib.robotparser`.** That
+      module's `RuleLine.applies_to` is a prefix comparison with no wildcard
+      handling, so `Disallow: /*?` is treated as the literal prefix `/*?` and
+      matches nothing. Against CMS's file it reaches the right answer for the
+      wrong reason, which is worse than being wrong — the next site with a
+      wildcard rule would be crawled in breach of it and nothing would say so.
+      `policy_scraper.robots` implements longest-match with Allow winning ties,
+      which is what makes the Medicare Coverage Database fetchable despite the
+      site-wide query-string Disallow.
+    - **A disallowed URL raises; it is never skipped quietly.** A run that
+      fetched nothing because a rule changed would look exactly like a run with
+      nothing to fetch.
+    - The run makes **three requests plus one robots.txt per host**. There are no
+      per-document fetches at all, so the 1–2s delay barely matters in practice
+      — it is kept because the next source might need it.
+    - **The digest covers the export's content fields in a fixed order**, which
+      is why `LCD_FIELDS`/`NCD_FIELDS` are module constants rather than a dict
+      iteration: reordering them would look like every policy changing at once.
+      `last_updated` and `lcd_version` are excluded deliberately — they describe
+      the export, not the policy.
+    - **A title alone is not a document.** The emptiness check looks at the body
+      fields, not at the assembled bytes; a row with a heading and nothing else
+      would otherwise chunk into one heading and record a content hash against a
+      vector that says nothing, which every later scrape then reports as
+      "unchanged". A test caught this, not review.
+    - The pre-upload digest lookup is **one query for the whole run**, not one
+      per document, and it is an optimisation only — ingest's own dedup decides
+      created/unchanged/updated, so losing a race costs one redundant upload.
+    - **One failing document does not fail the run**, but any failure exits the
+      process non-zero, so Kubernetes marks the job failed rather than reporting
+      a green run that indexed nothing.
+    - `.env.example` gains `CMS_MCD_EXPORTS_BASE_URL`: the exports are on
+      `downloads.cms.gov` and the database UI is on `www.cms.gov`, and robots.txt
+      is per host, so conflating them would check the wrong file.
+    - The nightly workflow runs the live checks at 05:00 UTC — after the
+      scraper's own 03:30 slot and well after CMS regenerates the exports at
+      about 02:00, so a failure is about their structure rather than our timing.
 
 - [ ] **TASK-014:** Seed Qdrant with real payer policies for dev
   - `scripts/seed-policies.py`
