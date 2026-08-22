@@ -33,9 +33,11 @@ import sqlalchemy as sa
 from qdrant_client import QdrantClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from payer_vocab import normalize_payer
 from track_a_clinical.models import InsurancePolicy
 from track_b_rag import embeddings
 from track_b_rag.ingestion import PolicyMetadata, ingest_policy
+from track_b_rag.retrieval import policy_query_filter
 from track_b_rag.vector_store import (
     count_policy_points,
     ensure_collection,
@@ -170,7 +172,9 @@ async def test_the_indexed_points_carry_the_payload_schema(
     points, _ = qdrant.scroll(collection_name=collection, limit=1, with_payload=True)
     payload = points[0].payload or {}
     assert payload["policy_id"] == policy_id
-    assert payload["payer"] == "CMS"
+    # The slug, not the display name — this is what the retrieval filter matches
+    # by exact equality (TASK-016).
+    assert payload["payer"] == "cms-medicare"
     assert payload["state"] == "NY"
     assert payload["text"]
 
@@ -186,9 +190,28 @@ async def test_the_policy_row_records_the_ingest(
     assert row is not None
     assert row.content_hash == result.content_hash  # type: ignore[attr-defined]
     assert row.qdrant_collection == collection
+    # The row keeps the payer's own spelling; nothing matches on this column.
     assert row.payer == "CMS"
     assert row.source_url == "https://example.gov/policy.pdf"
     assert row.effective_date == datetime.date(2026, 1, 1)
+
+
+async def test_the_payload_slug_is_what_a_query_filter_would_match(
+    session: AsyncSession, qdrant: QdrantClient, collection: str, policy_id: str
+) -> None:
+    """The two halves of TASK-016 meeting: a document ingested as "CMS" is found by
+    a query whose payer arrived as a FHIR Coverage display name."""
+    await ingest(session, qdrant, collection, policy_id, ten_page_policy())
+
+    points, _ = qdrant.scroll(
+        collection_name=collection,
+        scroll_filter=policy_query_filter(payer=normalize_payer("Medicare Part B"), state="NY"),
+        limit=1,
+        with_payload=True,
+    )
+
+    assert points, "a query spelling the payer differently found nothing"
+    assert (points[0].payload or {})["policy_id"] == policy_id
 
 
 # --- TASK-011: the same PDF twice is "unchanged" and does not duplicate ------

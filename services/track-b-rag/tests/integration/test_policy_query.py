@@ -44,6 +44,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import hipaa_logger
+from payer_vocab import normalize_payer
 from track_b_rag import bedrock, embeddings, vector_store
 from track_b_rag.api.dependencies import get_qdrant, get_redis
 from track_b_rag.config import get_settings
@@ -201,7 +202,10 @@ def index_policy(collection: str) -> Callable[..., None]:
         try:
             points = vector_store.build_points(
                 policy_id=policy_id or f"POL-{uuid.uuid4().hex[:8]}",
-                payer=payer,
+                # Ingestion indexes under the slug, and this fixture exists to do
+                # what ingestion does — indexing the display name here would make
+                # every retrieval in this module test a filter production never uses.
+                payer=normalize_payer(payer),
                 plan_type=plan_type,
                 state=state,
                 chunks=[text],
@@ -237,7 +241,8 @@ def request_body(payer: str, **overrides: Any) -> dict[str, Any]:
 
 
 def cache_key(payer: str) -> str:
-    return f"rag:{payer}:PPO:MA:73721"
+    """The documented key, whose payer segment is the slug (TASK-016)."""
+    return f"rag:{normalize_payer(payer)}:PPO:MA:73721"
 
 
 # --- the query path --------------------------------------------------------
@@ -289,6 +294,32 @@ async def test_another_payers_policy_is_not_retrieved(
 
     assert "conservative therapy first" in bedrock_stub.prompts[0]
     assert "A different insurer entirely" not in bedrock_stub.prompts[0]
+
+
+async def test_a_differently_spelled_payer_still_retrieves_its_policy(
+    client: AsyncClient,
+    index_policy: Callable[..., None],
+    payer: str,
+    bedrock_stub: BedrockStub,
+) -> None:
+    """TASK-016 end to end, through the route and the real Qdrant filter.
+
+    A document indexed under one spelling is asked about under another — the
+    situation every query is in, since the caller's payer comes from a FHIR
+    Coverage display name and the corpus was ingested from a payer's own
+    publication. Before the shared vocabulary these were two payers, the search
+    matched nothing, and the answer was the fallback, which reads exactly like a
+    payer whose policies we do not have.
+
+    The spellings are derived from the per-test payer rather than hardcoded, so
+    this test keeps its own cache key like every other one in this module.
+    """
+    index_policy(payer=payer, text="Lumbar MRI requires six weeks of conservative therapy.")
+
+    await client.post("/policies/query", json=request_body(f"{payer.upper()}, Inc."))
+
+    assert bedrock_stub.prompts, "the query never reached Bedrock, so retrieval found nothing"
+    assert "six weeks of conservative therapy" in bedrock_stub.prompts[0]
 
 
 async def test_a_national_policy_is_retrieved_alongside_the_state_one(

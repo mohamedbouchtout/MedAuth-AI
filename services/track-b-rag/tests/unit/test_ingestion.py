@@ -137,6 +137,32 @@ async def test_a_new_policy_deletes_nothing(qdrant: FakeQdrant) -> None:
     assert qdrant.deleted == []
 
 
+async def test_the_indexed_points_carry_the_payer_slug(qdrant: FakeQdrant) -> None:
+    """TASK-016. The payload holds what the retrieval filter compares against, and
+    that is the slug — "CMS" here would match nothing a query normalises to."""
+    await ingest(FakeSession(), qdrant)
+
+    assert {point.payload["payer"] for point in qdrant.upserted} == {"cms-medicare"}
+
+
+async def test_the_recorded_row_keeps_the_payer_as_sent(qdrant: FakeQdrant) -> None:
+    """The two halves of the split: slug for matching, the payer's own spelling for
+    people. Nothing queries `insurance_policies` by payer."""
+    session = FakeSession()
+
+    await ingest(session, qdrant)
+
+    values = session.executed[0].compile().params
+    assert values["payer"] == "CMS"
+
+
+@pytest.mark.parametrize("spelling", ["CMS", "Medicare", "Medicare Part B", "medicare part a"])
+def test_every_medicare_spelling_indexes_under_one_slug(spelling: str) -> None:
+    metadata = PolicyMetadata(policy_id="L33575", payer=spelling)
+
+    assert metadata.payer_slug == "cms-medicare"
+
+
 async def test_the_result_carries_the_digest_of_the_uploaded_bytes(qdrant: FakeQdrant) -> None:
     result = await ingest(FakeSession(), qdrant)
 

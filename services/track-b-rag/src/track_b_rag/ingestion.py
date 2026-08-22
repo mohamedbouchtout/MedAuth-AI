@@ -35,6 +35,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
+from payer_vocab import normalize_payer
 from track_a_clinical.models import InsurancePolicy
 from track_b_rag import embeddings, vector_store
 from track_b_rag.chunking import chunk_text
@@ -58,7 +59,12 @@ class EmptyDocumentError(ValueError):
 
 @dataclass(frozen=True)
 class PolicyMetadata:
-    """The non-file half of an ingest request."""
+    """The non-file half of an ingest request.
+
+    ``payer`` is the payer's own spelling, kept as it arrived. Matching uses
+    :attr:`payer_slug` instead — see :mod:`payer_vocab` for why the two are not
+    the same field.
+    """
 
     policy_id: str
     payer: str
@@ -66,6 +72,17 @@ class PolicyMetadata:
     state: str | None = None
     source_url: str | None = None
     effective_date: datetime.date | None = None
+
+    @property
+    def payer_slug(self) -> str:
+        """The canonical slug this document's chunks are indexed and matched under.
+
+        The Qdrant payload carries this rather than ``payer``, because the
+        retrieval filter compares it by exact equality against a slug derived
+        from a FHIR ``Coverage`` display name. The `insurance_policies` row keeps
+        the display spelling; nothing matches on that column.
+        """
+        return normalize_payer(self.payer)
 
 
 @dataclass(frozen=True)
@@ -137,7 +154,7 @@ async def ingest_policy(
         )
     points = vector_store.build_points(
         policy_id=metadata.policy_id,
-        payer=metadata.payer,
+        payer=metadata.payer_slug,
         plan_type=metadata.plan_type,
         state=metadata.state,
         chunks=chunks,
@@ -148,9 +165,10 @@ async def ingest_policy(
     await _record_policy(session, metadata=metadata, digest=digest, collection=collection)
 
     logger.info(
-        "Ingested policy %r from %r: %s, %d chunks into %r (%s)",
+        "Ingested policy %r from %r (payer slug %r): %s, %d chunks into %r (%s)",
         metadata.policy_id,
         metadata.payer,
+        metadata.payer_slug,
         status,
         len(points),
         collection,

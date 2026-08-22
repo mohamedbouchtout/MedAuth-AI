@@ -126,7 +126,8 @@ paths:
         payer half — `requires_auth`, `auth_criteria`, `step_therapy_required`,
         `step_therapy_details` — is resolved from indexed policy text with
         Claude Sonnet on Bedrock and cached for 24h under
-        `rag:{payer}:{plan_type}:{state}:{cpt_code}`. The patient half —
+        `rag:{payer}:{plan_type}:{state}:{cpt_code}`, whose payer segment is
+        the canonical slug rather than the name as sent. The patient half —
         `missing_criteria`, `denial_risk`, `nudge_message` — is recomputed on
         every call from `clinical_context` and never cached, because those
         fields describe one encounter's documentation and sharing them between
@@ -226,7 +227,9 @@ components:
           type: string
           minLength: 1
           maxLength: 200
-          description: Issuing payer, e.g. 'Aetna' or 'CMS'.
+          description: >-
+            Issuing payer, e.g. 'Aetna' or 'CMS'. Recorded as sent; indexed under
+            its canonical slug so any spelling of the same payer retrieves it.
         plan_type:
           type: [string, 'null']
           maxLength: 100
@@ -314,7 +317,11 @@ components:
           type: string
           minLength: 1
           maxLength: 200
-          description: Issuing payer, spelled as the payer's policies were ingested.
+          description: >-
+            Issuing payer, in any spelling — including a FHIR Coverage display
+            name such as 'Medicare Part B'. Resolved to the same canonical slug
+            ingestion used, so the caller does not have to know how the payer's
+            documents were spelled.
         plan_type:
           type: string
           minLength: 1
