@@ -1,13 +1,16 @@
-"""Digest and text extraction — the two things a policy PDF is read for."""
+"""Getting text out of a policy PDF.
+
+The digest is format-independent and lives with the dispatcher, so its tests are
+in ``test_documents.py`` alongside the HTML half.
+"""
 
 from __future__ import annotations
-
-import hashlib
 
 import pymupdf
 import pytest
 
-from track_b_rag.pdf import PdfParseError, content_digest, extract_text
+from track_b_rag.documents import DocumentParseError, content_digest
+from track_b_rag.pdf import PdfParseError, extract_text
 
 
 def build_pdf(pages: list[str]) -> bytes:
@@ -19,22 +22,6 @@ def build_pdf(pages: list[str]) -> bytes:
     data: bytes = document.tobytes()
     document.close()
     return data
-
-
-def test_the_digest_is_sha256_over_the_raw_bytes() -> None:
-    pdf = build_pdf(["Prior authorization is required."])
-
-    assert content_digest(pdf) == hashlib.sha256(pdf).hexdigest()
-
-
-def test_the_same_bytes_digest_the_same_way() -> None:
-    pdf = build_pdf(["Coverage criteria."])
-
-    assert content_digest(pdf) == content_digest(pdf)
-
-
-def test_different_bytes_digest_differently() -> None:
-    assert content_digest(b"%PDF-1.4 one") != content_digest(b"%PDF-1.4 two")
 
 
 def test_the_digest_covers_the_file_not_the_text() -> None:
@@ -81,6 +68,12 @@ def test_a_truncated_pdf_raises_a_parse_error() -> None:
 
     with pytest.raises(PdfParseError):
         extract_text(pdf[: len(pdf) // 4])
+
+
+def test_the_parse_error_is_a_document_parse_error() -> None:
+    """The route catches the base class, so every format's failure answers 400."""
+    with pytest.raises(DocumentParseError):
+        extract_text(b"this is not a pdf at all")
 
 
 def test_the_parse_error_names_no_file_content() -> None:

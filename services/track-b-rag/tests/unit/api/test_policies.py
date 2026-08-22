@@ -22,9 +22,11 @@ from track_b_rag.api.dependencies import get_db_session, get_qdrant
 from track_b_rag.config import get_settings
 from track_b_rag.ingestion import EmptyDocumentError, IngestResult, PolicyMetadata
 from track_b_rag.main import create_app
+from track_b_rag.markup import HtmlParseError
 from track_b_rag.pdf import PdfParseError
 
 PDF = b"%PDF-1.4 a policy document"
+HTML = b"<p>a policy document</p>"
 
 
 class Recorder:
@@ -32,7 +34,7 @@ class Recorder:
 
     def __init__(self) -> None:
         self.metadata: PolicyMetadata | None = None
-        self.pdf_bytes: bytes | None = None
+        self.document_bytes: bytes | None = None
         self.collection: str | None = None
         self.error: Exception | None = None
         self.result = IngestResult(
@@ -60,11 +62,11 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> Recorder:
         session: Any,
         client: Any,
         collection: str,
-        pdf_bytes: bytes,
+        document_bytes: bytes,
         metadata: PolicyMetadata,
     ) -> IngestResult:
         captured.metadata = metadata
-        captured.pdf_bytes = pdf_bytes
+        captured.document_bytes = document_bytes
         captured.collection = collection
         if captured.error is not None:
             raise captured.error
@@ -91,8 +93,11 @@ def form(**overrides: str) -> dict[str, str]:
     return fields
 
 
-def upload(pdf: bytes = PDF) -> dict[str, tuple[str, bytes, str]]:
-    return {"file": ("policy.pdf", pdf, "application/pdf")}
+def upload(document: bytes = PDF) -> dict[str, tuple[str, bytes, str]]:
+    """The multipart part itself. What the route dispatches on is the
+    `content_type` form field, not this — a multipart part's own type is set by
+    whatever client library sent it and is not a declaration by the caller."""
+    return {"file": ("policy.pdf", document, "application/pdf")}
 
 
 # --- the success contract --------------------------------------------------
@@ -138,7 +143,7 @@ async def test_the_uploaded_bytes_reach_the_pipeline(
 ) -> None:
     await client.post("/policies/ingest", data=form(), files=upload(b"%PDF-1.7 specific"))
 
-    assert recorder.pdf_bytes == b"%PDF-1.7 specific"
+    assert recorder.document_bytes == b"%PDF-1.7 specific"
 
 
 async def test_the_configured_collection_is_used(
@@ -260,19 +265,86 @@ async def test_a_validation_failure_never_echoes_the_rejected_value(
     assert "SECRET" not in response.text
 
 
+# --- the declared content type ---------------------------------------------
+
+
+async def test_the_content_type_defaults_to_pdf(client: AsyncClient, recorder: Recorder) -> None:
+    """Payers publish PDFs, so a caller that says nothing means PDF. This is also
+    what keeps TASK-014's seed script working unchanged."""
+    await client.post("/policies/ingest", data=form(), files=upload())
+
+    assert recorder.metadata is not None
+    assert recorder.metadata.content_type == "application/pdf"
+
+
+async def test_html_can_be_declared(client: AsyncClient, recorder: Recorder) -> None:
+    """CMS publishes no PDF at all, so TASK-013 has HTML and nothing else."""
+    await client.post(
+        "/policies/ingest",
+        data=form(content_type="text/html"),
+        files=upload(HTML),
+    )
+
+    assert recorder.metadata is not None
+    assert recorder.metadata.content_type == "text/html"
+    assert recorder.document_bytes == HTML
+
+
+@pytest.mark.parametrize("declared", ["application/xml", "text/plain", "pdf", ""])
+async def test_an_unsupported_content_type_is_rejected(
+    client: AsyncClient, recorder: Recorder, declared: str
+) -> None:
+    """A format with no reader must not fall through to the PDF one and fail
+    later as an unreadable document."""
+    response = await client.post(
+        "/policies/ingest",
+        data=form(content_type=declared),
+        files=upload(),
+    )
+
+    assert response.status_code == 422
+    assert recorder.metadata is None
+
+
+async def test_the_rejected_content_type_is_not_echoed(
+    client: AsyncClient, recorder: Recorder
+) -> None:
+    """api-envelope reports field locations only, and that holds for this field
+    like every other one."""
+    response = await client.post(
+        "/policies/ingest",
+        data=form(content_type="application/secret-format"),
+        files=upload(),
+    )
+
+    assert "secret-format" not in response.text
+
+
 # --- error mapping ---------------------------------------------------------
 
 
-async def test_an_unreadable_pdf_is_a_400(client: AsyncClient, recorder: Recorder) -> None:
-    recorder.error = PdfParseError("The uploaded file could not be read as a PDF.")
+@pytest.mark.parametrize(
+    "error",
+    [
+        PdfParseError("The uploaded file could not be read as a PDF."),
+        HtmlParseError("The uploaded file could not be decoded as text."),
+    ],
+    ids=["pdf", "html"],
+)
+async def test_an_unreadable_document_is_a_400(
+    client: AsyncClient, recorder: Recorder, error: Exception
+) -> None:
+    """The route catches DocumentParseError, so a new format's reader answers 400
+    without the route learning about it."""
+    recorder.error = error
 
     response = await client.post("/policies/ingest", data=form(), files=upload(b"nope"))
 
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "invalid_pdf"
+    assert response.json()["error"]["code"] == "invalid_document"
 
 
-async def test_a_pdf_with_no_text_is_a_400(client: AsyncClient, recorder: Recorder) -> None:
+async def test_a_document_with_no_text_is_a_400(client: AsyncClient, recorder: Recorder) -> None:
     recorder.error = EmptyDocumentError("no extractable text")
 
     response = await client.post("/policies/ingest", data=form(), files=upload())

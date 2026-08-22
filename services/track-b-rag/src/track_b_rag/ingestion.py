@@ -39,7 +39,7 @@ from payer_vocab import normalize_payer
 from track_a_clinical.models import InsurancePolicy
 from track_b_rag import embeddings, vector_store
 from track_b_rag.chunking import chunk_text
-from track_b_rag.pdf import content_digest, extract_text
+from track_b_rag.documents import DEFAULT_CONTENT_TYPE, ContentType, content_digest, extract_text
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,9 @@ class PolicyMetadata:
     state: str | None = None
     source_url: str | None = None
     effective_date: datetime.date | None = None
+    #: What the caller says the upload is. Declared rather than sniffed — see
+    #: :mod:`track_b_rag.documents`.
+    content_type: ContentType = DEFAULT_CONTENT_TYPE
 
     @property
     def payer_slug(self) -> str:
@@ -101,7 +104,7 @@ async def ingest_policy(
     session: AsyncSession,
     client: QdrantClient,
     collection: str,
-    pdf_bytes: bytes,
+    document_bytes: bytes,
     metadata: PolicyMetadata,
 ) -> IngestResult:
     """Index a policy document and record it, skipping work when nothing changed.
@@ -110,7 +113,8 @@ async def ingest_policy(
         session: Database session; this function commits it on a real ingest.
         client: Qdrant client for the collection being written.
         collection: Collection name, normally ``QDRANT_COLLECTION``.
-        pdf_bytes: The raw uploaded file.
+        document_bytes: The raw uploaded file, in the format
+            ``metadata.content_type`` declares.
         metadata: Payer and policy identifiers for the document.
 
     Returns:
@@ -118,10 +122,11 @@ async def ingest_policy(
         zero for an ``unchanged`` result, which does no work at all.
 
     Raises:
-        PdfParseError: The bytes are not a readable PDF.
-        EmptyDocumentError: The PDF is readable but holds no extractable text.
+        DocumentParseError: The bytes are not readable in their declared format.
+        EmptyDocumentError: The document is readable but holds no extractable
+            text.
     """
-    digest = content_digest(pdf_bytes)
+    digest = content_digest(document_bytes)
     existing = await session.scalar(
         sa.select(InsurancePolicy).where(InsurancePolicy.policy_id == metadata.policy_id)
     )
@@ -142,7 +147,7 @@ async def ingest_policy(
         )
 
     status: IngestStatus = "updated" if existing is not None else "created"
-    chunks = await run_in_threadpool(_extract_chunks, pdf_bytes)
+    chunks = await run_in_threadpool(_extract_chunks, document_bytes, metadata.content_type)
     vectors = await run_in_threadpool(embeddings.embed_documents, chunks)
 
     # Qdrant first — see the module docstring for why this order is not
@@ -183,13 +188,21 @@ async def ingest_policy(
     )
 
 
-def _extract_chunks(pdf_bytes: bytes) -> list[str]:
-    """Parse and split, in one worker-thread hop rather than two."""
-    chunks = chunk_text(extract_text(pdf_bytes))
+def _extract_chunks(document_bytes: bytes, content_type: ContentType) -> list[str]:
+    """Parse and split, in one worker-thread hop rather than two.
+
+    Chunking is the same for both formats — 800 characters with 150 of overlap —
+    because both readers hand back plain text with block boundaries as blank
+    lines. Policy prose is not shaped differently for having been published as
+    HTML, and the constants are fixed for the reason `chunking` gives: changing
+    either invalidates every chunk already indexed.
+    """
+    chunks = chunk_text(extract_text(document_bytes, content_type))
     if not chunks:
         raise EmptyDocumentError(
-            "The PDF parsed successfully but contains no extractable text. A scanned "
-            "document needs OCR before it can be indexed."
+            "The document parsed successfully but contains no extractable text. A "
+            "scanned PDF needs OCR before it can be indexed, and markup with no "
+            "text in it has nothing to index."
         )
     return chunks
 

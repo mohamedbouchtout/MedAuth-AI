@@ -26,6 +26,7 @@ from fastapi import UploadFile
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field
 
 from payer_vocab import normalize_payer
+from track_b_rag.documents import DEFAULT_CONTENT_TYPE, ContentType
 
 
 def _empty_to_none(value: object) -> object:
@@ -120,7 +121,14 @@ class IngestPolicyRequest(BaseModel):
         default=None,
         description="The payer's stated effective date for this version of the policy.",
     )
-    file: UploadFile = Field(description="The policy document, as a PDF.")
+    content_type: ContentType = Field(
+        default=DEFAULT_CONTENT_TYPE,
+        description=(
+            "The format of the uploaded document. Defaults to PDF, which is what "
+            "payers publish; CMS publishes HTML and offers no PDF at all."
+        ),
+    )
+    file: UploadFile = Field(description="The policy document, in the declared format.")
 
 
 class IngestPolicyData(BaseModel):

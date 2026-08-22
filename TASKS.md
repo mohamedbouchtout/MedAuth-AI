@@ -538,6 +538,49 @@ The insurance policy RAG is the technical core. Build and validate before other 
       service to use the database half.
     - Local-dev note: on Windows, `QDRANT_HOST=localhost` resolves to IPv6 first
       and hangs. Use `127.0.0.1`. CI is unaffected.
+  - **Extended for TASK-013: the route takes HTML as well as PDF.** CMS does
+    not publish LCDs or NCDs as PDFs at all — the Medicare Coverage Database's
+    "PDF" affordance is the browser's own print-to-PDF, and the bulk export
+    carries the document body as HTML fragments in CSV fields — so the scraper
+    had nothing this route would accept. What changed, and what did not:
+    - One `content_type` form field, `application/pdf` (the default) or
+      `text/html`, declared by the caller rather than sniffed. A caller always
+      knows what it fetched, and a wrong guess would silently index the wrong
+      parse. It stays the sole body parameter's field, so FastAPI keeps
+      flattening the form — the shape the note above warns against breaking.
+    - `documents.py` now owns the format-independent half: `content_digest()`
+      moved there from `pdf.py`, and `extract_text()` dispatches to `pdf` or the
+      new `markup` module. `PdfParseError` and `HtmlParseError` both derive from
+      `DocumentParseError`, so the route maps any reader's failure to 400
+      without knowing which formats exist.
+    - The error code is now `invalid_document`, renamed from `invalid_pdf`:
+      answering "invalid_pdf" to a malformed HTML upload sends a scraper author
+      looking at the wrong thing. Both callers are internal, so nothing
+      published depended on the old spelling.
+    - HTML extraction is stdlib `html.parser`, not BeautifulSoup — the job is
+      prose out of `<p>`/`<ul>`/`<table>` with block boundaries kept as blank
+      lines, and that does not justify a dependency in this service. It reads
+      *fragments*: what the export carries is a section body, not a page with
+      `<html>` around it. UTF-8 first, then cp1252, because payer documents
+      carry smart quotes and a strict-UTF-8 reader would reject a policy over
+      its apostrophes.
+    - **Chunking is unchanged, deliberately.** `chunk_size=800`,
+      `chunk_overlap=150` apply to extracted HTML exactly as to extracted PDF:
+      both readers hand `chunk_text()` plain text with blank lines at block
+      boundaries, and policy prose is not shaped differently for having been
+      published as HTML.
+    - **The digest still covers the raw uploaded bytes**, which is what makes
+      the HTML path safe to re-scrape nightly. Rendering HTML to a PDF so this
+      route could stay PDF-only was rejected on measurement: PyMuPDF's output is
+      not byte-deterministic, so the same document rendered twice yields two
+      digests, every scrape reads as an update, and the corpus re-embeds daily.
+      The live MCD page is not byte-stable either — it carries a per-request CSP
+      nonce — so a live-page fallback would have to hash extracted text, never
+      the HTTP body.
+    - TASK-011's own tests were extended rather than duplicated: the three dedup
+      claims (created, unchanged, updated) are parametrised over both formats in
+      `tests/integration/test_ingestion.py`, so the HTML path proves them
+      instead of inheriting them. 411 tests, 100% coverage.
 
 - [x] **TASK-012:** Policy query endpoint
   - Service: `services/track-b-rag`

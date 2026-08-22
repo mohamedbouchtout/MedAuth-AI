@@ -24,7 +24,7 @@ from __future__ import annotations
 import datetime
 import os
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 
 import pymupdf
 import pytest
@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from payer_vocab import normalize_payer
 from track_a_clinical.models import InsurancePolicy
 from track_b_rag import embeddings
+from track_b_rag.documents import ContentType
 from track_b_rag.ingestion import PolicyMetadata, ingest_policy
 from track_b_rag.retrieval import policy_query_filter
 from track_b_rag.vector_store import (
@@ -103,6 +104,20 @@ def collection(qdrant: QdrantClient) -> Iterator[str]:
     qdrant.delete_collection(name)
 
 
+#: Builder plus declared type. TASK-011's three dedup claims are what the nightly
+#: scrape rests on, and CMS's documents take the HTML path, so each claim runs
+#: against both formats rather than being proven on PDFs and assumed for HTML.
+PolicyBuilder = tuple[Callable[..., bytes], ContentType]
+
+
+@pytest.fixture(params=["application/pdf", "text/html"], ids=["pdf", "html"])
+def policy_document(request: pytest.FixtureRequest) -> PolicyBuilder:
+    content_type: ContentType = request.param
+    if content_type == "text/html":
+        return ten_page_html_policy, content_type
+    return ten_page_policy, content_type
+
+
 @pytest.fixture
 def policy_id() -> str:
     return f"TEST-{uuid.uuid4().hex[:12]}"
@@ -124,7 +139,22 @@ async def session(policy_id: str) -> AsyncIterator[AsyncSession]:
     await engine.dispose()
 
 
-def metadata_for(policy_id: str) -> PolicyMetadata:
+def ten_page_html_policy(marker: str = "Prior authorization criteria") -> bytes:
+    """The same document as CMS actually publishes it — HTML, no PDF anywhere.
+
+    Ten sections rather than ten pages, each long enough that the document
+    chunks into more than one piece, so the dedup claims below are exercised on
+    a realistic body rather than on a one-liner.
+    """
+    sections = "".join(
+        f"<p>{marker}, section {section} — line {line}. " * 3 + "</p>"
+        for section in range(1, 11)
+        for line in range(1, 6)
+    )
+    return f"<div>{sections}</div>".encode()
+
+
+def metadata_for(policy_id: str, content_type: ContentType = "application/pdf") -> PolicyMetadata:
     return PolicyMetadata(
         policy_id=policy_id,
         payer="CMS",
@@ -132,6 +162,7 @@ def metadata_for(policy_id: str) -> PolicyMetadata:
         state="NY",
         source_url="https://example.gov/policy.pdf",
         effective_date=datetime.date(2026, 1, 1),
+        content_type=content_type,
     )
 
 
@@ -140,24 +171,30 @@ async def ingest(
     qdrant: QdrantClient,
     collection: str,
     policy_id: str,
-    pdf: bytes,
+    document: bytes,
+    content_type: ContentType = "application/pdf",
 ) -> object:
     return await ingest_policy(
         session=session,
         client=qdrant,
         collection=collection,
-        pdf_bytes=pdf,
-        metadata=metadata_for(policy_id),
+        document_bytes=document,
+        metadata=metadata_for(policy_id, content_type),
     )
 
 
 # --- TASK-011: ingest a sample 10-page PDF, verify chunks appear in Qdrant ---
 
 
-async def test_a_ten_page_pdf_lands_as_chunks_in_qdrant(
-    session: AsyncSession, qdrant: QdrantClient, collection: str, policy_id: str
+async def test_a_ten_page_document_lands_as_chunks_in_qdrant(
+    session: AsyncSession,
+    qdrant: QdrantClient,
+    collection: str,
+    policy_id: str,
+    policy_document: PolicyBuilder,
 ) -> None:
-    result = await ingest(session, qdrant, collection, policy_id, ten_page_policy())
+    build, content_type = policy_document
+    result = await ingest(session, qdrant, collection, policy_id, build(), content_type)
 
     assert result.status == "created"  # type: ignore[attr-defined]
     assert result.chunks_indexed > 1  # type: ignore[attr-defined]
@@ -214,44 +251,59 @@ async def test_the_payload_slug_is_what_a_query_filter_would_match(
     assert (points[0].payload or {})["policy_id"] == policy_id
 
 
-# --- TASK-011: the same PDF twice is "unchanged" and does not duplicate ------
+# --- TASK-011: the same document twice is "unchanged" and does not duplicate -
 
 
-async def test_the_same_pdf_twice_is_unchanged(
-    session: AsyncSession, qdrant: QdrantClient, collection: str, policy_id: str
+async def test_the_same_document_twice_is_unchanged(
+    session: AsyncSession,
+    qdrant: QdrantClient,
+    collection: str,
+    policy_id: str,
+    policy_document: PolicyBuilder,
 ) -> None:
-    pdf = ten_page_policy()
-    await ingest(session, qdrant, collection, policy_id, pdf)
+    build, content_type = policy_document
+    document = build()
+    await ingest(session, qdrant, collection, policy_id, document, content_type)
 
-    second = await ingest(session, qdrant, collection, policy_id, pdf)
+    second = await ingest(session, qdrant, collection, policy_id, document, content_type)
 
     assert second.status == "unchanged"  # type: ignore[attr-defined]
     assert second.chunks_indexed == 0  # type: ignore[attr-defined]
 
 
-async def test_the_same_pdf_twice_does_not_duplicate_points(
-    session: AsyncSession, qdrant: QdrantClient, collection: str, policy_id: str
+async def test_the_same_document_twice_does_not_duplicate_points(
+    session: AsyncSession,
+    qdrant: QdrantClient,
+    collection: str,
+    policy_id: str,
+    policy_document: PolicyBuilder,
 ) -> None:
-    pdf = ten_page_policy()
-    first = await ingest(session, qdrant, collection, policy_id, pdf)
+    build, content_type = policy_document
+    document = build()
+    first = await ingest(session, qdrant, collection, policy_id, document, content_type)
     before = count_policy_points(qdrant, collection, policy_id)
 
-    await ingest(session, qdrant, collection, policy_id, pdf)
+    await ingest(session, qdrant, collection, policy_id, document, content_type)
 
     assert count_policy_points(qdrant, collection, policy_id) == before == first.chunks_indexed  # type: ignore[attr-defined]
 
 
 async def test_an_unchanged_ingest_leaves_the_row_alone(
-    session: AsyncSession, qdrant: QdrantClient, collection: str, policy_id: str
+    session: AsyncSession,
+    qdrant: QdrantClient,
+    collection: str,
+    policy_id: str,
+    policy_document: PolicyBuilder,
 ) -> None:
     """A skipped ingest does not bump last_ingested_at — nothing was ingested."""
-    pdf = ten_page_policy()
-    await ingest(session, qdrant, collection, policy_id, pdf)
+    build, content_type = policy_document
+    document = build()
+    await ingest(session, qdrant, collection, policy_id, document, content_type)
     original = await session.scalar(
         sa.select(InsurancePolicy.last_ingested_at).where(InsurancePolicy.policy_id == policy_id)
     )
 
-    await ingest(session, qdrant, collection, policy_id, pdf)
+    await ingest(session, qdrant, collection, policy_id, document, content_type)
 
     current = await session.scalar(
         sa.select(InsurancePolicy.last_ingested_at).where(InsurancePolicy.policy_id == policy_id)
@@ -263,36 +315,51 @@ async def test_an_unchanged_ingest_leaves_the_row_alone(
 
 
 async def test_a_modified_policy_is_updated(
-    session: AsyncSession, qdrant: QdrantClient, collection: str, policy_id: str
+    session: AsyncSession,
+    qdrant: QdrantClient,
+    collection: str,
+    policy_id: str,
+    policy_document: PolicyBuilder,
 ) -> None:
-    await ingest(session, qdrant, collection, policy_id, ten_page_policy())
+    build, content_type = policy_document
+    await ingest(session, qdrant, collection, policy_id, build(), content_type)
 
     result = await ingest(
-        session, qdrant, collection, policy_id, ten_page_policy("Revised criteria")
+        session, qdrant, collection, policy_id, build("Revised criteria"), content_type
     )
 
     assert result.status == "updated"  # type: ignore[attr-defined]
 
 
 async def test_a_modified_policy_replaces_rather_than_accumulates(
-    session: AsyncSession, qdrant: QdrantClient, collection: str, policy_id: str
+    session: AsyncSession,
+    qdrant: QdrantClient,
+    collection: str,
+    policy_id: str,
+    policy_document: PolicyBuilder,
 ) -> None:
-    await ingest(session, qdrant, collection, policy_id, ten_page_policy())
+    build, content_type = policy_document
+    await ingest(session, qdrant, collection, policy_id, build(), content_type)
 
     result = await ingest(
-        session, qdrant, collection, policy_id, ten_page_policy("Revised criteria")
+        session, qdrant, collection, policy_id, build("Revised criteria"), content_type
     )
 
     assert count_policy_points(qdrant, collection, policy_id) == result.chunks_indexed  # type: ignore[attr-defined]
 
 
 async def test_the_superseded_text_is_gone_from_the_collection(
-    session: AsyncSession, qdrant: QdrantClient, collection: str, policy_id: str
+    session: AsyncSession,
+    qdrant: QdrantClient,
+    collection: str,
+    policy_id: str,
+    policy_document: PolicyBuilder,
 ) -> None:
     """The point of deleting first: an old revision must not stay retrievable."""
-    await ingest(session, qdrant, collection, policy_id, ten_page_policy("ORIGINALMARKER"))
+    build, content_type = policy_document
+    await ingest(session, qdrant, collection, policy_id, build("ORIGINALMARKER"), content_type)
 
-    await ingest(session, qdrant, collection, policy_id, ten_page_policy("REVISEDMARKER"))
+    await ingest(session, qdrant, collection, policy_id, build("REVISEDMARKER"), content_type)
 
     points, _ = qdrant.scroll(collection_name=collection, limit=1000, with_payload=True)
     texts = " ".join(str((point.payload or {}).get("text", "")) for point in points)
@@ -312,12 +379,17 @@ async def test_a_shorter_revision_strands_nothing(
 
 
 async def test_an_update_refreshes_the_stored_digest(
-    session: AsyncSession, qdrant: QdrantClient, collection: str, policy_id: str
+    session: AsyncSession,
+    qdrant: QdrantClient,
+    collection: str,
+    policy_id: str,
+    policy_document: PolicyBuilder,
 ) -> None:
-    first = await ingest(session, qdrant, collection, policy_id, ten_page_policy())
+    build, content_type = policy_document
+    first = await ingest(session, qdrant, collection, policy_id, build(), content_type)
 
     second = await ingest(
-        session, qdrant, collection, policy_id, ten_page_policy("Revised criteria")
+        session, qdrant, collection, policy_id, build("Revised criteria"), content_type
     )
 
     row = await session.scalar(

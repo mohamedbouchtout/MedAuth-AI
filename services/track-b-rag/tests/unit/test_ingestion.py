@@ -9,17 +9,19 @@ around them, which a container cannot make legible.
 from __future__ import annotations
 
 import datetime
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
 from track_b_rag import embeddings, ingestion
+from track_b_rag.documents import ContentType, content_digest
 from track_b_rag.ingestion import (
     EmptyDocumentError,
     PolicyMetadata,
     ingest_policy,
 )
-from track_b_rag.pdf import PdfParseError, content_digest
+from track_b_rag.pdf import PdfParseError
 
 COLLECTION = "insurance_policies"
 
@@ -96,22 +98,95 @@ def stub_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def stub_document(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Parse and chunk without building a real PDF; test_pdf.py covers the real thing."""
-    monkeypatch.setattr(ingestion, "extract_text", lambda data: data.decode())
-    monkeypatch.setattr(ingestion, "chunk_text", lambda text: text.split("|") if text else [])
+    """Parse and chunk without building a real document.
+
+    ``test_pdf.py`` and ``test_markup.py`` cover the real readers; the stub
+    records the content type it was handed so the tests here can assert the
+    declared format reaches the reader, which is the only part of dispatch this
+    module is responsible for.
+    """
+    monkeypatch.setattr(
+        ingestion, "extract_text", lambda data, content_type: f"{content_type}|{data.decode()}"
+    )
+    monkeypatch.setattr(
+        ingestion,
+        "chunk_text",
+        # Drops empties like the real chunk_text, so an empty document is no
+        # chunks rather than one blank one.
+        lambda text: [chunk for chunk in text.split("|")[1:] if chunk] if text else [],
+    )
 
 
-PDF = b"first chunk|second chunk|third chunk"
+DOCUMENT = b"first chunk|second chunk|third chunk"
 
 
-async def ingest(session: FakeSession, client: FakeQdrant, pdf: bytes = PDF) -> Any:
+async def ingest(
+    session: FakeSession,
+    client: FakeQdrant,
+    document: bytes = DOCUMENT,
+    content_type: ContentType = "application/pdf",
+) -> Any:
     return await ingest_policy(
         session=session,  # type: ignore[arg-type]
         client=client,  # type: ignore[arg-type]
         collection=COLLECTION,
-        pdf_bytes=pdf,
-        metadata=METADATA,
+        document_bytes=document,
+        metadata=replace(METADATA, content_type=content_type),
     )
+
+
+# --- the declared format reaches the reader --------------------------------
+
+
+@pytest.mark.parametrize("content_type", ["application/pdf", "text/html"])
+async def test_the_declared_content_type_reaches_the_reader(
+    qdrant: FakeQdrant, content_type: ContentType
+) -> None:
+    """Dispatch is this module's job; which reader handles what is documents.py's.
+
+    The stub prefixes the text it returns with the type it was called with, so a
+    chunk carrying that prefix proves the declaration was not dropped on the way.
+    """
+    await ingest(FakeSession(), qdrant, document=b"|only chunk", content_type=content_type)
+
+    assert [point.payload["text"] for point in qdrant.upserted] == ["only chunk"]
+
+
+@pytest.mark.parametrize("content_type", ["application/pdf", "text/html"])
+async def test_the_digest_is_over_the_bytes_whatever_the_format(
+    qdrant: FakeQdrant, content_type: ContentType
+) -> None:
+    """One dedup rule for both formats: it identifies the file, not the parse."""
+    result = await ingest(FakeSession(), qdrant, content_type=content_type)
+
+    assert result.content_hash == content_digest(DOCUMENT)
+
+
+@pytest.mark.parametrize("content_type", ["application/pdf", "text/html"])
+async def test_an_unchanged_document_is_skipped_whatever_the_format(
+    qdrant: FakeQdrant, content_type: ContentType
+) -> None:
+    """TASK-011's three dedup claims hold on the HTML path too, rather than being
+    inherited from the PDF path — this is the one the nightly scrape depends on."""
+    session = FakeSession(FakeRow(content_digest(DOCUMENT)))
+
+    result = await ingest(session, qdrant, content_type=content_type)
+
+    assert result.status == "unchanged"
+    assert result.chunks_indexed == 0
+    assert qdrant.calls == []
+
+
+@pytest.mark.parametrize("content_type", ["application/pdf", "text/html"])
+async def test_a_changed_document_is_updated_whatever_the_format(
+    qdrant: FakeQdrant, content_type: ContentType
+) -> None:
+    session = FakeSession(FakeRow("a-different-digest"))
+
+    result = await ingest(session, qdrant, content_type=content_type)
+
+    assert result.status == "updated"
+    assert qdrant.deleted == [METADATA.policy_id]
 
 
 # --- created ---------------------------------------------------------------
@@ -166,7 +241,7 @@ def test_every_medicare_spelling_indexes_under_one_slug(spelling: str) -> None:
 async def test_the_result_carries_the_digest_of_the_uploaded_bytes(qdrant: FakeQdrant) -> None:
     result = await ingest(FakeSession(), qdrant)
 
-    assert result.content_hash == content_digest(PDF)
+    assert result.content_hash == content_digest(DOCUMENT)
 
 
 async def test_the_result_names_the_collection(qdrant: FakeQdrant) -> None:
@@ -188,7 +263,7 @@ async def test_the_row_is_written_and_committed(qdrant: FakeQdrant) -> None:
 
 
 async def test_a_matching_digest_is_unchanged(qdrant: FakeQdrant) -> None:
-    session = FakeSession(FakeRow(content_digest(PDF)))
+    session = FakeSession(FakeRow(content_digest(DOCUMENT)))
 
     result = await ingest(session, qdrant)
 
@@ -196,7 +271,7 @@ async def test_a_matching_digest_is_unchanged(qdrant: FakeQdrant) -> None:
 
 
 async def test_an_unchanged_policy_does_no_qdrant_work(qdrant: FakeQdrant) -> None:
-    session = FakeSession(FakeRow(content_digest(PDF)))
+    session = FakeSession(FakeRow(content_digest(DOCUMENT)))
 
     await ingest(session, qdrant)
 
@@ -205,7 +280,7 @@ async def test_an_unchanged_policy_does_no_qdrant_work(qdrant: FakeQdrant) -> No
 
 async def test_an_unchanged_policy_writes_no_row(qdrant: FakeQdrant) -> None:
     """Skipping means skipping: last_ingested_at is not bumped for a no-op."""
-    session = FakeSession(FakeRow(content_digest(PDF)))
+    session = FakeSession(FakeRow(content_digest(DOCUMENT)))
 
     await ingest(session, qdrant)
 
@@ -214,7 +289,7 @@ async def test_an_unchanged_policy_writes_no_row(qdrant: FakeQdrant) -> None:
 
 
 async def test_an_unchanged_policy_reports_zero_chunks(qdrant: FakeQdrant) -> None:
-    session = FakeSession(FakeRow(content_digest(PDF)))
+    session = FakeSession(FakeRow(content_digest(DOCUMENT)))
 
     result = await ingest(session, qdrant)
 
@@ -222,11 +297,11 @@ async def test_an_unchanged_policy_reports_zero_chunks(qdrant: FakeQdrant) -> No
 
 
 async def test_an_unchanged_policy_still_reports_its_digest(qdrant: FakeQdrant) -> None:
-    session = FakeSession(FakeRow(content_digest(PDF)))
+    session = FakeSession(FakeRow(content_digest(DOCUMENT)))
 
     result = await ingest(session, qdrant)
 
-    assert result.content_hash == content_digest(PDF)
+    assert result.content_hash == content_digest(DOCUMENT)
 
 
 # --- updated ---------------------------------------------------------------
@@ -283,12 +358,12 @@ async def test_qdrant_is_written_before_postgres(
     assert order == ["qdrant", "postgres"]
 
 
-async def test_a_pdf_that_will_not_parse_writes_nothing(
+async def test_a_document_that_will_not_parse_writes_nothing(
     qdrant: FakeQdrant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     session = FakeSession()
 
-    def explode(data: bytes) -> str:
+    def explode(data: bytes, content_type: ContentType) -> str:
         raise PdfParseError("not a pdf")
 
     monkeypatch.setattr(ingestion, "extract_text", explode)
@@ -300,22 +375,29 @@ async def test_a_pdf_that_will_not_parse_writes_nothing(
     assert session.commits == 0
 
 
-async def test_a_pdf_with_no_text_is_refused(qdrant: FakeQdrant) -> None:
-    """A scanned policy would otherwise record a hash with no vectors behind it."""
+@pytest.mark.parametrize("content_type", ["application/pdf", "text/html"])
+async def test_a_document_with_no_text_is_refused(
+    qdrant: FakeQdrant, content_type: ContentType
+) -> None:
+    """A scanned policy would otherwise record a hash with no vectors behind it,
+    and markup with no text in it is the same state reached a different way."""
     session = FakeSession()
 
     with pytest.raises(EmptyDocumentError):
-        await ingest(session, qdrant, pdf=b"")
+        await ingest(session, qdrant, document=b"", content_type=content_type)
 
     assert qdrant.calls == []
     assert session.commits == 0
 
 
-async def test_an_empty_document_is_refused_before_any_delete(qdrant: FakeQdrant) -> None:
+@pytest.mark.parametrize("content_type", ["application/pdf", "text/html"])
+async def test_an_empty_document_is_refused_before_any_delete(
+    qdrant: FakeQdrant, content_type: ContentType
+) -> None:
     """The existing index must survive an attempt to replace it with nothing."""
     session = FakeSession(FakeRow("a-previous-digest"))
 
     with pytest.raises(EmptyDocumentError):
-        await ingest(session, qdrant, pdf=b"")
+        await ingest(session, qdrant, document=b"", content_type=content_type)
 
     assert qdrant.deleted == []
