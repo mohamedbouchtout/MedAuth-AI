@@ -286,6 +286,9 @@ fhir_token:{session_id}          cache, TTL = token expiry — EHR access token
 ```
 Lowercase, colon-separated, most-specific segment last. If a task needs a new
 Redis key pattern not listed here, add it to this list in the same PR.
+The `{payer}` segment is the canonical slug from `packages/payer-vocab`, never a
+payer's display name — see "Payer and jurisdiction identity" below for why a raw
+name in this key silently halves the hit rate and hides a retrieval miss.
 
 ### Qdrant Initialization — Must Be Idempotent
 `qdrant.recreate_collection()` deletes and rebuilds the collection — calling it
@@ -358,6 +361,78 @@ models from `track_a_clinical.models` to write the `insurance_policies` row).
 Rename to `src/track_b_rag/` and declare `medauth-track-a-clinical` as a
 dependency in TASK-010, while the service is still empty — cheaper now than
 as churn after TASK-011 through TASK-015 exist.
+
+### Payer and jurisdiction identity — one canonical vocabulary (cross-cutting)
+**The bug this closes.** `payer` is matched by exact string equality in two
+places: Qdrant's retrieval filter (`FieldCondition(key="payer",
+match=MatchValue(value=payer))` in `track_b_rag/retrieval.py`) and the Redis
+cache key `rag:{payer}:{plan_type}:{state}:{cpt_code}`. Nothing normalises it on
+either side — ingestion stores whatever string the uploader sent, and the query
+endpoint filters on whatever string the caller sent. `state` and `cpt_code` are
+at least uppercased; `payer` is not touched at all. At query time that string
+originates in a FHIR `Coverage` resource's free-text payer display: "Medicare
+Part B", "AETNA", "Aetna Better Health of MA". None of those equals the "CMS" or
+"Aetna" an ingest wrote. The failure is silent — retrieval returns zero chunks,
+the RAG path reports it found no policy, and that is indistinguishable from a
+payer we genuinely hold no policy for.
+
+**The rule.** `payer` is a canonical slug everywhere it is stored, matched or
+keyed, and never a display name. Both sides call the same function, from
+`packages/payer-vocab`:
+
+```python
+normalize_payer(raw: str) -> str   # "Medicare Part B" -> "cms-medicare"
+is_known_payer(slug: str) -> bool  # False for a name the vocabulary has never seen
+```
+
+- **Deterministic slugging is the mechanism** — casefold, strip legal suffixes
+  and punctuation, collapse whitespace, hyphenate. It guarantees two spellings
+  of one name cannot become two payers.
+- **An alias table handles what slugging cannot reach.** "Medicare", "Medicare
+  Part A", "Medicare Part B", "Original Medicare" and "CMS" all resolve to
+  `cms-medicare`. This is curated data, not inference — extend the table when a
+  new payer appears rather than making the slug function cleverer.
+- **An unknown payer still queries, but says so.** A payer the vocabulary has
+  never seen is not an error; it gets a slug and runs. The query path logs at
+  WARNING when `is_known_payer()` is false, so "the name did not line up" is
+  visible in the operational trace instead of looking like "no policy found".
+  That distinction is the whole point of this section.
+- **Display names are not discarded** — keep the payer's own spelling in the
+  Postgres row for humans to read. Slugs are for matching, not for display.
+
+It is a package rather than a module inside track-b-rag because the consumers
+span services: `/policies/ingest` and `/policies/query` (TASK-011/012), the
+policy scraper (TASK-013), the seed script (TASK-014), and fhir-integration when
+it turns a `Coverage` resource into a query (Phase 5). Same reasoning as
+api-envelope, and the `rag:` cache key's `{payer}` segment is a canonical slug
+for the same reason.
+
+Doing this after TASK-014 seeds a corpus would mean re-ingesting that corpus.
+Doing it now costs a re-run of a dev-only index. Same argument as TASK-010's
+package rename.
+
+**Jurisdiction is the same problem one column over.** A Medicare LCD is issued
+per Medicare Administrative Contractor jurisdiction and applies in every state
+that jurisdiction covers — a median of 12 states across the 949 current LCDs,
+and 48 for the widest. CMS's own state vocabulary is *not* a list of USPS state
+codes: it carries territories, a four-character `CNMI` that will not fit
+`CHAR(2)` at all, and sub-state jurisdictions — `DN`/`QN`/`UN` (New York
+downstate, Queens, upstate), `NF`/`SF` (northern and southern California) and
+`EM`/`WM` (Missouri). Writing any of those into a `state` that a FHIR `Coverage`
+will later be matched against reproduces the payer bug exactly. Normalise to the
+two-character USPS code of the parent state at ingestion time (`CNMI` → `MP`,
+`DN`/`QN`/`UN` → `NY`, `NF`/`SF` → `CA`, `EM`/`WM` → `MO`).
+
+**A multi-state policy is one document with a list of states, never one copy per
+state.** Qdrant's `MatchValue` matches any element of a list-valued payload
+field — verified against the running Qdrant using the exact filter in
+`policy_query_filter`, with and without the keyword payload index TASK-011
+creates. So a payload of `state: ["MA", "ME", "NY"]` needs *no* change to the
+retrieval filter, and the `IsNullCondition` that lets national policies match
+every state keeps working alongside it. Copying a policy per state would instead
+duplicate identical text a median of 12 times in Qdrant — 12× the embedding
+cost, and near-duplicate chunks crowding each other out of `TOP_K=8`. See
+TASK-013 for the Postgres side of the same decision.
 
 ### packages/api-envelope — Design Decisions (locked, do not revisit)
 **Scope note (read first):** this package is the single definition of the HTTP
