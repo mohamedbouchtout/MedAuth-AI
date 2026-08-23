@@ -101,6 +101,113 @@ class TestNormalizePayer:
             normalize_payer("   ")
 
 
+class TestRealCoverageDisplays:
+    """Names taken from live FHIR servers, not invented for the test.
+
+    Sources, all fetched rather than recalled: the Oracle Health (Cerner) open
+    sandbox at ``fhir-open.cerner.com``, the public HAPI R4 test server, and
+    Synthea's own ``insurance_companies.csv`` — the roster the local dev HAPI
+    server is seeded from in TASK-052. Every string below was observed in a
+    ``Coverage.payor.display`` or in Synthea's payer table. They are here
+    because guessing at plausible spellings is what let this class of bug
+    through the first time.
+    """
+
+    @pytest.mark.parametrize(
+        ("display", "expected"),
+        [
+            # Oracle Health open sandbox.
+            ("Aetna", "aetna"),
+            ("Blue Cross", "blue-cross-blue-shield"),
+            ("Coventry Healthcare", "aetna"),
+            ("Humana", "humana"),
+            ("MEDICARE", "cms-medicare"),
+            ("Medicaid", "medicaid"),
+            ("United Healthcare", "unitedhealthcare"),
+            ("Medicare Part A", "cms-medicare"),
+            ("Medicare Part B", "cms-medicare"),
+            ("Medi-Cal", "medicaid"),
+            # Public HAPI R4 test server.
+            ("Anthem Blue Cross Blue Shield", "anthem-bcbs"),
+            ("Humana Medicare Advantage", "medicare-advantage"),
+            ("Medicare", "cms-medicare"),
+            ("UnitedHealthcare", "unitedhealthcare"),
+            # Synthea's roster — what local dev data will actually contain.
+            ("Blue Cross Blue Shield", "blue-cross-blue-shield"),
+            ("Cigna Health", "cigna"),
+            ("Anthem", "anthem-bcbs"),
+        ],
+    )
+    def test_observed_display_resolves_to_a_curated_payer(
+        self, display: str, expected: str
+    ) -> None:
+        slug = normalize_payer(display)
+        assert slug == expected
+        assert is_known_payer(slug) is True
+
+    @pytest.mark.parametrize(
+        "display",
+        ["SELF PAY", "Government", "Dual Eligible"],
+    )
+    def test_non_payers_stay_unknown(self, display: str) -> None:
+        """Observed in the same feeds, and deliberately not given a slug.
+
+        None of these names a carrier whose prior-authorization policy we could
+        ingest. Mapping them somewhere would manufacture a payer identity the
+        source never asserted; leaving them unknown makes the query path log at
+        WARNING, which is the accurate description of the situation.
+        """
+        assert is_known_payer(normalize_payer(display)) is False
+
+
+class TestBlueCrossFamily:
+    """Which Blue plan a name means is a question about whose policy governs.
+
+    The 33 Association licensees publish their own prior-authorization
+    criteria, so these slugs must not collapse: a merged slug would let one
+    licensee's ingested policy answer a query about another, silently and
+    wrongly. Keeping them apart fails the other way — an empty retrieval with a
+    WARNING, which is the failure this package was written to make visible.
+    """
+
+    @pytest.mark.parametrize(
+        ("display", "expected"),
+        [
+            ("Anthem", "anthem-bcbs"),
+            ("Anthem BCBS", "anthem-bcbs"),
+            ("Anthem Blue Cross", "anthem-bcbs"),
+            ("Anthem Blue Cross Blue Shield", "anthem-bcbs"),
+            ("Anthem Blue Cross and Blue Shield", "anthem-bcbs"),
+        ],
+    )
+    def test_anthem_branded_names_resolve_to_anthem(self, display: str, expected: str) -> None:
+        assert normalize_payer(display) == expected
+
+    @pytest.mark.parametrize(
+        "display",
+        [
+            "Blue Cross Blue Shield of Massachusetts",
+            "Blue Cross and Blue Shield of Massachusetts, Inc.",
+            "BCBS of Massachusetts",
+            "BCBSMA",
+        ],
+    )
+    def test_massachusetts_licensee_has_its_own_slug(self, display: str) -> None:
+        """The pilot geography's licensee, so it is the first with a rule-2 slug."""
+        assert normalize_payer(display) == "bcbs-ma"
+
+    @pytest.mark.parametrize(
+        "display",
+        ["Blue Cross", "BCBS", "Blue Cross Blue Shield", "Blue Cross & Blue Shield"],
+    )
+    def test_unqualified_blue_names_land_in_the_generic_bucket(self, display: str) -> None:
+        """Real EHR data names no licensee constantly; that is its own answer."""
+        assert normalize_payer(display) == "blue-cross-blue-shield"
+
+    def test_the_three_blue_slugs_stay_distinct(self) -> None:
+        assert len({normalize_payer(n) for n in ("Anthem", "BCBSMA", "Blue Cross")}) == 3
+
+
 class TestIsKnownPayer:
     def test_curated_payers_are_known(self) -> None:
         assert is_known_payer("cms-medicare") is True

@@ -102,14 +102,59 @@ PAYER_ALIASES: Final[dict[str, str]] = {
     "united-health-care": "unitedhealthcare",
     "uhc": "unitedhealthcare",
     "unitedhealth": "unitedhealthcare",
+    "coventry": "aetna",
+    "coventry-health-care": "aetna",
+    "coventry-healthcare": "aetna",
+    "cigna-health": "cigna",
+    "cigna-healthcare": "cigna",
+    "humana-health-plan": "humana",
+    # Medicare Advantage is sold under each carrier's own brand. The plan's
+    # rules are the carrier's, but the path that answers for it is TASK-015's
+    # CRD route rather than CMS policy text, so brand-qualified Advantage names
+    # resolve to the program and not to the carrier.
+    "humana-medicare-advantage": "medicare-advantage",
+    "aetna-medicare-advantage": "medicare-advantage",
+    "unitedhealthcare-medicare-advantage": "medicare-advantage",
+    # State Medicaid programs trade under their own names.
+    "medi-cal": "medicaid",
+    "masshealth": "medicaid",
+    # --- The Blue Cross Blue Shield family -------------------------------
+    # Three slugs, and which one applies is a question about whose medical
+    # policy governs, not about spelling. The Association licenses 33
+    # independent companies that each publish their own prior-authorization
+    # criteria, so collapsing them would let a policy ingested for one
+    # licensee answer a query about another — a wrong answer, served
+    # silently, which is worse than the empty retrieval this package exists
+    # to make visible. The rule:
+    #
+    #   1. Anthem-branded          -> ``anthem-bcbs``
+    #   2. A named licensee we hold policies for -> that licensee's own slug
+    #   3. Unqualified "Blue Cross" / "BCBS" -> ``blue-cross-blue-shield``
+    #
+    # Rule 3 is the generic bucket for a Coverage resource that names no
+    # licensee — real EHR data does this constantly ("Blue Cross" is what the
+    # Oracle Health sandbox emits). It is deliberately *not* a synonym for any
+    # particular licensee: seed corpora belong under a rule-2 slug.
+    # Add a rule-2 row when a licensee's policies are actually ingested;
+    # until then its name lands outside KNOWN_PAYERS and logs at WARNING,
+    # which is the honest signal that we hold nothing for it.
     "bcbs": "blue-cross-blue-shield",
     "blue-cross": "blue-cross-blue-shield",
     "blue-shield": "blue-cross-blue-shield",
     "bluecross-blueshield": "blue-cross-blue-shield",
+    "blue-cross-and-blue-shield": "blue-cross-blue-shield",
     "anthem": "anthem-bcbs",
+    "anthem-blue-cross": "anthem-bcbs",
     "anthem-blue-cross-blue-shield": "anthem-bcbs",
-    "cigna-healthcare": "cigna",
-    "humana-health-plan": "humana",
+    "anthem-blue-cross-and-blue-shield": "anthem-bcbs",
+    # Massachusetts is the pilot geography, so its licensee is the first to
+    # get a slug of its own. "of Massachusetts" survives slugging, so every
+    # spelling of the name needs a row; "of" is not a noise word because
+    # dropping it is what would merge the licensee into the generic bucket.
+    "blue-cross-blue-shield-of-massachusetts": "bcbs-ma",
+    "blue-cross-and-blue-shield-of-massachusetts": "bcbs-ma",
+    "bcbs-of-massachusetts": "bcbs-ma",
+    "bcbsma": "bcbs-ma",
 }
 
 #: Payers we expect to see and hold or plan to hold policies for. A slug outside
@@ -121,6 +166,7 @@ KNOWN_PAYERS: Final[frozenset[str]] = frozenset(
         "medicaid",
         "aetna",
         "anthem-bcbs",
+        "bcbs-ma",
         "blue-cross-blue-shield",
         "cigna",
         "humana",
