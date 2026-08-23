@@ -42,7 +42,7 @@ medauth-ai/
 ├── scripts/
 │   ├── seed-synthea.sh   # Load synthetic patients into local HAPI FHIR (stub until TASK-052)
 │   └── setup-dev.sh      # One-command dev environment setup (stub until TASK-052)
-└── docker-compose.yml    # Full local stack — postgres, redis, qdrant, hapi-fhir
+└── docker-compose.yml    # Full local stack — postgres, redis, qdrant, hapi-fhir, crd
 ```
 
 ## Tech Stack
@@ -103,7 +103,7 @@ aws cli (configured with dev credentials)
 
 ### Start full local stack
 ```bash
-docker compose up          # Postgres, Redis, Qdrant, HAPI FHIR server
+docker compose up          # Postgres, Redis, Qdrant, HAPI FHIR, CRD RI
 ./scripts/seed-synthea.sh  # Load 100 synthetic patients into HAPI FHIR
 ./scripts/setup-dev.sh     # Install all Python + Node dependencies
 ```
@@ -117,6 +117,9 @@ uv run uvicorn src.main:app --reload --port 8002
 ### Local service ports
 ```
 8080  HAPI FHIR (synthetic EHR)
+8006  Da Vinci CRD Reference Implementation (simulated payer, TASK-015)
+      Container listens on 8090; published as 8006 because Windows reserves
+      the 8081-8180 range and the container cannot bind 8090 there.
 8001  audio-ingestion
 8002  track-b-rag
 8003  track-a-clinical
@@ -213,14 +216,52 @@ Authored-By: ...
   Adding `clinical_context` to the key instead would be correct but would
   collapse the hit rate to near zero, defeating the point.
 - **Haiku for extraction tasks, Sonnet for reasoning.** ICD/CPT entity extraction → Haiku. SOAP generation and payer policy analysis → Sonnet. Costs 15x less per extraction call.
-- **Policy lookup is two-tier, not RAG-only.** For payers covered by the CMS-0057-F
-  mandate (Medicare Advantage, Medicaid managed care, CHIP, ACA marketplace),
-  `/policies/query` (TASK-012) tries the Da Vinci CRD/DTR standardized API first
-  (TASK-015) and only falls back to the RAG/Qdrant/Sonnet path (TASK-010–014) on
-  failure or for unsupported payers. Commercial employer-sponsored plans — the
-  bulk of what private practices see — are not covered by the mandate and stay
-  on the RAG path for the foreseeable future. Both paths return the same response
-  shape; callers never branch on which one answered.
+- **Policy lookup is two-tier, and the tiers answer different questions.** For
+  payers covered by the CMS-0057-F mandate (Medicare Advantage, Medicaid managed
+  care, CHIP, ACA marketplace), `/policies/query` (TASK-012) asks the payer's own
+  Da Vinci **CRD** endpoint (TASK-015) *and* runs the RAG/Qdrant/Sonnet path
+  (TASK-010–014), concurrently. CRD decides `requires_auth`, which it states
+  directly and authoritatively; the RAG path supplies `auth_criteria` and the
+  step therapy fields. Commercial employer-sponsored plans — the bulk of what
+  private practices see — are not covered by the mandate and take the RAG path
+  alone. Both arrangements return the same response shape; callers never branch
+  on which one answered.
+  **CRD does not carry the criteria, and this is a property of the standard, not
+  of any one implementation.** The IG's `ext-coverage-information` extension
+  carries `covered`, `pa-needed`, `doc-needed`, `doc-purpose`, `questionnaire`
+  and assorted trace fields — nothing holding criterion text. CRD answers
+  *whether* authorization and documentation are needed and delegates *what must
+  be documented* to a DTR Questionnaire. So a CRD-only answer would hand Stage 2
+  an empty criteria list and a nudge that cannot say what is missing, which is
+  most of the product. Earlier drafts said CRD would let us "skip the RAG path
+  entirely"; that was written before anyone ran a CRD server, and it is wrong.
+  Da Vinci **DTR** is deferred to a later task — it needs a SMART on FHIR app
+  surface that does not exist before Phase 5, and its Questionnaire items are
+  largely administrative form fields (name, NPI, signature) that would poison
+  the Stage 2 matcher if mapped into `auth_criteria` as they are.
+  **Silence from a payer is never "no authorization required."** An empty card
+  list, a card that only reports documentation requirements, and the
+  "unable to process" card a payer returns when its rule needs more than we sent
+  all mean *no determination*, and the RAG path then answers alone. Reading any
+  of them as a negative determination would tell a provider an unauthorized
+  order is clear — the one direction TASK-012 forbids failing in.
+  **The CRD request carries no patient.** Stage 1 holds none by construction, so
+  the request is built from payer, plan type, state and procedure code with a
+  placeholder subject. CRD is specified as a patient-specific coverage check, so
+  a payer rule keyed on age or sex simply cannot answer us — it returns "unable
+  to process" and RAG answers instead. Fabricating a patient to make such a rule
+  respond would produce a confident determination about someone who does not
+  exist. Patient-specific CRD belongs with the EHR-backed FHIR resources
+  fhir-integration will have in Phase 5.
+- **A CRD answer is never cached; a RAG answer is.** The `rag:` key exists
+  because a Qdrant search plus a Sonnet call is expensive and its result is
+  identical for every patient on that payer/plan/state/CPT — a day of staleness
+  is an accepted trade for that. CRD is a different kind of answer: its entire
+  value over RAG is being live and authoritative from the payer's own system at
+  the moment of the order, so caching it for 24h discards the only property that
+  justifies the second tier. The CRD path neither reads nor writes the `rag:`
+  key. If CRD latency ever threatens the nudge budget, the answer is a short
+  seconds-scale TTL of its own, never the 24h payer-policy key.
 
 ### Session Lifecycle & JWT Issuance (read before Phase 1/2/3/4 tasks)
 This is the one piece every real-time service depends on but nothing explicitly
