@@ -15,13 +15,15 @@ edit adding such a parameter fails a test rather than passing review.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from track_b_rag import bedrock, cache, policy_rules, retrieval
+from track_b_rag import bedrock, cache, crd, policy_rules, retrieval
 from track_b_rag.policy_rules import PolicyRules, resolve_policy_rules
 
 ANSWER = {
@@ -440,3 +442,239 @@ def test_the_cached_model_holds_only_payer_policy_fields() -> None:
         "step_therapy_details",
     }
     assert not fields & {"missing_criteria", "denial_risk", "nudge_message"}
+
+
+# --- the Da Vinci CRD tier (TASK-015) --------------------------------------
+#
+# The tier only ever *adds* an answer. Every test below is written against that
+# claim: with CRD absent, unsupported, failing or undecided, Stage 1 behaves
+# exactly as it did before TASK-015, and the tests above are the proof of the
+# "unsupported payer" half.
+
+
+CRD_KEY = "rag:medicare-advantage:PPO:MA:73721"
+
+
+@pytest.fixture
+def crd_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the tier at an endpoint no test actually reaches.
+
+    Tests below replace :func:`track_b_rag.crd.determine` itself. The setting
+    still has to be non-empty, because an unset ``CRD_BASE_URL`` disables the
+    tier before it is ever called — and a real ``docker compose`` CRD container
+    on the developer's own machine must not be able to answer a unit test.
+    """
+    monkeypatch.setattr(
+        policy_rules,
+        "get_settings",
+        lambda: SimpleNamespace(crd_base_url="http://crd.invalid", crd_timeout_seconds=1.0),
+    )
+
+
+async def resolve_advantage(redis: FakeRedis) -> policy_rules.PolicyRulesResolution:
+    """Resolve the same query for a payer the CMS-0057-F mandate covers."""
+    return await resolve_policy_rules(
+        qdrant=object(),  # type: ignore[arg-type]
+        redis=redis,  # type: ignore[arg-type]
+        collection="insurance_policies",
+        procedure="knee MRI",
+        cpt_code="73721",
+        payer="medicare-advantage",
+        plan_type="PPO",
+        state="MA",
+    )
+
+
+def answering(requires_auth: bool) -> Any:
+    """Return a stand-in for CRD that makes one determination."""
+
+    async def determine(**kwargs: Any) -> crd.CrdDetermination:
+        return crd.CrdDetermination(requires_auth=requires_auth, signal="card-type:prior-auth")
+
+    return determine
+
+
+def silent() -> Any:
+    """Return a stand-in for CRD that decides nothing — a timeout, or no rule."""
+
+    async def determine(**kwargs: Any) -> None:
+        return None
+
+    return determine
+
+
+async def test_crd_is_not_consulted_for_a_payer_outside_the_mandate(
+    redis: FakeRedis, recorder: Recorder, crd_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression this task must not break: commercial plans are untouched."""
+    calls: list[dict[str, Any]] = []
+
+    async def determine(**kwargs: Any) -> None:
+        calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(crd, "determine", determine)
+
+    resolution = await resolve(redis)
+
+    assert calls == []
+    assert resolution.source == "rag"
+    assert resolution.rules.requires_auth is True
+
+
+async def test_crd_is_not_consulted_when_no_endpoint_is_configured(
+    redis: FakeRedis, recorder: Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty CRD_BASE_URL turns the tier off without touching anything else."""
+    calls: list[dict[str, Any]] = []
+
+    async def determine(**kwargs: Any) -> None:
+        calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(crd, "determine", determine)
+    monkeypatch.setattr(
+        policy_rules,
+        "get_settings",
+        lambda: SimpleNamespace(crd_base_url=None, crd_timeout_seconds=1.0),
+    )
+
+    resolution = await resolve_advantage(redis)
+
+    assert calls == []
+    assert resolution.source == "rag"
+
+
+async def test_crd_decides_requires_auth_and_rag_supplies_the_criteria(
+    redis: FakeRedis, recorder: Recorder, crd_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shape of the two-tier answer.
+
+    CRD carries no criteria — the IG delegates those to a DTR Questionnaire —
+    so the RAG half still runs and Stage 2 still has something to compare a
+    note against.
+    """
+    monkeypatch.setattr(crd, "determine", answering(False))
+
+    resolution = await resolve_advantage(redis)
+
+    assert resolution.source == "crd+rag"
+    assert resolution.rules.requires_auth is False
+    assert resolution.rules.auth_criteria == ["Failed six weeks of conservative therapy"]
+
+
+async def test_the_crd_answer_is_never_written_to_the_cache(
+    redis: FakeRedis, recorder: Recorder, crd_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The correctness test for the no-caching decision.
+
+    What Redis holds is the payer-policy answer and nothing else. If a CRD
+    determination could reach the cache it would be served for 24 hours, which
+    discards the only property — being live — that justifies the tier at all.
+    """
+    monkeypatch.setattr(crd, "determine", answering(False))
+
+    await resolve_advantage(redis)
+
+    cached = json.loads(redis.store[CRD_KEY])
+    assert cached["requires_auth"] is True  # what the policy text said
+    assert cached["auth_criteria"] == ["Failed six weeks of conservative therapy"]
+
+
+async def test_crd_is_consulted_again_on_a_cache_hit(
+    redis: FakeRedis, recorder: Recorder, crd_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A warm cache saves the Bedrock call, never the payer call."""
+    calls: list[dict[str, Any]] = []
+
+    async def determine(**kwargs: Any) -> crd.CrdDetermination:
+        calls.append(kwargs)
+        return crd.CrdDetermination(requires_auth=False, signal="pa-needed:no-auth")
+
+    monkeypatch.setattr(crd, "determine", determine)
+
+    await resolve_advantage(redis)
+    recorder.retrievals = 0
+    recorder.prompts.clear()
+
+    resolution = await resolve_advantage(redis)
+
+    assert len(calls) == 2
+    assert recorder.retrievals == 0
+    assert resolution.source == "crd+cache"
+    assert resolution.rules.requires_auth is False
+
+
+async def test_a_silent_crd_leaves_the_rag_answer_alone(
+    redis: FakeRedis, recorder: Recorder, crd_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timeout, a 500, or a payer with no rule for this code all land here."""
+    monkeypatch.setattr(crd, "determine", silent())
+
+    resolution = await resolve_advantage(redis)
+
+    assert resolution.source == "rag"
+    assert resolution.rules.requires_auth is True
+    assert resolution.rules.auth_criteria == ["Failed six weeks of conservative therapy"]
+
+
+async def test_crd_answers_where_the_policy_tier_fell_back(
+    redis: FakeRedis, recorder: Recorder, crd_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """We hold no policy text for this payer, but the payer itself answered.
+
+    Better than the safe fallback, which claims to know nothing at all: the
+    criteria are genuinely unknown, but whether authorization is required is
+    not. The result is a real answer, so Stage 2 runs on it.
+    """
+    recorder.chunks = []
+    monkeypatch.setattr(crd, "determine", answering(True))
+
+    resolution = await resolve_advantage(redis)
+
+    assert resolution.source == "crd"
+    assert resolution.is_fallback is False
+    assert resolution.rules.requires_auth is True
+    assert resolution.rules.auth_criteria == []
+
+
+async def test_a_crd_answer_over_a_fallback_is_not_cached(
+    redis: FakeRedis, recorder: Recorder, crd_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback is not cached, and the CRD answer on top of it is not either."""
+    recorder.chunks = []
+    monkeypatch.setattr(crd, "determine", answering(True))
+
+    await resolve_advantage(redis)
+
+    assert redis.store == {}
+
+
+async def test_the_two_tiers_run_concurrently(
+    redis: FakeRedis, recorder: Recorder, crd_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither tier needs the other, and a nudge is read mid-encounter.
+
+    Asserted by having each tier block until the other has started: were they
+    sequential this would time out rather than fail with a plausible-looking
+    message about ordering.
+    """
+    crd_started = asyncio.Event()
+    rag_started = asyncio.Event()
+
+    async def determine(**kwargs: Any) -> crd.CrdDetermination:
+        crd_started.set()
+        await asyncio.wait_for(rag_started.wait(), timeout=5)
+        return crd.CrdDetermination(requires_auth=True, signal="pa-needed:auth-needed")
+
+    async def invoke(prompt: str) -> str:
+        rag_started.set()
+        await asyncio.wait_for(crd_started.wait(), timeout=5)
+        return json.dumps(ANSWER)
+
+    monkeypatch.setattr(crd, "determine", determine)
+    monkeypatch.setattr(bedrock, "invoke_reasoning", invoke)
+
+    resolution = await resolve_advantage(redis)
+
+    assert resolution.source == "crd+rag"

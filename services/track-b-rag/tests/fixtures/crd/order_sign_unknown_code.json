@@ -1,0 +1,85 @@
+{
+  "cards": [
+    {
+      "uuid": "661d6adf-dc6c-42aa-95dd-91223209d165",
+      "summary": "Unable to (pre)fetch any supported bundles.",
+      "detail": null,
+      "indicator": "info",
+      "source": {
+        "label": "Da Vinci CRD Reference Implementation",
+        "url": null,
+        "icon": null,
+        "topic": {
+          "code": "coverage",
+          "system": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/cardType",
+          "display": "Coverage"
+        }
+      },
+      "suggestions": null,
+      "selectionBehavior": null,
+      "links": null,
+      "extension": null
+    }
+  ],
+  "systemActions": [
+    {
+      "type": "create",
+      "description": null,
+      "resource": {
+        "id": "policy-query",
+        "resourceType": "Patient"
+      },
+      "resourceId": "Patient/policy-query"
+    },
+    {
+      "type": "create",
+      "description": null,
+      "resource": {
+        "payor": [
+          {
+            "reference": "Organization/policy-query"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/policy-query"
+        },
+        "id": "policy-query",
+        "class": [
+          {
+            "value": "PPO"
+          }
+        ],
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "resourceId": "Coverage/policy-query"
+    },
+    {
+      "type": "create",
+      "description": null,
+      "resource": {
+        "insurance": [
+          {
+            "reference": "Coverage/policy-query"
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "https://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "27447"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/policy-query"
+        },
+        "id": "policy-query",
+        "intent": "order",
+        "resourceType": "ServiceRequest",
+        "status": "draft"
+      },
+      "resourceId": "ServiceRequest/policy-query"
+    }
+  ]
+}
