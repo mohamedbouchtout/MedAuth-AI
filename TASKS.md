@@ -624,10 +624,15 @@ The insurance policy RAG is the technical core. Build and validate before other 
     - Earlier drafts of this task cached the entire response under the Stage 1
       key. That was wrong and is corrected here. Do not "simplify" it back.
   - **Build Stage 1 behind a seam** — a single `resolve_policy_rules(...)`
-    function that TASK-015 can put the Da Vinci CRD path in front of, falling
-    through to this RAG implementation unchanged. Same response shape either
-    way; callers never branch on which path answered. Cheaper to define the
-    seam now than to refactor one task later.
+    function that TASK-015 can join the Da Vinci CRD tier onto, leaving this RAG
+    implementation unchanged. Same response shape either way; callers never
+    branch on which path answered. Cheaper to define the seam now than to
+    refactor one task later. (What TASK-015 actually did with it: CRD does not
+    front this function, it runs beside it. CRD carries no documentation
+    criteria — the IG delegates those to DTR — so it decides `requires_auth`
+    while this implementation still supplies `auth_criteria` and the step
+    therapy fields. The seam was still the right thing to build; only the
+    expectation that CRD would replace it wholesale was wrong. See TASK-015.)
   - Claude is instructed to return only JSON. If the response fails to parse as valid
     JSON matching the Stage 1 shape: retry once with the same prompt. If the retry
     also fails, return a safe fallback: `{requires_auth: true, auth_criteria: [],
@@ -1047,44 +1052,143 @@ The insurance policy RAG is the technical core. Build and validate before other 
       of `PoliteClient` type-checks. `track-a-clinical` and `track-b-rag` already
       carried one; policy-scraper had no cross-boundary consumer until now.
 
-- [ ] **TASK-015:** Da Vinci CRD/DTR client — two-tier policy lookup
+- [x] **TASK-015:** Da Vinci CRD tier — two-tier policy lookup
   - Service: `services/track-b-rag`
+  - **Scope: CRD only. DTR is deferred to a later task.** Earlier drafts titled
+    this "CRD/DTR client", which overpromised relative to what is built here.
+    DTR needs a SMART on FHIR app surface that does not exist before Phase 5.
   - Background: CMS-0057-F mandates Medicare Advantage, Medicaid managed care,
     CHIP, and ACA marketplace payers expose standardized FHIR-based prior
     authorization APIs (Da Vinci CRD for "is auth required / what's needed,"
     DTR for the actual documentation questionnaire) by January 1, 2027. This
     does NOT cover commercial employer-sponsored plans, which remain the RAG
-    pipeline's primary job — CRD/DTR is an enhancement for the payers it
-    applies to, not a replacement for TASK-010 through TASK-014.
+    pipeline's primary job — CRD is an enhancement for the payers it applies
+    to, not a replacement for TASK-010 through TASK-014.
   - Testable now, not blocked on 2027: the HL7 CRD Reference Implementation
     (github.com/HL7-DaVinci/CRD) is a real, spec-conformant simulated payer
-    server you run locally via Docker — add it to docker-compose.yml alongside
-    the existing HAPI FHIR server. The HL7 CDS-Library
-    (github.com/HL7-DaVinci/CDS-Library) provides sample coverage-requirement
-    rule sets to load into it for realistic test scenarios. ONC's Inferno
-    (inferno.healthit.gov, CRD and DTR test kits) is the federal conformance
-    tester — running against it validates you're building to the actual
-    certification bar, not an approximation of it.
-  - `is_crd_supported(payer: str) -> bool` — a small config-driven lookup (start
-    with a hardcoded dict of known-mandated payer/plan-type combos; this becomes
-    real payer capability data over time, not something to over-engineer now)
-  - Modify TASK-012's `/policies/query` to try CRD first when
-    `is_crd_supported()` is true: call the payer's CRD endpoint via a CDS
-    Hooks request (order-select or order-sign hook), and if it returns
-    documentation requirements, use those directly — skip the RAG/Qdrant/Sonnet
-    path entirely for that call. On any CRD failure (timeout, unsupported
-    service, malformed response) or when `is_crd_supported()` is false, fall
-    through to the existing RAG path unchanged. The response model returned by
-    `/policies/query` stays identical either way — callers (TASK-021, TASK-040)
-    never know or care which path answered.
-  - **Test:** stand up the CRD Reference Implementation locally, load a sample
-    rule from CDS-Library, query `/policies/query` for a payer marked
-    `is_crd_supported=True`, verify the CRD path is used and RAG/Bedrock is not called
-  - **Test:** query for a payer marked `is_crd_supported=False`, verify RAG path
-    used as before (regression test — this task must not change existing behavior
-    for unsupported payers)
-  - **Test:** simulate a CRD timeout/error, verify fallback to RAG succeeds and
-    the caller gets a normal response, not an error
+    server, added to `docker-compose.yml` alongside the HAPI FHIR server. HL7's
+    own image bakes the CDS-Library rule sets in, so there is nothing to load
+    separately. ONC's Inferno (inferno.healthit.gov, CRD and DTR test kits) is
+    the federal conformance tester and is not yet run against — a later task.
+  - `is_crd_supported(payer: str) -> bool` — a small config-driven lookup, a
+    literal set of the **canonical slugs** from `packages/payer-vocab` whose
+    plans the mandate covers. Never a raw payer name: the query route already
+    normalises through `_resolve_payer()`, and TASK-016 deliberately kept
+    `medicare-advantage` from collapsing into `cms-medicare` for exactly this
+    routing decision.
+  - **The two tiers answer different questions and both run.** CRD decides
+    `requires_auth`; the RAG path supplies `auth_criteria` and the step therapy
+    fields. This is not what earlier drafts of this task said — they said a CRD
+    answer would let us "skip the RAG/Qdrant/Sonnet path entirely." That was
+    written before anyone ran a CRD server and it is wrong; see the findings
+    below. The response model is identical either way and callers (TASK-021,
+    TASK-040) never branch on which tier answered.
+  - On any CRD failure — timeout, transport error, non-2xx, malformed body — or
+    for a payer outside the mandate, the RAG path answers alone, unchanged.
+  - **CRD answers are not cached, and the reason is not staleness.** The `rag:`
+    cache exists because a Qdrant search plus a Sonnet call is expensive and its
+    answer is identical for every patient on that payer/plan/state/CPT; a day of
+    staleness is an accepted trade there. CRD is the opposite kind of thing: its
+    entire value is being a live, authoritative answer from the payer's own
+    system at the moment of the order. Caching it for 24 hours throws away the
+    one property that makes it worth building. The CRD determination is applied
+    *after* the RAG result is written to Redis, so it structurally cannot reach
+    the cache.
+  - **`crd` added to `RulesSource`.** With no cache write, "the CRD tier
+    answered" is not inferrable from cache state, so the tests assert it
+    directly. The composed values are `crd+rag`, `crd+cache`, and bare `crd` for
+    a CRD answer where the policy tier had nothing.
+  - Housekeeping: the CRD RI image is pinned in `docker-compose.yml` (the single
+    source of truth for backing service versions, and what Dependabot watches);
+    `CRD_BASE_URL` and `CRD_TIMEOUT_SECONDS` are in `.env.example`. No new
+    Redis key patterns and no route, status code or response-shape changes, so
+    `docs/api/track-b-rag.yaml` is untouched and its drift test still passes.
+  - **Test:** stand up the CRD Reference Implementation locally, query
+    `/policies/query` for a payer marked `is_crd_supported=True`, verify the CRD
+    tier decided `requires_auth`
+  - **Test:** query for a payer marked `is_crd_supported=False`, verify the RAG
+    path is used as before and CRD is not called at all (regression test — this
+    task must not change existing behavior for unsupported payers)
+  - **Test:** simulate a CRD timeout/error, verify the RAG answer stands and the
+    caller gets a normal response, not an error
+  - **Test:** a CRD-answered query writes only the policy-text answer to the
+    `rag:` key, never the determination
+  - Built (512 tests, 100% coverage). Decisions worth knowing before touching this:
+    - **CRD does not carry documentation criteria, and that is the standard, not
+      the RI.** The task was written assuming "if it returns documentation
+      requirements, use those directly." It does not return them. A covered code
+      returns a card saying "Documentation Required" plus a `coverage-information`
+      extension carrying `doc-needed` and a canonical URL pointing at a DTR
+      Questionnaire. Reading the IG's own `ext-coverage-information`
+      StructureDefinition confirmed this is by design: its slices are `covered`,
+      `pa-needed`, `doc-needed`, `doc-purpose`, `info-needed`, `questionnaire`,
+      `reason`, `detail`, `billingCode` and trace fields — none of them criterion
+      text. CRD answers *whether*; DTR answers *what*. Hence the two-tier split
+      above. Fetching the Questionnaire anyway was rejected on inspection: its
+      items are mostly `Last Name`, `NPI`, `Signature`, so mapping them into
+      `auth_criteria` would have Stage 2 report a clinician's note as missing
+      "Signature".
+    - **Two dialects, and `crd.read_determination` reads both.** A conformant
+      payer states the answer in the `pa-needed` slice. The Reference
+      Implementation never emits that slice at all — it emits a `coverageInfo`
+      slice that is not in the IG's slice list, and states the determination in
+      the card's *type* (`source.topic.code == "prior-auth"`). A mapping written
+      to the IG alone finds nothing in RI output; one written to RI output alone
+      misses a real payer. `pa-needed` is checked first and wins.
+    - **Silence is never "no authorization required."** An empty card list, a
+      documentation-only card, an "unable to process" card, and a code the payer
+      holds no rule for all return *no determination*, and RAG answers alone.
+      This is the one assertion in the live test worth defending hardest: if a
+      future RI change made an unknown code read as a negative determination,
+      this service would start telling providers that unauthorized orders are
+      clear.
+    - **The CRD request carries no patient, and that costs real coverage.**
+      Stage 1 holds no patient data by construction — a unit test asserts
+      `resolve_policy_rules` has no `clinical_context` parameter — so the
+      request is built from payer, plan type, state and code with a placeholder
+      subject. CRD is specified as a *patient-specific* check, so a rule keyed on
+      age (HCPCS E0424, Home Oxygen Therapy) answers "unable to process" and
+      falls through to RAG. Fabricating a birth date to make it answer would
+      produce a confident determination about a person who does not exist.
+      Patient-specific CRD belongs in Phase 5 with fhir-integration's real
+      Coverage and Patient resources.
+    - **Against this RI, every CPT code in our corpus falls through to RAG.**
+      Its rule library is HCPCS/DME — home oxygen, hospital beds, ambulance
+      transport. CPT 27447 and 70551 get a card that decides nothing. That is
+      the honest behaviour and it is what the live test asserts; it also means
+      the RI validates the *mapping*, not our clinical coverage.
+    - **Latency measured, not assumed**, because with no caching every supported
+      query hits the payer live. Against the RI on a developer machine: ~0.5s
+      steady state (0.45–0.65s over eight calls), ~3.0s on the first request
+      while it compiles its CQL libraries. That is faster than the RAG path it
+      runs beside, so no short-TTL cache is warranted. `CRD_TIMEOUT_SECONDS`
+      defaults to 4.0 to clear the cold start.
+    - The two tiers run concurrently via `asyncio.gather`, so the CRD call adds
+      no wall-clock time to a query that was going to run RAG anyway. A test
+      makes each tier block until the other has started, so a regression to
+      sequential execution times out rather than passing quietly.
+    - **A CRD answer over a RAG fallback is a real answer, not a fallback.**
+      Where we hold no policy text but the payer answered, the result is
+      `requires_auth` from CRD with an empty criteria list, and Stage 2 runs on
+      it. The existing nudge wording for that case already says the criteria
+      could not be found and asks for a manual check, which is exactly the
+      situation — no new nudge branch was needed.
+    - The RI's README documents its discovery endpoint as `/cds-services`. The
+      running server answers 404 there and 200 on `/r4/cds-services`, because
+      its controller prefixes every route with the FHIR release. The path in
+      `crd.CDS_SERVICES_PATH` came from the server; a live test asserts it so a
+      move back is caught.
+    - Every fixture in `tests/fixtures/crd/` was captured from the running RI
+      rather than hand-written, per the same rule TASK-011's real-PDF and
+      TASK-013's real-CMS-export checks follow. The one exception is the
+      `pa-needed` shape, built from the IG StructureDefinition because no
+      implementation we can reach emits it; it is labelled as such in the test
+      module. `tests/integration/test_crd_live.py` is gated on
+      `RUN_CRD_LIVE_TESTS` and runs nightly, so the fixtures cannot silently
+      drift away from the server they came from.
+    - CI: no new package and no new path-filter entry — this is service code
+      inside `track-b-rag`. The nightly workflow gained a `davinci-crd` job that
+      starts the RI from `docker-compose.yml` and dumps its log on failure.
 
 - [x] **TASK-016:** Create shared `packages/payer-vocab`
   - Prerequisite for TASK-013 and TASK-014; a retrofit of TASK-011 and TASK-012,
