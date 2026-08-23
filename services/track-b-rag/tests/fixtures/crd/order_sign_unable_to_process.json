@@ -1,0 +1,85 @@
+{
+  "cards": [
+    {
+      "uuid": "d3c800d5-16e2-4689-b699-fd27480750d7",
+      "summary": "Unable to process hook request from provided information.",
+      "detail": null,
+      "indicator": "warning",
+      "source": {
+        "label": "Da Vinci CRD Reference Implementation",
+        "url": null,
+        "icon": null,
+        "topic": {
+          "code": "coverage",
+          "system": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/cardType",
+          "display": "Coverage"
+        }
+      },
+      "suggestions": null,
+      "selectionBehavior": null,
+      "links": null,
+      "extension": null
+    }
+  ],
+  "systemActions": [
+    {
+      "type": "create",
+      "description": null,
+      "resource": {
+        "id": "policy-query",
+        "resourceType": "Patient"
+      },
+      "resourceId": "Patient/policy-query"
+    },
+    {
+      "type": "create",
+      "description": null,
+      "resource": {
+        "payor": [
+          {
+            "reference": "Organization/policy-query"
+          }
+        ],
+        "beneficiary": {
+          "reference": "Patient/policy-query"
+        },
+        "id": "policy-query",
+        "class": [
+          {
+            "value": "PPO"
+          }
+        ],
+        "resourceType": "Coverage",
+        "status": "active"
+      },
+      "resourceId": "Coverage/policy-query"
+    },
+    {
+      "type": "create",
+      "description": null,
+      "resource": {
+        "insurance": [
+          {
+            "reference": "Coverage/policy-query"
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "https://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E0424"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/policy-query"
+        },
+        "id": "policy-query",
+        "intent": "order",
+        "resourceType": "ServiceRequest",
+        "status": "draft"
+      },
+      "resourceId": "ServiceRequest/policy-query"
+    }
+  ]
+}

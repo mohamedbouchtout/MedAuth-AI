@@ -10,8 +10,10 @@ The names here are the ones already in ``.env.example`` — ``QDRANT_HOST``,
 ``QDRANT_PORT``, ``QDRANT_API_KEY``, ``QDRANT_COLLECTION``,
 ``EMBEDDING_MODEL_NAME``, ``EMBEDDING_DIMENSIONS``, and, added for the query
 endpoint in TASK-012, ``REDIS_URL``, ``AWS_REGION`` and
-``BEDROCK_MODEL_ID_REASONING``. Every one has a working local-dev default, so
-the service starts against ``docker compose up`` with no environment set at all.
+``BEDROCK_MODEL_ID_REASONING``. TASK-015 adds ``CRD_BASE_URL`` and
+``CRD_TIMEOUT_SECONDS``, which are new to ``.env.example`` rather than names
+already sitting there. Every one has a working local-dev default, so the
+service starts against ``docker compose up`` with no environment set at all.
 
 TASK-012 deliberately introduces no *new* environment variable: the three names
 it starts reading were already in ``.env.example``, sitting unused. The cache
@@ -48,6 +50,19 @@ DEFAULT_REDIS_URL: Final = "redis://localhost:6379/0"
 #: us-east-1 only, per CLAUDE.md: that is where the HIPAA-eligible services
 #: covered by the signed BAA live.
 DEFAULT_AWS_REGION: Final = "us-east-1"
+
+#: The CRD Reference Implementation from ``docker-compose.yml``. In a deployed
+#: environment this is the payer's own endpoint. Empty turns the tier off
+#: entirely and every query takes the RAG path, exactly as before TASK-015.
+DEFAULT_CRD_BASE_URL: Final = "http://localhost:8006"
+
+#: Measured against the Reference Implementation on a developer machine: ~0.5s
+#: steady state, ~3.0s on the first request while it compiles its CQL rule
+#: libraries. Four seconds clears the cold start and still bounds a call that
+#: sits in the nudge path. It is not a knob for making a slow payer work — a
+#: payer that cannot answer in four seconds should fall through to RAG, which
+#: is what a timeout does.
+DEFAULT_CRD_TIMEOUT_SECONDS: Final = 4.0
 
 #: Sonnet, because ``/policies/query`` reasons over retrieved policy text rather
 #: than extracting from it — CLAUDE.md's Bedrock Model Assignment table names
@@ -86,6 +101,11 @@ class Settings(BaseSettings):
     #: Cache for the payer-policy half of a query answer, and nothing else — see
     #: :mod:`track_b_rag.cache` for what may and may not be written under it.
     redis_url: str = Field(default=DEFAULT_REDIS_URL, min_length=1)
+
+    #: The Da Vinci CRD tier (TASK-015). ``None`` disables it; the RAG path is
+    #: unaffected either way, which is what makes the tier safe to turn off.
+    crd_base_url: OptionalSecret = DEFAULT_CRD_BASE_URL
+    crd_timeout_seconds: float = Field(default=DEFAULT_CRD_TIMEOUT_SECONDS, gt=0)
 
     aws_region: str = Field(default=DEFAULT_AWS_REGION, min_length=1)
     bedrock_model_id_reasoning: str = Field(

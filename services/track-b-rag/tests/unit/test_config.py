@@ -144,3 +144,43 @@ def test_the_reasoning_model_default_is_sonnet_not_haiku() -> None:
     """CLAUDE.md's Bedrock table puts policy analysis on Sonnet; a fast-model
     default here would be a silent downgrade of the one call site that reasons."""
     assert "sonnet" in DEFAULT_BEDROCK_MODEL_ID_REASONING
+
+
+def test_the_crd_endpoint_comes_from_the_environment(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TASK-015's two names, both new to .env.example rather than already there."""
+    monkeypatch.setenv("CRD_BASE_URL", "https://crd.payer.example")
+    monkeypatch.setenv("CRD_TIMEOUT_SECONDS", "1.5")
+
+    settings = Settings()
+
+    assert settings.crd_base_url == "https://crd.payer.example"
+    assert settings.crd_timeout_seconds == 1.5
+
+
+def test_an_empty_crd_url_turns_the_tier_off(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The off switch, and it has to survive a sourced .env.example.
+
+    Every key in that file ships valueless, so a shell that sources it exports
+    ``CRD_BASE_URL=``. That must disable the CRD tier rather than configure a
+    payer endpoint at the empty string, which would make every supported-payer
+    query wait for a request that cannot succeed.
+    """
+    monkeypatch.setenv("CRD_BASE_URL", "")
+
+    assert Settings().crd_base_url is None
+
+
+def test_the_crd_timeout_default_clears_the_reference_implementation_cold_start(
+    clean_env: None,
+) -> None:
+    """Measured, not guessed: the RI answers in ~0.5s warm and ~3.0s cold.
+
+    The cold call is the one that compiles its CQL rule libraries. A timeout
+    under that would make the first query of the day always fall through to RAG
+    while looking like a payer outage in the log.
+    """
+    assert Settings().crd_timeout_seconds >= 3.0

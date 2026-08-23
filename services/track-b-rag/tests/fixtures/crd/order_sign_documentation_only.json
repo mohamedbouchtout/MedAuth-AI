@@ -1,0 +1,205 @@
+{
+  "cards": [
+    {
+      "uuid": "cb46bf3a-37c3-4f7f-9da1-3c172273fce2",
+      "summary": "Hospital Beds And Accessories: Documentation Required.",
+      "detail": "Documentation Required, please complete form via Smart App link.",
+      "indicator": "info",
+      "source": {
+        "label": "Da Vinci CRD Reference Implementation",
+        "url": null,
+        "icon": null,
+        "topic": {
+          "code": "dtr-clin",
+          "system": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/cardType",
+          "display": "DTR Clin"
+        }
+      },
+      "suggestions": [
+        {
+          "label": "Save Update To EHR",
+          "uuid": "2f350d21-d05b-45a9-a860-662fe2e60df8",
+          "actions": [
+            {
+              "type": "update",
+              "description": "Update original DeviceRequest to add note",
+              "resource": {
+                "insurance": [
+                  {
+                    "reference": "Coverage/c3d24ccd-ad1b-480e-9545-bbf35a3d89ff"
+                  }
+                ],
+                "note": [
+                  {
+                    "authorString": "Da Vinci CRD Reference Implementation",
+                    "time": "2026-08-23T19:25:46+00:00",
+                    "text": "Hospital Beds And Accessories: Documentation Required.: Documentation Required, please complete form via Smart App link."
+                  }
+                ],
+                "extension": [
+                  {
+                    "url": "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information",
+                    "extension": [
+                      {
+                        "url": "coverageInfo",
+                        "valueCoding": {
+                          "system": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/temp",
+                          "code": "clinical",
+                          "display": "Clinical"
+                        }
+                      },
+                      {
+                        "url": "coverage",
+                        "valueReference": {
+                          "reference": "Coverage/c3d24ccd-ad1b-480e-9545-bbf35a3d89ff"
+                        }
+                      },
+                      {
+                        "url": "date",
+                        "valueDate": "2026-08-23"
+                      },
+                      {
+                        "url": "identifier",
+                        "valueString": "ab76b5fe-12dc-4deb-b4af-93a882ccefd3"
+                      },
+                      {
+                        "url": "doc-needed",
+                        "valueCode": "admin"
+                      },
+                      {
+                        "url": "questionnaire",
+                        "valueCanonical": "http://127.0.0.1:8006/fhir/r4/Questionnaire/HospitalBedsAndAccessories"
+                      }
+                    ]
+                  }
+                ],
+                "performer": {
+                  "reference": "PractitionerRole/1eccf4fb-2cf4-400e-891f-54c89b45cfff"
+                },
+                "subject": {
+                  "reference": "Patient/c2f0f972-5f84-4518-948f-63d00a1fa5a0"
+                },
+                "id": "123",
+                "codeCodeableConcept": {
+                  "coding": [
+                    {
+                      "system": "https://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+                      "code": "E0250"
+                    }
+                  ],
+                  "text": "Stationary Compressed Gaseous Oxygen System, Rental"
+                },
+                "resourceType": "DeviceRequest",
+                "status": "draft"
+              },
+              "resourceId": "DeviceRequest/123"
+            }
+          ],
+          "isRecommended": true
+        }
+      ],
+      "selectionBehavior": null,
+      "links": [
+        {
+          "label": "Documentation Requirements",
+          "url": "https://www.cms.gov/Outreach-and-Education/Medicare-Learning-Network-MLN/MLNProducts/Downloads/ProviderComplianceTipsforHospitalBedsandAccessories-ICN909476.pdf",
+          "type": "absolute",
+          "appContext": null
+        },
+        {
+          "label": "Order Form",
+          "url": "http://localhost:3005/launch",
+          "type": "smart",
+          "appContext": "questionnaire%3Dhttp%3A%2F%2F127.0.0.1%3A8006%2Ffhir%2Fr4%2FQuestionnaire%2FHospitalBedsAndAccessories%26order%3D%7B%5C%22resourceType%5C%22%3A%5C%22DeviceRequest%5C%22%2C%5C%22id%5C%22%3A%5C%22123%5C%22%2C%5C%22status%5C%22%3A%5C%22draft%5C%22%2C%5C%22codeCodeableConcept%5C%22%3A%7B%5C%22coding%5C%22%3A%5B%7B%5C%22system%5C%22%3A%5C%22https%3A%5C%2F%5C%2Fwww.cms.gov%5C%2FMedicare%5C%2FCoding%5C%2FHCPCSReleaseCodeSets%5C%22%2C%5C%22code%5C%22%3A%5C%22E0250%5C%22%7D%5D%2C%5C%22text%5C%22%3A%5C%22Stationary+Compressed+Gaseous+Oxygen+System%2C+Rental%5C%22%7D%2C%5C%22subject%5C%22%3A%7B%5C%22reference%5C%22%3A%5C%22Patient%5C%2Fc2f0f972-5f84-4518-948f-63d00a1fa5a0%5C%22%7D%2C%5C%22performer%5C%22%3A%7B%5C%22reference%5C%22%3A%5C%22PractitionerRole%5C%2F1eccf4fb-2cf4-400e-891f-54c89b45cfff%5C%22%7D%2C%5C%22insurance%5C%22%3A%5B%7B%5C%22reference%5C%22%3A%5C%22Coverage%5C%2Fc3d24ccd-ad1b-480e-9545-bbf35a3d89ff%5C%22%7D%5D%7D%26coverage%3DCoverage%2Fc3d24ccd-ad1b-480e-9545-bbf35a3d89ff"
+        },
+        {
+          "label": "Face to Face Encounter Form",
+          "url": "http://localhost:3005/launch",
+          "type": "smart",
+          "appContext": "questionnaire%3Dhttp%3A%2F%2F127.0.0.1%3A8006%2Ffhir%2Fr4%2FQuestionnaire%2FHospitalBedsAndAccessoriesFaceToFace%26order%3D%7B%5C%22resourceType%5C%22%3A%5C%22DeviceRequest%5C%22%2C%5C%22id%5C%22%3A%5C%22123%5C%22%2C%5C%22status%5C%22%3A%5C%22draft%5C%22%2C%5C%22codeCodeableConcept%5C%22%3A%7B%5C%22coding%5C%22%3A%5B%7B%5C%22system%5C%22%3A%5C%22https%3A%5C%2F%5C%2Fwww.cms.gov%5C%2FMedicare%5C%2FCoding%5C%2FHCPCSReleaseCodeSets%5C%22%2C%5C%22code%5C%22%3A%5C%22E0250%5C%22%7D%5D%2C%5C%22text%5C%22%3A%5C%22Stationary+Compressed+Gaseous+Oxygen+System%2C+Rental%5C%22%7D%2C%5C%22subject%5C%22%3A%7B%5C%22reference%5C%22%3A%5C%22Patient%5C%2Fc2f0f972-5f84-4518-948f-63d00a1fa5a0%5C%22%7D%2C%5C%22performer%5C%22%3A%7B%5C%22reference%5C%22%3A%5C%22PractitionerRole%5C%2F1eccf4fb-2cf4-400e-891f-54c89b45cfff%5C%22%7D%2C%5C%22insurance%5C%22%3A%5B%7B%5C%22reference%5C%22%3A%5C%22Coverage%5C%2Fc3d24ccd-ad1b-480e-9545-bbf35a3d89ff%5C%22%7D%5D%7D%26coverage%3DCoverage%2Fc3d24ccd-ad1b-480e-9545-bbf35a3d89ff"
+        }
+      ],
+      "extension": {
+        "davinci-associated-resource": [
+          "DeviceRequest/123"
+        ]
+      }
+    }
+  ],
+  "systemActions": [
+    {
+      "type": "update",
+      "description": "Update original DeviceRequest to add note",
+      "resource": {
+        "insurance": [
+          {
+            "reference": "Coverage/c3d24ccd-ad1b-480e-9545-bbf35a3d89ff"
+          }
+        ],
+        "note": [
+          {
+            "authorString": "Da Vinci CRD Reference Implementation",
+            "time": "2026-08-23T19:25:46+00:00",
+            "text": "Hospital Beds And Accessories: Documentation Required.: Documentation Required, please complete form via Smart App link."
+          }
+        ],
+        "extension": [
+          {
+            "url": "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information",
+            "extension": [
+              {
+                "url": "coverageInfo",
+                "valueCoding": {
+                  "system": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/temp",
+                  "code": "clinical",
+                  "display": "Clinical"
+                }
+              },
+              {
+                "url": "coverage",
+                "valueReference": {
+                  "reference": "Coverage/c3d24ccd-ad1b-480e-9545-bbf35a3d89ff"
+                }
+              },
+              {
+                "url": "date",
+                "valueDate": "2026-08-23"
+              },
+              {
+                "url": "identifier",
+                "valueString": "ab76b5fe-12dc-4deb-b4af-93a882ccefd3"
+              },
+              {
+                "url": "doc-needed",
+                "valueCode": "admin"
+              },
+              {
+                "url": "questionnaire",
+                "valueCanonical": "http://127.0.0.1:8006/fhir/r4/Questionnaire/HospitalBedsAndAccessories"
+              }
+            ]
+          }
+        ],
+        "performer": {
+          "reference": "PractitionerRole/1eccf4fb-2cf4-400e-891f-54c89b45cfff"
+        },
+        "subject": {
+          "reference": "Patient/c2f0f972-5f84-4518-948f-63d00a1fa5a0"
+        },
+        "id": "123",
+        "codeCodeableConcept": {
+          "coding": [
+            {
+              "system": "https://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "E0250"
+            }
+          ],
+          "text": "Stationary Compressed Gaseous Oxygen System, Rental"
+        },
+        "resourceType": "DeviceRequest",
+        "status": "draft"
+      },
+      "resourceId": "DeviceRequest/123"
+    }
+  ]
+}

@@ -12,10 +12,11 @@ name: Nightly live checks
 # A failure here is a real signal about the outside world, not a flake to re-run
 # until green. Fix the scraper or the fixtures; do not relax the assertion.
 #
-# Currently: the CMS Medicare Coverage Database (TASK-013) and the commercial
-# payer documents the dev corpus is seeded from (TASK-014). EHR sandboxes join
-# this workflow as their tasks land — each one as its own job, so a red nightly
-# names the upstream that moved without anyone opening the log.
+# Currently: the CMS Medicare Coverage Database (TASK-013), the commercial
+# payer documents the dev corpus is seeded from (TASK-014), and the HL7 Da Vinci
+# CRD Reference Implementation (TASK-015). EHR sandboxes join this workflow as
+# their tasks land — each one as its own job, so a red nightly names the
+# upstream that moved without anyone opening the log.
 
 on:
   schedule:
@@ -74,6 +75,46 @@ jobs:
       - name: Live CMS export checks
         working-directory: services/policy-scraper
         run: uv run pytest tests/integration/test_cms_live.py -v --no-cov
+
+  davinci-crd:
+    name: HL7 Da Vinci CRD Reference Implementation
+    runs-on: ubuntu-latest
+    env:
+      # The gate tests/integration/test_crd_live.py checks. Off everywhere else,
+      # so pytest on a laptop and pytest on a pull request agree.
+      RUN_CRD_LIVE_TESTS: "1"
+      CRD_BASE_URL: http://localhost:8006
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+
+      # From docker-compose.yml, like every other backing service — see
+      # CLAUDE.md, "Backing service versions live in exactly one file". The
+      # image carries the CDS-Library rule sets, so there is nothing to load.
+      # `--wait` honours the compose healthcheck, whose start_period allows for
+      # the RI compiling its CQL libraries before it listens.
+      - name: Start the CRD Reference Implementation
+        run: docker compose up -d --wait crd
+
+      - run: uv sync --all-packages
+
+      # The unit tests already ran on the pull request that introduced them,
+      # against fixtures captured from this same server. What this adds is
+      # whether those fixtures still describe it. A failure means the RI moved:
+      # re-capture tests/fixtures/crd/ and fix the mapping. Do not relax the
+      # assertions to make it pass.
+      - name: Live CRD Reference Implementation checks
+        working-directory: services/track-b-rag
+        run: uv run pytest tests/integration/test_crd_live.py -v --no-cov
+
+      - name: CRD server log on failure
+        if: failure()
+        run: docker compose logs crd
 
   commercial-payer-policies:
     name: Aetna and BCBSMA policy documents

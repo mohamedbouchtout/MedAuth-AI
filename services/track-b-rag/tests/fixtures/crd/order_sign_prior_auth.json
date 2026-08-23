@@ -1,0 +1,205 @@
+{
+  "cards": [
+    {
+      "uuid": "8489fad3-aea6-4896-a60c-8b88477d85e1",
+      "summary": "Non Emergency Ambulance Transportation: Prior Authorization required.",
+      "detail": "Prior Authorization required, follow the attached link for information.",
+      "indicator": "info",
+      "source": {
+        "label": "Da Vinci CRD Reference Implementation",
+        "url": null,
+        "icon": null,
+        "topic": {
+          "code": "prior-auth",
+          "system": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/cardType",
+          "display": "Prior Authorization"
+        }
+      },
+      "suggestions": [
+        {
+          "label": "Save Update To EHR",
+          "uuid": "092a80ff-1dcb-4f7e-9015-4729499067e5",
+          "actions": [
+            {
+              "type": "update",
+              "description": "Update original ServiceRequest to add note",
+              "resource": {
+                "insurance": [
+                  {
+                    "reference": "Coverage/policy-query"
+                  }
+                ],
+                "note": [
+                  {
+                    "authorString": "Da Vinci CRD Reference Implementation",
+                    "time": "2026-08-23T19:25:45+00:00",
+                    "text": "Non Emergency Ambulance Transportation: Prior Authorization required.: Prior Authorization required, follow the attached link for information."
+                  }
+                ],
+                "extension": [
+                  {
+                    "url": "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information",
+                    "extension": [
+                      {
+                        "url": "coverageInfo",
+                        "valueCoding": {
+                          "system": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/temp",
+                          "code": "admin",
+                          "display": "Admin"
+                        }
+                      },
+                      {
+                        "url": "coverage",
+                        "valueReference": {
+                          "reference": "Coverage/policy-query"
+                        }
+                      },
+                      {
+                        "url": "date",
+                        "valueDate": "2026-08-23"
+                      },
+                      {
+                        "url": "identifier",
+                        "valueString": "6a037641-0ae6-41e0-b65a-5f3af3f5ba4b"
+                      },
+                      {
+                        "url": "doc-needed",
+                        "valueCode": "admin"
+                      },
+                      {
+                        "url": "questionnaire",
+                        "valueCanonical": "http://127.0.0.1:8006/fhir/r4/Questionnaire/NonEmergencyAmbulanceTransportation"
+                      }
+                    ]
+                  }
+                ],
+                "code": {
+                  "coding": [
+                    {
+                      "system": "https://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+                      "code": "A0426"
+                    }
+                  ]
+                },
+                "subject": {
+                  "reference": "Patient/policy-query"
+                },
+                "id": "policy-query",
+                "intent": "order",
+                "resourceType": "ServiceRequest",
+                "status": "draft"
+              },
+              "resourceId": "ServiceRequest/policy-query"
+            }
+          ],
+          "isRecommended": true
+        }
+      ],
+      "selectionBehavior": null,
+      "links": [
+        {
+          "label": "Documentation Requirements",
+          "url": "https://www.cms.gov/Outreach-and-Education/Medicare-Learning-Network-MLN/MLNMattersArticles/Downloads/SE1514.pdf",
+          "type": "absolute",
+          "appContext": null
+        },
+        {
+          "label": "Order Form",
+          "url": "http://localhost:3005/launch",
+          "type": "smart",
+          "appContext": "questionnaire%3Dhttp%3A%2F%2F127.0.0.1%3A8006%2Ffhir%2Fr4%2FQuestionnaire%2FNonEmergencyAmbulanceTransportation%26order%3D%7B%5C%22resourceType%5C%22%3A%5C%22ServiceRequest%5C%22%2C%5C%22id%5C%22%3A%5C%22policy-query%5C%22%2C%5C%22status%5C%22%3A%5C%22draft%5C%22%2C%5C%22intent%5C%22%3A%5C%22order%5C%22%2C%5C%22code%5C%22%3A%7B%5C%22coding%5C%22%3A%5B%7B%5C%22system%5C%22%3A%5C%22https%3A%5C%2F%5C%2Fwww.cms.gov%5C%2FMedicare%5C%2FCoding%5C%2FHCPCSReleaseCodeSets%5C%22%2C%5C%22code%5C%22%3A%5C%22A0426%5C%22%7D%5D%7D%2C%5C%22subject%5C%22%3A%7B%5C%22reference%5C%22%3A%5C%22Patient%5C%2Fpolicy-query%5C%22%7D%2C%5C%22insurance%5C%22%3A%5B%7B%5C%22reference%5C%22%3A%5C%22Coverage%5C%2Fpolicy-query%5C%22%7D%5D%7D%26coverage%3DCoverage%2Fpolicy-query"
+        },
+        {
+          "label": "Progress Note",
+          "url": "http://localhost:3005/launch",
+          "type": "smart",
+          "appContext": "questionnaire%3Dhttp%3A%2F%2F127.0.0.1%3A8006%2Ffhir%2Fr4%2FQuestionnaire%2FNonEmergencyAmbulanceTransportationProgressNote%26order%3D%7B%5C%22resourceType%5C%22%3A%5C%22ServiceRequest%5C%22%2C%5C%22id%5C%22%3A%5C%22policy-query%5C%22%2C%5C%22status%5C%22%3A%5C%22draft%5C%22%2C%5C%22intent%5C%22%3A%5C%22order%5C%22%2C%5C%22code%5C%22%3A%7B%5C%22coding%5C%22%3A%5B%7B%5C%22system%5C%22%3A%5C%22https%3A%5C%2F%5C%2Fwww.cms.gov%5C%2FMedicare%5C%2FCoding%5C%2FHCPCSReleaseCodeSets%5C%22%2C%5C%22code%5C%22%3A%5C%22A0426%5C%22%7D%5D%7D%2C%5C%22subject%5C%22%3A%7B%5C%22reference%5C%22%3A%5C%22Patient%5C%2Fpolicy-query%5C%22%7D%2C%5C%22insurance%5C%22%3A%5B%7B%5C%22reference%5C%22%3A%5C%22Coverage%5C%2Fpolicy-query%5C%22%7D%5D%7D%26coverage%3DCoverage%2Fpolicy-query"
+        },
+        {
+          "label": "PA Request",
+          "url": "http://localhost:3005/launch",
+          "type": "smart",
+          "appContext": "questionnaire%3Dhttp%3A%2F%2F127.0.0.1%3A8006%2Ffhir%2Fr4%2FQuestionnaire%2FNonEmergencyAmbulanceTransportationPARequest%26order%3D%7B%5C%22resourceType%5C%22%3A%5C%22ServiceRequest%5C%22%2C%5C%22id%5C%22%3A%5C%22policy-query%5C%22%2C%5C%22status%5C%22%3A%5C%22draft%5C%22%2C%5C%22intent%5C%22%3A%5C%22order%5C%22%2C%5C%22code%5C%22%3A%7B%5C%22coding%5C%22%3A%5B%7B%5C%22system%5C%22%3A%5C%22https%3A%5C%2F%5C%2Fwww.cms.gov%5C%2FMedicare%5C%2FCoding%5C%2FHCPCSReleaseCodeSets%5C%22%2C%5C%22code%5C%22%3A%5C%22A0426%5C%22%7D%5D%7D%2C%5C%22subject%5C%22%3A%7B%5C%22reference%5C%22%3A%5C%22Patient%5C%2Fpolicy-query%5C%22%7D%2C%5C%22insurance%5C%22%3A%5B%7B%5C%22reference%5C%22%3A%5C%22Coverage%5C%2Fpolicy-query%5C%22%7D%5D%7D%26coverage%3DCoverage%2Fpolicy-query"
+        }
+      ],
+      "extension": {
+        "davinci-associated-resource": [
+          "ServiceRequest/policy-query"
+        ]
+      }
+    }
+  ],
+  "systemActions": [
+    {
+      "type": "update",
+      "description": "Update original ServiceRequest to add note",
+      "resource": {
+        "insurance": [
+          {
+            "reference": "Coverage/policy-query"
+          }
+        ],
+        "note": [
+          {
+            "authorString": "Da Vinci CRD Reference Implementation",
+            "time": "2026-08-23T19:25:45+00:00",
+            "text": "Non Emergency Ambulance Transportation: Prior Authorization required.: Prior Authorization required, follow the attached link for information."
+          }
+        ],
+        "extension": [
+          {
+            "url": "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information",
+            "extension": [
+              {
+                "url": "coverageInfo",
+                "valueCoding": {
+                  "system": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/temp",
+                  "code": "admin",
+                  "display": "Admin"
+                }
+              },
+              {
+                "url": "coverage",
+                "valueReference": {
+                  "reference": "Coverage/policy-query"
+                }
+              },
+              {
+                "url": "date",
+                "valueDate": "2026-08-23"
+              },
+              {
+                "url": "identifier",
+                "valueString": "6a037641-0ae6-41e0-b65a-5f3af3f5ba4b"
+              },
+              {
+                "url": "doc-needed",
+                "valueCode": "admin"
+              },
+              {
+                "url": "questionnaire",
+                "valueCanonical": "http://127.0.0.1:8006/fhir/r4/Questionnaire/NonEmergencyAmbulanceTransportation"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "https://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+              "code": "A0426"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/policy-query"
+        },
+        "id": "policy-query",
+        "intent": "order",
+        "resourceType": "ServiceRequest",
+        "status": "draft"
+      },
+      "resourceId": "ServiceRequest/policy-query"
+    }
+  ]
+}

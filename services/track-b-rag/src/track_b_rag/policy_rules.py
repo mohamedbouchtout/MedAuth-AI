@@ -13,12 +13,22 @@ value, because the function has no parameter to carry it. The comparison against
 this encounter's documentation is Stage 2, in :mod:`track_b_rag.gap_analysis`,
 and it runs fresh on every call.
 
-:func:`resolve_policy_rules` is also the seam TASK-015 puts the Da Vinci CRD
-path in front of. For a payer covered by the CMS-0057-F mandate, CRD answers
-these same four fields from a standardised API and the RAG path below is
-skipped; on any CRD failure, or for the commercial plans the mandate does not
-cover, this implementation runs unchanged. Callers see one function and one
-return type either way.
+:func:`resolve_policy_rules` is also where TASK-015's Da Vinci CRD tier joins.
+For a payer covered by the CMS-0057-F mandate, the payer's own CRD endpoint
+answers *whether* prior authorization is required and that answer overrides the
+one reasoned out of policy text. It does not replace the rest: CRD carries no
+itemised criteria — the IG delegates those to a DTR Questionnaire — so
+``auth_criteria`` and the step therapy fields still come from the RAG path
+below, and Stage 2 keeps working. See :mod:`track_b_rag.crd` for how that was
+established against the real Reference Implementation and the IG.
+
+The two tiers run concurrently, because they need nothing from each other and a
+nudge is read mid-encounter. The CRD answer is applied *after* the RAG result is
+written to the cache, so what Redis holds is always the payer-policy answer and
+never a live determination — see CLAUDE.md, "A CRD answer is never cached; a RAG
+answer is." For the commercial plans the mandate does not cover, and on any CRD
+failure, this module behaves exactly as it did before TASK-015. Callers see one
+function and one return type either way.
 
 Every failure of the RAG path lands on the same safe fallback: authorization
 required, no criteria known, and a message telling the provider to confirm
@@ -33,6 +43,7 @@ not what the payer requires.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -43,7 +54,8 @@ from qdrant_client import QdrantClient
 from redis.asyncio import Redis
 from starlette.concurrency import run_in_threadpool
 
-from track_b_rag import bedrock, cache, retrieval
+from track_b_rag import bedrock, cache, crd, retrieval
+from track_b_rag.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +64,13 @@ logger = logging.getLogger(__name__)
 #: is treated as a failure of the path, not something to keep paying for.
 MAX_ATTEMPTS: Final = 2
 
-RulesSource = Literal["cache", "rag", "fallback"]
+#: Where an answer came from. The ``crd`` prefix means the payer's own CRD
+#: endpoint decided ``requires_auth``; what follows it is where the criteria
+#: came from. Bare ``crd`` means CRD answered and the RAG path could not, so the
+#: criteria list is empty. TASK-015 requires this to be reported explicitly:
+#: with CRD results deliberately uncached, "the CRD tier answered" can no longer
+#: be inferred from cache state, so a test asserts it directly instead.
+RulesSource = Literal["cache", "rag", "fallback", "crd", "crd+cache", "crd+rag"]
 
 
 class PolicyRules(BaseModel):
@@ -95,6 +113,19 @@ class PolicyRules(BaseModel):
             return None
         return value.strip()
 
+
+#: How a policy-tier provenance reads once CRD has supplied ``requires_auth``.
+#: A mapping rather than an f-string so the composed value stays inside
+#: :data:`RulesSource` — a source that cannot be spelled here is one the policy
+#: tier does not produce.
+_CRD_SOURCES: Final[dict[RulesSource, RulesSource]] = {
+    "cache": "crd+cache",
+    "rag": "crd+rag",
+    "fallback": "crd",
+    "crd": "crd",
+    "crd+cache": "crd+cache",
+    "crd+rag": "crd+rag",
+}
 
 #: What Stage 1 reports when it could not find out: authorization required and
 #: nothing known about the criteria. Failing toward "flag for manual review" is
@@ -149,7 +180,9 @@ class PolicyRulesResolution:
 
     ``source`` is what the tests assert on and what the route logs: ``cache``
     means no Bedrock call was made, ``rag`` means the full path ran, and
-    ``fallback`` means it failed and the answer is the safe default.
+    ``fallback`` means it failed and the answer is the safe default. A ``crd``
+    prefix means the payer's own CRD endpoint supplied ``requires_auth``; bare
+    ``crd`` means it did so where the policy tier had nothing.
     """
 
     rules: PolicyRules
@@ -174,9 +207,13 @@ async def resolve_policy_rules(
 ) -> PolicyRulesResolution:
     """Return the payer's rules for a procedure, from cache when possible.
 
-    The seam TASK-015 fronts with Da Vinci CRD. Note the absence of a clinical
+    Runs two tiers concurrently: the payer's own Da Vinci CRD endpoint, where
+    the CMS-0057-F mandate covers it, and the cached RAG path over indexed
+    policy text. CRD decides ``requires_auth`` when it answers; everything else
+    comes from the policy text either way. Note the absence of a clinical
     context parameter: Stage 1 cannot see the patient, so what it produces is
-    safe to share between them.
+    safe to share between them — and that is also why the CRD request carries no
+    demographics.
 
     Args:
         qdrant: Client for the policy collection.
@@ -184,13 +221,111 @@ async def resolve_policy_rules(
         collection: Qdrant collection holding the indexed policy chunks.
         procedure: The procedure as the clinician described it.
         cpt_code: The authoritative procedure code.
-        payer: Issuing payer, as ingested.
+        payer: Canonical payer slug — what the Qdrant filter matches, the cache
+            key is built from, and the CRD support table is checked against.
         plan_type: Plan type, e.g. ``PPO``.
         state: Two-letter state code.
 
     Returns:
         The rules and their provenance. A ``fallback`` resolution is never
-        written to the cache.
+        written to the cache, and neither is a CRD determination.
+    """
+    policy_tier, determination = await asyncio.gather(
+        _resolve_policy_tier(
+            qdrant=qdrant,
+            redis=redis,
+            collection=collection,
+            procedure=procedure,
+            cpt_code=cpt_code,
+            payer=payer,
+            plan_type=plan_type,
+            state=state,
+        ),
+        _crd_determination(
+            procedure=procedure,
+            cpt_code=cpt_code,
+            payer=payer,
+            plan_type=plan_type,
+            state=state,
+        ),
+    )
+    if determination is None:
+        return policy_tier
+    return _apply_determination(policy_tier, determination)
+
+
+async def _crd_determination(
+    *,
+    procedure: str,
+    cpt_code: str,
+    payer: str,
+    plan_type: str,
+    state: str,
+) -> crd.CrdDetermination | None:
+    """Return the payer's own authorization determination, if there is one.
+
+    None for a payer outside the CMS-0057-F mandate, for a CRD endpoint that is
+    not configured, and for any call that failed or decided nothing. The tier
+    can only add an answer, never remove one.
+    """
+    if not crd.is_crd_supported(payer):
+        return None
+    base_url = get_settings().crd_base_url
+    if not base_url:
+        return None
+    return await crd.determine(
+        base_url=base_url,
+        timeout_seconds=get_settings().crd_timeout_seconds,
+        procedure=procedure,
+        cpt_code=cpt_code,
+        payer=payer,
+        plan_type=plan_type,
+        state=state,
+    )
+
+
+def _apply_determination(
+    resolution: PolicyRulesResolution,
+    determination: crd.CrdDetermination,
+) -> PolicyRulesResolution:
+    """Return `resolution` with the payer's own authorization answer applied.
+
+    The criteria, and the step therapy fields, are left exactly as the policy
+    tier produced them — CRD does not carry any of them. Only ``requires_auth``
+    is replaced, because that is the single field the payer has stated directly
+    rather than published in prose for us to interpret.
+
+    A policy tier that fell back becomes a real answer rather than the safe
+    default: the payer has told us whether authorization is required, which is
+    more than the fallback claims to know. The criteria list stays empty, so
+    Stage 2 reports nothing missing and the nudge says the criteria could not be
+    found — which is precisely the situation.
+    """
+    if resolution.is_fallback:
+        rules = PolicyRules(requires_auth=determination.requires_auth)
+        return PolicyRulesResolution(rules=rules, source="crd")
+    rules = resolution.rules.model_copy(update={"requires_auth": determination.requires_auth})
+    return PolicyRulesResolution(rules=rules, source=_CRD_SOURCES[resolution.source])
+
+
+async def _resolve_policy_tier(
+    *,
+    qdrant: QdrantClient,
+    redis: Redis,
+    collection: str,
+    procedure: str,
+    cpt_code: str,
+    payer: str,
+    plan_type: str,
+    state: str,
+) -> PolicyRulesResolution:
+    """Return the payer's rules as read from indexed policy text, or the fallback.
+
+    This is TASK-012's Stage 1 unchanged: the Redis cache in front of a Qdrant
+    search and one Sonnet call. It is a separate function from
+    :func:`resolve_policy_rules` so that the cache write below happens on what
+    the policy text says and nothing else — a CRD determination is applied to
+    the returned value afterwards and therefore cannot reach Redis.
     """
     key = cache.policy_rules_key(
         payer=payer,
