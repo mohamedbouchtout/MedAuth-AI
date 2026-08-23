@@ -12,9 +12,10 @@ name: Nightly live checks
 # A failure here is a real signal about the outside world, not a flake to re-run
 # until green. Fix the scraper or the fixtures; do not relax the assertion.
 #
-# Currently: the CMS Medicare Coverage Database (TASK-013). Payer and EHR
-# sandboxes join this workflow as their tasks land — each one as its own job, so
-# a red nightly names the upstream that moved without anyone opening the log.
+# Currently: the CMS Medicare Coverage Database (TASK-013) and the commercial
+# payer documents the dev corpus is seeded from (TASK-014). EHR sandboxes join
+# this workflow as their tasks land — each one as its own job, so a red nightly
+# names the upstream that moved without anyone opening the log.
 
 on:
   schedule:
@@ -73,3 +74,32 @@ jobs:
       - name: Live CMS export checks
         working-directory: services/policy-scraper
         run: uv run pytest tests/integration/test_cms_live.py -v --no-cov
+
+  commercial-payer-policies:
+    name: Aetna and BCBSMA policy documents
+    runs-on: ubuntu-latest
+    env:
+      # The gate scripts/seed-policies.py's live checks read. Off everywhere
+      # else, so pytest on a laptop and pytest on a pull request agree.
+      RUN_PAYER_LIVE_TESTS: "1"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+
+      - run: uv sync --all-packages
+
+      # These fetch from the payers and assert each URL still resolves to a
+      # document of the type SEED_POLICIES declares. They need no database and
+      # no Qdrant: nothing is ingested here, the point is only whether the
+      # curated URLs still point at what they claim to.
+      #
+      # A failure means a payer moved, renamed or withdrew a policy. Fix the
+      # entry in SEED_POLICIES; do not widen the assertion to make it pass.
+      - name: Live Aetna and BCBSMA document checks
+        working-directory: services/track-b-rag
+        run: uv run pytest tests/integration/test_seed_policies.py -v -k Live --no-cov
