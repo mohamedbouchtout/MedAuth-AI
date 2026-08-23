@@ -399,6 +399,25 @@ is_known_payer(slug: str) -> bool  # False for a name the vocabulary has never s
   That distinction is the whole point of this section.
 - **Display names are not discarded** — keep the payer's own spelling in the
   Postgres row for humans to read. Slugs are for matching, not for display.
+- **A payer family is not one payer.** The Blue Cross Blue Shield Association
+  licenses 33 independent companies that each publish their own
+  prior-authorization criteria, so the vocabulary keeps them apart: Anthem-branded
+  names resolve to `anthem-bcbs`, a licensee we hold policies for gets its own
+  slug (`bcbs-ma` is the first, Massachusetts being the pilot geography), and an
+  unqualified "Blue Cross" or "BCBS" lands in the generic `blue-cross-blue-shield`
+  bucket. Collapsing them would let one licensee's ingested policy answer a query
+  about another — a wrong answer served silently, which is strictly worse than
+  the empty retrieval plus WARNING that this package exists to produce. Seed and
+  ingest under the publishing licensee's slug, never the generic one.
+- **Extend the alias table from observed data, not from plausible spellings.**
+  The rows for `Coventry Healthcare`, `Cigna Health`, `Medi-Cal` and
+  `Humana Medicare Advantage` are there because those exact strings appear in
+  `Coverage.payor.display` on real servers — the Oracle Health (Cerner) open
+  sandbox, the public HAPI R4 server, and Synthea's `insurance_companies.csv`,
+  which is what the local dev HAPI server is seeded from. Names that describe no
+  carrier at all (`SELF PAY`, `Government`, `Dual Eligible`) are deliberately
+  left unmapped: giving them a slug would manufacture a payer identity the source
+  never asserted.
 
 It is a package rather than a module inside track-b-rag because the consumers
 span services: `/policies/ingest` and `/policies/query` (TASK-011/012), the

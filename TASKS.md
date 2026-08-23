@@ -932,19 +932,120 @@ The insurance policy RAG is the technical core. Build and validate before other 
       scraper's own 03:30 slot and well after CMS regenerates the exports at
       about 02:00, so a failure is about their structure rather than our timing.
 
-- [ ] **TASK-014:** Seed Qdrant with real payer policies for dev
+- [x] **TASK-014:** Seed Qdrant with commercial payer policies for dev
   - `scripts/seed-policies.py`
-  - Download publicly available policy PDFs from: CMS (Medicare), Aetna, BCBS (public guidelines)
+  - **Aetna and BCBS only. CMS is not in scope for this task** — seed Medicare
+    coverage with `uv run python -m policy_scraper` (TASK-013) instead. An
+    earlier draft of this task listed CMS alongside the commercial payers, which
+    was written before TASK-013 existed. CMS publishes no policy PDFs at all: the
+    Medicare Coverage Database's "PDF" affordance is the browser's own
+    print-to-PDF and the documents are HTML fragments inside the CSV exports,
+    which `services/policy-scraper` already fetches, filters, resolves
+    jurisdictions for, and ingests. A second CMS path here would duplicate that
+    pipeline and the two would fight over the same `policy_id`s
+    (`cms-lcd-L39529`), each overwriting the other's Qdrant points on every run.
+  - Download publicly available policy PDFs from Aetna (Clinical Policy
+    Bulletins) and BCBS (published medical policy / prior-authorization
+    guidelines).
   - Ingest into local Qdrant via TASK-011 `/policies/ingest` endpoint — reuses the
     same dedup logic, so re-running this script is safe and idempotent
   - Focus on: orthopedic MRI (CPT 72148), knee arthroscopy (CPT 29881), biologic injections
   - Ingest under canonical payer slugs from `packages/payer-vocab` (TASK-016),
     not display names — `aetna`, not "Aetna Inc." See CLAUDE.md, "Payer and
     jurisdiction identity".
-  - Unlike CMS (TASK-013), Aetna and BCBS do publish real PDFs, so this script
-    uses `/policies/ingest`'s original PDF path. It is also where the codes CMS
-    has no coverage document for — 29881, and the dermatology biologics — are
-    actually covered, since those are commercial and pharmacy-benefit territory.
+  - **Aetna publishes HTML, not PDF — verified, and this reverses an earlier
+    note in this task.** Clinical Policy Bulletins are served as
+    `Content-Type: text/html` from `aetna.com/cpb/medical/data/<range>/<id>.html`
+    (checked live against CPB 0743, "Spinal Surgery: Laminectomy and Fusion",
+    which carries CPT 72148, and CPB 0208). The original claim that "Aetna and
+    BCBS do publish real PDFs" was inherited from a draft written before anyone
+    fetched one. BCBS of Massachusetts does publish PDFs. So this script uses
+    **both** of `/policies/ingest`'s content types: `text/html` for Aetna,
+    `application/pdf` for BCBS. It is also where the codes CMS has no coverage
+    document for — 29881, and the dermatology biologics — are actually covered,
+    since those are commercial and pharmacy-benefit territory.
+  - **This task's tests must cover the `text/html` ingest path.** The question
+    was raised as "CMS is out of scope, so does this second caller of
+    `/policies/ingest` still need HTML coverage?" — and the answer changed once
+    Aetna's documents were actually fetched. It is not CMS that puts HTML in
+    this script's path, it is Aetna. So the suite covers both content types from
+    this caller, on top of the coverage the path already has at the endpoint
+    (`services/track-b-rag/tests/unit/test_documents.py`,
+    `tests/unit/test_ingestion.py`, `tests/unit/api/test_policies.py` and
+    `tests/integration/test_ingestion.py` all parametrise over both) and from
+    policy-scraper (`services/policy-scraper/tests/unit/test_ingest.py`).
+  - **The policy URL list is a curated module-level constant, not a crawler.**
+    One entry per document with a comment saying why it is there, the same shape
+    as TASK-013's CPT/HCPCS constant. Aetna and BCBS publish per-plan,
+    per-licensee documents behind no machine-readable index, so there is nothing
+    to crawl and crawling would be the impolite way to find out. Both payers'
+    policy indexes render their document lists in JavaScript — a static fetch of
+    `aetna.com/health-care-professionals/clinical-policy-bulletins/...` returns
+    zero CPB links, and BCBSMA's `/medical-policies/` listing yields one PDF href
+    that 404s against every base it could resolve to. The URL list is therefore
+    assembled by a human reading the index, not derived programmatically.
+    Individual CPB URLs are stable and directly fetchable once known.
+  - robots.txt on both `www.aetna.com` and `www.bluecrossma.org` permits the
+    policy paths — checked with `policy_scraper.robots.RobotsPolicy`, not
+    `urllib.robotparser`, for the wildcard-handling reason recorded in TASK-013.
+    This script imports `PoliteClient`/`RobotsPolicy` from `policy_scraper`
+    directly. They stay where they are: the second-consumer rule that would move
+    them into `packages/` counts features that ship behavior, and a dev seeding
+    script is not one. Nothing is duplicated by importing them, so there is no
+    drift for a package to prevent.
+  - **Test (always on):** URL-list shape, payer slug resolution, request
+    construction and the response handling for each of ingest's three dedup
+    outcomes, against recorded fixture PDFs. These carry the 80% coverage gate.
+    Tests live in `services/track-b-rag/tests/`, following the precedent that
+    `scripts/seed-test-encounters.py` is tested from
+    `services/track-a-clinical/tests/integration/`.
+  - **Test (gated on an env flag, default off):** fetch the real Aetna and BCBS
+    PDFs and assert each URL still resolves to a PDF. Add the job to
+    `.github/workflows/nightly-live-checks.yml` alongside the CMS checks, naming
+    the payer in the job name. A gate with no scheduled run is a deleted test —
+    see CLAUDE.md's section on this.
+  - **Which BCBS slug this seeds under was verified against real data, not
+    chosen.** `Coverage.payor.display` values pulled from the Oracle Health
+    (Cerner) open sandbox, the public HAPI R4 server and Synthea's own payer
+    roster confirm that real feeds emit both unqualified ("Blue Cross") and
+    Anthem-branded ("Anthem Blue Cross Blue Shield") names. `packages/payer-vocab`
+    now carries three distinct Blue slugs — `anthem-bcbs`, the per-licensee
+    `bcbs-ma`, and the generic `blue-cross-blue-shield` — because Association
+    licensees publish their own criteria and a merged slug would let one
+    licensee's policy silently answer for another. **Seed each BCBS document
+    under the slug of the licensee that published it**, never the generic
+    bucket. Re-ingest the local dev corpus after any further vocabulary change,
+    per TASK-016.
+  - Built (88 tests in `services/track-b-rag/tests/integration/test_seed_policies.py`
+    — 83 always-on, 5 gated; the gated checks pass against both payers live).
+    The corpus is 13 documents: 4 BCBSMA PDFs and 9 Aetna CPBs, so both ingest
+    content types are exercised from this caller. Every target code has a
+    document: 72148/72149 (CPB 0236, BCBSMA 935), 73721/73718 (CPB 0171, BCBSMA
+    933), 29881 (CPB 0673), J7321/J7325 and 20610 (CPB 0179), 64483/62323
+    (CPB 0016), and the provider-administered dermatology biologics (CPB 0905
+    Cosentyx, 1009 Skyrizi, 0912 Stelara). The nightly workflow gained an
+    `Aetna and BCBSMA policy documents` job on the `RUN_PAYER_LIVE_TESTS` gate.
+  - Decisions worth knowing before touching this:
+    - **Aetna's CPB index needs a browser; the documents do not.** The listing
+      is behind a terms-acceptance modal and renders from two chained dropdowns.
+      Individual CPB URLs fetch directly with no acceptance, which is why the
+      script itself needs no browser and no crawler — a human reads the index
+      once and adds entries.
+    - **Every URL is verified by fetching it, not by trusting the index.** The
+      BCBSMA "400" entry was wrong on first writing because it was copied from
+      the overview page, where the link is stale; the gated live test caught it
+      on its first run. Each entry's comment names codes that were confirmed
+      present in the extracted text.
+    - **CPB 0016 covers epidural injections, not CPB 0934.** 0934 (Epidural
+      Injection Technologies) carries 62323 but not 64483; 0016 (Back Pain -
+      Invasive Procedures) carries both.
+    - **Taltz and Dupixent are absent on purpose.** Both are self-administered
+      and sit on the pharmacy benefit, so they live in Aetna's separate Pharmacy
+      CPB index. Seeding them means going to that index, not widening the search
+      in the medical one.
+    - `services/policy-scraper` gained a `py.typed` marker so the script's import
+      of `PoliteClient` type-checks. `track-a-clinical` and `track-b-rag` already
+      carried one; policy-scraper had no cross-boundary consumer until now.
 
 - [ ] **TASK-015:** Da Vinci CRD/DTR client — two-tier policy lookup
   - Service: `services/track-b-rag`
