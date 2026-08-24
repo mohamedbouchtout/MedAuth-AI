@@ -80,8 +80,16 @@ medauth-ai/
 - **Testing:** Vitest + React Testing Library
 
 ### Frontend (apps/mobile)
-- **Framework:** React Native with Expo SDK 51
-- **Audio:** expo-av for capture
+- **Framework:** React Native with Expo SDK 57
+- **Audio:** `expo-audio`'s `useAudioStream` for capture — real-time PCM buffers
+  delivered to an `onBuffer` callback, never a recorded file. Earlier drafts of
+  this file and of TASK-022 said `expo-av`; that was written without checking
+  it, the same way the Node.js `fhir-integration` line was. `expo-av` records to
+  a file URI and exposes no PCM callback at all, so it could satisfy neither the
+  "audio never persists" constraint nor the 16kHz-PCM one — and it was removed
+  from Expo entirely in SDK 55. The SDK pin moved from 51 to 57 because
+  `useAudioStream` landed in SDK 56; `apps/mobile` is unscaffolded, so this
+  costs nothing to adopt. See TASK-022 for the capture details.
 - **Testing:** Jest + React Native Testing Library
 
 ### Infrastructure

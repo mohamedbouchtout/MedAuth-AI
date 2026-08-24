@@ -1488,13 +1488,107 @@ The insurance policy RAG is the technical core. Build and validate before other 
       starts.
 
 - [ ] **TASK-022:** Mobile audio capture (React Native)
-  - App: `apps/mobile`
-  - `useAudioCapture` hook using expo-av
-  - Records at 16kHz mono (required for Transcribe Medical)
-  - Streams 250ms chunks over WebSocket to audio-ingestion service
-  - Handles microphone permission request
-  - Stops and clears on session end
-  - **Test:** unit test the hook with mocked expo-av
+  - Prerequisite: TASK-020 (the WebSocket server this streams to — its wire
+    contract is fixed and this task conforms to it), TASK-006 (mints the session
+    JWT this task presents; this task neither mints nor refreshes it)
+  - App: `apps/mobile` — **currently an empty `.gitkeep`.** This task scaffolds
+    the Expo app before it can add a hook: `package.json`, Expo config,
+    TypeScript in strict mode, Jest + React Native Testing Library, ESLint. The
+    npm workspace entry already exists in the root `package.json`, and
+    `ci.yml`'s `mobile` job already exists but no-ops on
+    `if [ ! -f apps/mobile/package.json ]` — so the moment that file lands, CI
+    starts running `lint`, `typecheck`, `test` and each has to exist and pass.
+  - **Pin `jest-expo` at `^57.0.4`, not `57.0.0`.** `jest-expo@57.0.0` shipped
+    with a peer dependency on `@react-native/jest-preset@^0.85.0` while SDK 57
+    is on React Native 0.86, so `npm install` fails with ERESOLVE
+    (expo/expo#47435, fixed in `57.0.1` and current at `^0.86.2` in `57.0.4`).
+    This matters more here than in a standalone app: CI runs `npm ci` at the
+    workspace root, so the conflict would fail the whole install and take the
+    `web` and `fhir-types` jobs down with it, not just `mobile`. No `overrides`
+    entry is needed on a current pin — do not copy one from a blog post.
+  - **Capture uses `expo-audio`'s `useAudioStream`, not `expo-av`.** An earlier
+    draft of this task said expo-av; it was written without checking, the same
+    way the Node.js `fhir-integration` line was, and it is wrong twice over.
+    expo-av records to a *file URI* and exposes no PCM callback, so it can
+    satisfy neither the "audio never persists" constraint nor the 16kHz-PCM one;
+    and it is deprecated, unpatched, and removed from Expo entirely as of SDK
+    55. `expo-audio` is first-party, bundled in Expo Go, and its
+    `useAudioStream` hook delivers real-time PCM to an `onBuffer` callback as an
+    `ArrayBuffer` — in memory, never a file. Third-party native modules
+    (`@siteed/expo-audio-studio`, `react-native-live-audio-stream`) were the
+    fallback if it had not: they would force a development build and take on a
+    separately-maintained native dependency. They are not needed.
+  - `useAudioStream({ sampleRate: 16000, channels: 1, encoding: 'int16' })` —
+    16kHz mono 16-bit PCM, matching `TRANSCRIBE_MEDICAL_SAMPLE_RATE_HZ` and
+    `TRANSCRIBE_MEDICAL_MEDIA_ENCODING=pcm` in `.env.example`.
+  - **`sampleRate` is a request, not a guarantee, and a silent mismatch hangs.**
+    Expo's docs say the actual rate may differ if the hardware cannot deliver
+    it, and each `AudioStreamBuffer` reports the rate it was actually captured
+    at. TASK-020 already records that Transcribe answers a disagreeing sample
+    rate by *hanging rather than erroring*. A vague "fail loudly" would
+    reproduce that same failure one layer up, so the behaviour is specified
+    exactly:
+    - **The check runs before the socket is opened, not after.** The actual
+      rate is unknowable until the first buffer arrives, so the order is:
+      request permission → start the stream → inspect the first
+      `AudioStreamBuffer` → compare its `sampleRate` and `channels` against
+      what was requested → **only then** open the WebSocket. Until that
+      comparison passes, no socket exists and not one byte of audio has left
+      the device.
+    - **A mismatch is terminal for the attempt, and silent about nothing.**
+      The hook stops the stream, discards the buffer, never opens the socket,
+      and settles in an `error` state carrying a typed
+      `SAMPLE_RATE_UNSUPPORTED` code with the requested and actual values. It
+      does not retry, and it does not fall back to streaming at the wrong
+      rate — the whole point is that the wrong rate looks like success until
+      it hangs.
+    - **It is returned, never thrown.** The hook's state is a discriminated
+      union (`idle` | `requesting-permission` | `starting` | `streaming` |
+      `error`), per the "errors bubble up as typed Result objects, not thrown
+      exceptions" rule in CLAUDE.md's TypeScript conventions. That rule is
+      load-bearing here rather than stylistic: a thrown error is exactly what
+      a React error boundary would swallow, which is the failure mode this
+      bullet exists to prevent.
+    - **Surfacing it to a person is TASK-025's job, and TASK-025 does not
+      exist yet.** This hook cannot block a "start visit" button that has not
+      been built — `apps/mobile` has no session UI task, only this one and
+      TASK-043. What this task can do is guarantee the error is *available*
+      and unmissable in the hook's contract; the requirement that a screen
+      refuse to start the visit and show it is written into TASK-025 below.
+      Until then, a caller that ignores the `error` state gets no audio and no
+      socket, which fails closed.
+    - Resampling in JS is out of scope here; if a real device turns out to
+      need it, that is its own task.
+  - **The 250ms chunking happens in this hook.** `useAudioStream` exposes no
+    buffer-size or interval control, so `onBuffer` delivers whatever size the
+    native layer chooses. Accumulate into an in-memory byte buffer and flush at
+    the 250ms boundary — 8000 bytes at 16kHz mono int16 — which is the same
+    re-chunking shape `AudioBuffer.take_chunks()` does on the server. Assert
+    little-endian int16 explicitly; Transcribe requires it, and both target
+    platforms happen to be little-endian, which is exactly the kind of thing
+    that works until it does not.
+  - Streams to `ws://<host>:8001/ws/audio/{session_id}` as **binary frames**.
+    A text frame gets the connection closed with 1003 by TASK-020's server.
+  - **Mobile may use the `Authorization: Bearer` header carrier.** React
+    Native's `WebSocket` accepts a headers option, unlike the browser's native
+    constructor that forces TASK-023 into the subprotocol form. Either carrier
+    is accepted and validated identically — see CLAUDE.md, "How the JWT reaches
+    a WebSocket endpoint". The token is never logged and never put in the URL.
+  - A rejected token fails the upgrade rather than surfacing as an `onclose`
+    with 4401, for the reason that same section gives, so treat a connection
+    that never opens as an auth failure and re-mint the session before retrying.
+    The JWT's lifetime is `SESSION_TTL_SECONDS` (15 min), so a long encounter
+    will outlive it.
+  - Handles the microphone permission request via
+    `requestRecordingPermissionsAsync()`, and surfaces denial as a state the UI
+    can act on rather than throwing.
+  - Stops the stream, closes the socket, and drops the pending buffer on session
+    end and on unmount. Nothing is written to disk on any path.
+  - **Test:** unit test the hook with mocked `expo-audio` — feed `onBuffer`
+    synthetic buffers and assert exactly 8000-byte binary frames are sent, that
+    a partial tail is not sent early, that a `buffer.sampleRate` disagreeing
+    with the request fails loudly instead of streaming, that permission denial
+    is surfaced, and that stop clears the buffer.
 
 - [ ] **TASK-023:** Browser audio capture (React Web)
   - App: `apps/web`
