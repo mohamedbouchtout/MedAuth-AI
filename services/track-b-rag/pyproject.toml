@@ -5,7 +5,7 @@ description = "Insurance policy RAG — Qdrant retrieval plus Claude on Bedrock.
 requires-python = ">=3.12"
 dependencies = [
     "asyncpg>=0.30",
-    "boto3>=1.43.71",
+    "boto3>=1.43.77",
     "fastapi>=0.115",
     # TASK-015. The Da Vinci CRD tier posts a CDS Hooks request to the payer's
     # endpoint; this is the first outbound HTTP call this service makes.
