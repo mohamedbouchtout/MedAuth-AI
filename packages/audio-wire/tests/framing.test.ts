@@ -1,8 +1,10 @@
+import { describe, expect, it } from 'vitest';
+
 import {
   PcmFramer,
   PendingAudioOverflow,
-} from '../../../src/audio/framing';
-import { CHUNK_BYTES, MAX_PENDING_BYTES } from '../../../src/audio/format';
+} from '../src/framing';
+import { CHUNK_BYTES, MAX_PENDING_BYTES } from '../src/format';
 
 /** A buffer of `bytes` length whose contents are identifiable per-frame. */
 function pcm(bytes: number, fill = 0): ArrayBuffer {
@@ -95,9 +97,9 @@ describe('PcmFramer', () => {
     native.fill(0x11);
 
     framer.push(native.buffer);
-    // The native layer is free to reuse the same ArrayBuffer for the next
-    // capture. If the framer retained it rather than copying, the audio still
-    // waiting to be sent would be overwritten here.
+    // A native capture layer is free to reuse the same ArrayBuffer for the
+    // next buffer. If the framer retained it rather than copying, the audio
+    // still waiting to be sent would be overwritten here.
     native.fill(0x22);
 
     const [frame] = framer.takeFrames();

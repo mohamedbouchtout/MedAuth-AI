@@ -13,6 +13,7 @@
     "test": "jest"
   },
   "dependencies": {
+    "@medauth/audio-wire": "*",
     "expo": "~57.0.16",
     "expo-audio": "~57.0.4",
     "expo-status-bar": "~57.0.1",

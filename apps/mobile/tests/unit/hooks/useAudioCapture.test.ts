@@ -1,8 +1,23 @@
 import { act, renderHook, waitFor } from '@testing-library/react-native';
 
-import * as format from '../../../src/audio/format';
-import { CHUNK_BYTES, MAX_PENDING_BYTES } from '../../../src/audio/format';
+import { CHUNK_BYTES, MAX_PENDING_BYTES } from '@medauth/audio-wire';
+
 import { useAudioCapture } from '../../../src/hooks/useAudioCapture';
+
+/**
+ * Host byte order, as the hook sees it.
+ *
+ * Stubbed through `jest.mock` rather than `jest.spyOn` on the module namespace:
+ * `@medauth/audio-wire` re-exports through a barrel, whose properties are
+ * getters that a spy cannot redefine. Everything else in the package is the
+ * real implementation — this is the one value a test machine cannot vary.
+ */
+const mockLittleEndian = { current: true };
+
+jest.mock('@medauth/audio-wire', () => ({
+  ...jest.requireActual('@medauth/audio-wire'),
+  isLittleEndian: () => mockLittleEndian.current,
+}));
 
 const mockStreamStart = jest.fn<Promise<void>, []>();
 const mockStreamStop = jest.fn<void, []>();
@@ -506,11 +521,15 @@ describe('useAudioCapture — a socket event after stop is ignored', () => {
 });
 
 describe('useAudioCapture — endianness', () => {
+  afterEach(() => {
+    mockLittleEndian.current = true;
+  });
+
   it('refuses to capture on a big-endian platform', async () => {
     // Transcribe requires little-endian int16. Both targets are little-endian,
     // which is what makes this worth a guard: the failure would otherwise be
     // noise reaching the transcriber rather than an error anyone sees.
-    jest.spyOn(format, 'isLittleEndian').mockReturnValue(false);
+    mockLittleEndian.current = false;
     const { result } = await renderHook(() => useAudioCapture(OPTIONS));
 
     await act(async () => {

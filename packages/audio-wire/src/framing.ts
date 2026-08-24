@@ -1,6 +1,11 @@
 /**
- * Re-chunks the variable-sized PCM buffers `expo-audio` delivers into the fixed
- * 250ms frames the audio-ingestion WebSocket expects.
+ * Re-chunks the variable-sized PCM buffers a capture layer delivers into the
+ * fixed 250ms frames the audio-ingestion WebSocket expects.
+ *
+ * Both clients need this and neither controls its input size: `expo-audio`'s
+ * `onBuffer` hands over whatever the native layer picked, and an
+ * `AudioWorkletProcessor` hands over 128-sample render quanta. The framer is
+ * the same either way, which is why it is here rather than in an app.
  *
  * This is deliberately a plain class with no React and no I/O: the chunking
  * boundary is the part most likely to be wrong in a way tests can catch, so it
@@ -34,10 +39,10 @@ export class PcmFramer {
   /**
    * Copy one captured buffer in.
    *
-   * The copy is not incidental: `AudioStreamBuffer.data` comes from the native
-   * layer and nothing promises the same ArrayBuffer is not handed back on the
-   * next callback. Retaining it directly would let a later capture overwrite
-   * audio still waiting to be sent.
+   * The copy is not incidental: on mobile `AudioStreamBuffer.data` comes from
+   * the native layer and nothing promises the same ArrayBuffer is not handed
+   * back on the next callback. Retaining it directly would let a later capture
+   * overwrite audio still waiting to be sent.
    */
   push(data: ArrayBuffer): void {
     const incoming = new Uint8Array(data);

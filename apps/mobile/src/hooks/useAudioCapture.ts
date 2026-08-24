@@ -33,9 +33,17 @@ import type { AudioStream, AudioStreamBuffer } from 'expo-audio';
 import { requestRecordingPermissionsAsync, useAudioStream } from 'expo-audio';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { formatMismatch, type AudioCaptureError } from '../audio/errors';
-import { PcmFramer, PendingAudioOverflow } from '../audio/framing';
-import { CHANNELS, ENCODING, SAMPLE_RATE_HZ, formatOf, isLittleEndian } from '../audio/format';
+import {
+  CHANNELS,
+  ENCODING,
+  PcmFramer,
+  PendingAudioOverflow,
+  SAMPLE_RATE_HZ,
+  formatMismatch,
+  formatOf,
+  isLittleEndian,
+  type AudioCaptureError,
+} from '@medauth/audio-wire';
 
 /** WebSocket readyState OPEN. Spelled out so the check reads without the DOM enum. */
 const SOCKET_OPEN = 1;
