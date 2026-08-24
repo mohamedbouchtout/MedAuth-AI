@@ -1487,7 +1487,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
       new integration suite needs only the Redis `docker compose` already
       starts.
 
-- [ ] **TASK-022:** Mobile audio capture (React Native)
+- [x] **TASK-022:** Mobile audio capture (React Native)
   - Prerequisite: TASK-020 (the WebSocket server this streams to — its wire
     contract is fixed and this task conforms to it), TASK-006 (mints the session
     JWT this task presents; this task neither mints nor refreshes it)
@@ -1498,14 +1498,20 @@ The insurance policy RAG is the technical core. Build and validate before other 
     `ci.yml`'s `mobile` job already exists but no-ops on
     `if [ ! -f apps/mobile/package.json ]` — so the moment that file lands, CI
     starts running `lint`, `typecheck`, `test` and each has to exist and pass.
-  - **Pin `jest-expo` at `^57.0.4`, not `57.0.0`.** `jest-expo@57.0.0` shipped
-    with a peer dependency on `@react-native/jest-preset@^0.85.0` while SDK 57
-    is on React Native 0.86, so `npm install` fails with ERESOLVE
-    (expo/expo#47435, fixed in `57.0.1` and current at `^0.86.2` in `57.0.4`).
-    This matters more here than in a standalone app: CI runs `npm ci` at the
-    workspace root, so the conflict would fail the whole install and take the
-    `web` and `fhir-types` jobs down with it, not just `mobile`. No `overrides`
-    entry is needed on a current pin — do not copy one from a blog post.
+  - **Two version pins are load-bearing; neither is obvious from the SDK.**
+    `jest-expo` is `^57.0.4`, not `57.0.0`: that release declared a peer
+    dependency on `@react-native/jest-preset@^0.85.0` while SDK 57 is on React
+    Native 0.86, so `npm install` fails with ERESOLVE (expo/expo#47435, fixed in
+    `57.0.1`). It matters more here than in a standalone app because CI runs
+    `npm ci` at the workspace root, so the conflict fails the whole install and
+    takes `web` and `fhir-types` down with `mobile`. No `overrides` entry is
+    needed on a current pin — do not copy one from a blog post.
+    And `jest` itself is pinned to **^29.7.0, not 30**: `jest-expo@57` depends on
+    jest 29 internals throughout (`babel-jest`, `jest-snapshot`,
+    `jest-environment-jsdom` all `^29.2.1`). Installing jest 30 hoists a v30
+    runtime over v29 environments and every suite dies in `jest-runtime` with
+    `clearMocksOnScope is not a function` — before a single test runs, so the
+    failure names nothing about the code.
   - **Capture uses `expo-audio`'s `useAudioStream`, not `expo-av`.** An earlier
     draft of this task said expo-av; it was written without checking, the same
     way the Node.js `fhir-integration` line was, and it is wrong twice over.
@@ -1528,13 +1534,18 @@ The insurance policy RAG is the technical core. Build and validate before other 
     rate by *hanging rather than erroring*. A vague "fail loudly" would
     reproduce that same failure one layer up, so the behaviour is specified
     exactly:
-    - **The check runs before the socket is opened, not after.** The actual
-      rate is unknowable until the first buffer arrives, so the order is:
-      request permission → start the stream → inspect the first
-      `AudioStreamBuffer` → compare its `sampleRate` and `channels` against
-      what was requested → **only then** open the WebSocket. Until that
-      comparison passes, no socket exists and not one byte of audio has left
-      the device.
+    - **The check runs before the socket is opened, not after**, and it runs
+      twice. `AudioStream` publishes the rate it is actually delivering once
+      `start()` resolves, so the order is: request permission → start the
+      stream → compare the rate it reports → compare the first
+      `AudioStreamBuffer` delivered → **only then** open the WebSocket. Until
+      both comparisons pass, no socket exists and not one byte of audio has
+      left the device. The second check is not redundant: the buffer is the
+      audio that would really reach Transcribe, and the two disagreeing is
+      itself a reason not to stream. The first exists because a device that
+      delivers no buffer at all would otherwise leave the failure invisible.
+      A reported rate of zero means the native side has not filled it in yet
+      and is not treated as a mismatch.
     - **A mismatch is terminal for the attempt, and silent about nothing.**
       The hook stops the stream, discards the buffer, never opens the socket,
       and settles in an `error` state carrying a typed
@@ -1589,6 +1600,41 @@ The insurance policy RAG is the technical core. Build and validate before other 
     a partial tail is not sent early, that a `buffer.sampleRate` disagreeing
     with the request fails loudly instead of streaming, that permission denial
     is surfaced, and that stop clears the buffer.
+  - Built (49 tests, 99% coverage). Decisions worth knowing before touching this:
+    - **`expo-audio`'s real API differs from its documentation in two ways that
+      changed the design.** `AudioStream.stop()` returns `void`, not a promise.
+      And `AudioStream` exposes `sampleRate` and `channels` once started, which
+      is what made the two-stage validation above possible — the docs describe
+      only the per-buffer fields, so the earlier check would not have been
+      written from the documentation alone. Read the installed `.d.ts`, not the
+      docs page, before changing the capture sequence.
+    - The docs are right about the important half: `int16` buffers are
+      documented as little-endian, which is what Transcribe requires. The
+      `isLittleEndian()` guard stays anyway, because the failure it catches is
+      inaudible noise reaching the transcriber rather than a crash.
+    - **`EXPO_PUBLIC_AUDIO_WS_URL` already existed** in `.env.example` from the
+      TASK-001 scaffold; this task uses it rather than adding a second variable
+      for the same thing. It is an origin with no path — the hook appends
+      `/ws/audio/{session_id}`.
+    - The chunking lives in `src/audio/framing.ts` as a plain class with no
+      React and no I/O, because the frame boundary is the part most likely to
+      be wrong in a way a test can catch. It copies each incoming buffer: the
+      native layer is free to reuse the same `ArrayBuffer` on the next capture,
+      and retaining it would let a later capture overwrite audio still queued.
+    - Audio captured while the socket is still connecting is held, then flushed
+      on open — but only up to five seconds. Past that the connection is not
+      coming, and the choice is between a visible failure and unbounded memory
+      growth holding PHI.
+    - `App.tsx` is a placeholder on purpose. Wiring a half-built session screen
+      here would be the exact failure TASK-025 exists to prevent: a screen that
+      looks like it is recording when it is not.
+    - RNTL 14 is async throughout — `renderHook` returns a promise and `act`
+      must be awaited. An un-awaited `act` leaks pending work into the next
+      test, which then renders with a null `result` ref and fails somewhere
+      unrelated to the cause.
+    - CI needed no change: `ci.yml`'s `mobile` job already existed and stopped
+      no-opping the moment `apps/mobile/package.json` landed. Verified locally
+      from a clean `npm ci`: lint, `tsc --noEmit` and 49 tests all pass.
 
 - [ ] **TASK-023:** Browser audio capture (React Web)
   - Prerequisite: TASK-020 (the WebSocket server this streams to — its wire
