@@ -12,7 +12,7 @@ dependencies = [
     # review against tests/unit/test_transcribe_medical.py, not a routine one.
     "amazon-transcribe==0.6.4",
     "anyio>=4.6",
-    "boto3>=1.43.71",
+    "boto3>=1.43.77",
     "fastapi>=0.115",
     "medauth-api-envelope",
     "medauth-hipaa-logger",
