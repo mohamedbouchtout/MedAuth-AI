@@ -1671,6 +1671,35 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **Test:** end to end over Redis, replacing TASK-021's stubbed seam — a
     published transcript segment produces a real `/policies/query` call
 
+- [ ] **TASK-025:** Mobile session screen
+  - Prerequisite: TASK-006 (`POST /sessions/start` and `/end`), TASK-022 (the
+    capture hook this screen drives)
+  - App: `apps/mobile`
+  - **Why this exists.** TASK-022 builds `useAudioCapture` and nothing calls
+    it. `apps/mobile` has no session UI at all — only the capture hook and
+    TASK-043's haptic nudge — so the mobile equivalent of TASK-070's "start
+    visit" flow is missing. It was found while specifying TASK-022's
+    sample-rate failure and opened rather than folded into that task.
+  - Start visit: `POST /sessions/start` (TASK-006, returns **201** with
+    `{session_id, jwt}`), then hand both to `useAudioCapture`.
+  - **The screen must not reach an "in progress" state while the capture hook
+    is in `error`.** This is the visible half of TASK-022's contract: a
+    `SAMPLE_RATE_UNSUPPORTED` or permission-denied result blocks the visit from
+    starting and is shown to the provider as an actionable message naming the
+    device problem. A provider who believes an encounter is being recorded
+    when it is not is the worst outcome this screen can produce — worse than
+    refusing to start — because the transcript, the SOAP note and every nudge
+    that should have fired are all silently absent.
+  - End visit: `POST /sessions/{session_id}/end`, stop capture, clear buffers.
+  - The JWT lives `SESSION_TTL_SECONDS` (15 min) and a visit can outlast it;
+    decide deliberately whether this screen re-mints or the encounter ends, and
+    write down which. TASK-070 faces the identical question on web — solve it
+    the same way in both or say why not.
+  - **Test:** capture reports `SAMPLE_RATE_UNSUPPORTED`, verify the visit does
+    not start and the error is rendered
+  - **Test:** permission denied, verify the same
+  - **Test:** start/active/end transitions with mocked APIs, mirroring TASK-070
+
 ---
 
 ## Phase 3 — Clinical Note Generation (Track A)
