@@ -303,6 +303,55 @@ otherwise has no issuer. Fixed here:
   prerequisite for TASK-020, TASK-021, TASK-030, TASK-041, and TASK-060. Do not
   start those without TASK-006 done first.
 
+**How the JWT reaches a WebSocket endpoint — either carrier, never both
+required.** A WebSocket endpoint accepts the session token in *either* of two
+places, and one is enough:
+
+```
+Authorization: Bearer <jwt>                         # header carrier
+Sec-WebSocket-Protocol: medauth.session.v1, medauth.jwt.<jwt>   # subprotocol carrier
+```
+
+The header is the obvious carrier and it is what service-to-service callers and
+tests use. It is not available to a browser: the native `WebSocket` constructor
+takes a URL and a subprotocol list and nothing else, and `apps/web` is required
+by the Frontend section above to use the native API rather than a library that
+tunnels its own handshake. That is a platform constraint, not an implementation
+gap to route around, so the second carrier exists for it. Every real-time
+endpoint therefore supports both, and this is the canonical mechanism rather
+than something TASK-020 settled locally: TASK-041's nudge socket inherits it by
+reference, and TASK-023's browser capture has to send the subprotocol form
+because nothing else is open to it.
+
+Rules that make the two carriers behave identically:
+- **Validation is the same whichever carrier was used** — signature against
+  `JWT_SIGNING_KEY`, `exp` in the future, and the token's `session_id` claim
+  equal to the `session_id` in the URL path. Where the token arrived from is not
+  an input to any of those checks.
+- **Reject before the handshake completes.** Validation runs before the
+  connection is accepted, never after, so an unauthenticated peer never reaches
+  a state where it can send a frame. The close code is 4401.
+- **The server echoes `medauth.session.v1` and never the token.** A browser
+  aborts a connection whose handshake response does not name one of the
+  subprotocols it offered, so the accept must select one — and selecting the
+  `medauth.jwt.` entry would write the credential into the response headers, and
+  from there into every proxy access log on the path. Offer the version marker
+  first for exactly this reason: it gives the server something safe to echo.
+- **A token carried this way is still a credential.** It is never logged, never
+  put in an error message, and never placed in the URL query string, which is
+  the third thing browsers can carry and the one place a credential is certain
+  to be logged by intermediaries. The 15-minute `SESSION_TTL_SECONDS` lifetime
+  bounds the damage; TLS is what actually protects the handshake.
+
+Note what a close code cannot do. Below the ASGI layer, a connection refused
+*before* the handshake completes has no WebSocket frame to carry a code in, so a
+real server answers the upgrade request with an HTTP status — the 4401 is what
+the application emits and what an ASGI-level test observes, and a browser client
+sees a failed upgrade rather than an `onclose` with 4401. This is the correct
+trade: accepting an unauthenticated handshake purely so the rejection reads
+nicely is worse than the client having to distinguish a failed upgrade from a
+normal close.
+
 ### Redis Key Naming — Canonical List
 Every task below should use these exact patterns, not invent variants:
 ```

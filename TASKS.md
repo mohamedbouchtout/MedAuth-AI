@@ -1280,11 +1280,17 @@ The insurance policy RAG is the technical core. Build and validate before other 
     that TASK-006 mints, it does not mint or manage sessions itself
   - Service: `services/audio-ingestion`
   - `WebSocket /ws/audio/{session_id}` — accepts raw audio chunks from client
-  - Validate the JWT from the `Authorization` header against `JWT_SIGNING_KEY`
-    before accepting the connection: verify signature, verify `exp` not passed,
-    verify the token's `session_id` claim matches the URL's `session_id`. Close
-    with code 4401 on any failure — do not accept the connection first and
-    validate after.
+  - Validate the session JWT against `JWT_SIGNING_KEY` before accepting the
+    connection: verify signature, verify `exp` not passed, verify the token's
+    `session_id` claim matches the URL's `session_id`. Close with code 4401 on
+    any failure — do not accept the connection first and validate after.
+  - The token arrives by *either* the `Authorization: Bearer` header *or* the
+    `Sec-WebSocket-Protocol` subprotocol carrier, either one sufficient — see
+    CLAUDE.md, "How the JWT reaches a WebSocket endpoint". An earlier draft of
+    this task named the header alone; that predated anyone checking what a
+    browser can send, and `apps/web` cannot set a header on the native
+    `WebSocket` constructor at all. The mechanism is documented centrally rather
+    than here because TASK-041 and TASK-023 both depend on it.
   - Buffer chunks in in-memory BytesIO — never write to disk
   - Forward stream to AWS Transcribe Medical streaming API
   - On transcript segment received: publish to Redis channel
@@ -1329,6 +1335,15 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - App: `apps/web`
   - `useAudioCapture` hook using MediaRecorder API
   - Same 16kHz mono, 250ms chunks, WebSocket stream
+  - **The session JWT goes in the subprotocol list, not a header.** The native
+    `WebSocket` constructor accepts a URL and subprotocols and nothing else, so
+    open the socket as `new WebSocket(url, ["medauth.session.v1",
+    `medauth.jwt.${jwt}`])`. TASK-020's server accepts either carrier and echoes
+    `medauth.session.v1` back; see CLAUDE.md, "How the JWT reaches a WebSocket
+    endpoint". Do not rediscover this by finding that headers are unavailable.
+  - A rejected token fails the upgrade rather than surfacing as an `onclose`
+    with code 4401 — the same section says why — so treat a connection that
+    never opens as an auth failure and re-mint the session before retrying.
   - **Test:** jsdom mock of MediaRecorder
 
 ---
@@ -1391,7 +1406,11 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - Prerequisite: TASK-006 (JWT), same auth pattern as TASK-020
   - Service: `services/nudge-service`
   - `WebSocket /ws/nudges/{session_id}` — same JWT validation as TASK-020
-    (verify signature, exp, session_id claim match; 4401 on failure)
+    (verify signature, exp, session_id claim match; 4401 on failure), and the
+    same two token carriers: `Authorization: Bearer` or the
+    `Sec-WebSocket-Protocol` entry. See CLAUDE.md, "How the JWT reaches a
+    WebSocket endpoint" — `apps/web` opens this socket too and can only use the
+    subprotocol form.
   - Subscribe to `nudges:{session_id}`
   - Forward each nudge event to connected client in real time
   - On client disconnect: unsubscribe from Redis channel
