@@ -251,8 +251,12 @@ Authored-By: ...
   a payer rule keyed on age or sex simply cannot answer us — it returns "unable
   to process" and RAG answers instead. Fabricating a patient to make such a rule
   respond would produce a confident determination about someone who does not
-  exist. Patient-specific CRD belongs with the EHR-backed FHIR resources
-  fhir-integration will have in Phase 5.
+  exist. Closing that gap is TASK-059, and it is gated on TASK-052 supplying
+  real `Patient` and `Coverage` resources. Note what changes when it lands: a
+  patient-carrying CRD request is a PHI disclosure to a third party, so TLS
+  stops being a deployment convention, the endpoint has to be verified per
+  payer rather than read from one `CRD_BASE_URL`, and the disclosure needs its
+  own audit row. None of that applies to the patient-free request built today.
 - **A CRD answer is never cached; a RAG answer is.** The `rag:` key exists
   because a Qdrant search plus a Sonnet call is expensive and its result is
   identical for every patient on that payer/plan/state/CPT — a day of staleness
