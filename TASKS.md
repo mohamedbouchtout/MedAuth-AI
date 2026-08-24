@@ -1591,6 +1591,9 @@ The insurance policy RAG is the technical core. Build and validate before other 
     is surfaced, and that stop clears the buffer.
 
 - [ ] **TASK-023:** Browser audio capture (React Web)
+  - Prerequisite: TASK-020 (the WebSocket server this streams to — its wire
+    contract is fixed and this task conforms to it), TASK-006 (mints the session
+    JWT this task presents; this task neither mints nor refreshes it)
   - App: `apps/web`
   - `useAudioCapture` hook using MediaRecorder API
   - Same 16kHz mono, 250ms chunks, WebSocket stream
