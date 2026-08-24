@@ -1150,8 +1150,11 @@ The insurance policy RAG is the technical core. Build and validate before other 
       age (HCPCS E0424, Home Oxygen Therapy) answers "unable to process" and
       falls through to RAG. Fabricating a birth date to make it answer would
       produce a confident determination about a person who does not exist.
-      Patient-specific CRD belongs in Phase 5 with fhir-integration's real
-      Coverage and Patient resources.
+      Closing this is **TASK-059**, which needs TASK-052's real FHIR `Patient`
+      and `Coverage` resources first — and which turns the request into a PHI
+      disclosure to a third party, with the TLS, endpoint-verification and
+      audit obligations that follow. That is a different kind of task from this
+      one, which is why it is not an amendment to it.
     - **Against this RI, every CPT code in our corpus falls through to RAG.**
       Its rule library is HCPCS/DME — home oxygen, hospital beds, ambulance
       transport. CPT 27447 and 70551 get a card that decides nothing. That is
@@ -1522,6 +1525,80 @@ logic do not change.
   - Register at developer.modmed.com
   - Implement ModMedAdapter(EHRAdapter)
   - **Test:** validate against EMA sandbox
+
+- [ ] **TASK-059:** Patient-specific Da Vinci CRD
+  - Service: `services/track-b-rag` (with `services/fhir-integration` as the
+    data source)
+  - Prerequisite: **TASK-052** (`get_patient()` / `get_coverage()` — the FHIR
+    `Patient` and `Coverage` resources this task needs do not exist before it)
+    and TASK-015 (the CRD client, mapping and support table this extends).
+  - **The limitation this closes.** TASK-015's CRD request carries no patient.
+    Stage 1 holds none by construction — `resolve_policy_rules()` has no
+    `clinical_context` parameter and `test_stage_one_cannot_see_a_patient`
+    asserts that signature — so the request is built from payer, plan type,
+    state and procedure code with a placeholder subject. But CRD is specified
+    as a *patient-specific* coverage check: a payer rule keyed on age or sex
+    cannot be evaluated from what Stage 1 is allowed to know. Those requests
+    come back as an "unable to process" card and fall through to the RAG path.
+    Every rule in the HL7 Reference Implementation's Home Oxygen Therapy topic
+    (HCPCS E0424) behaves this way. The tier therefore answers for a fraction
+    of the rules a real payer publishes.
+  - **Where the call goes, and why it cannot stay where it is.** Not into
+    Stage 1: its result is cached under the payer-scoped
+    `rag:{payer}:{plan_type}:{state}:{cpt_code}` key, and patient data reaching
+    a payer-scoped cache would serve patient B the answer computed for patient
+    A — the failure CLAUDE.md's cache note exists to prevent. Lift the CRD call
+    *out* of Stage 1 into its own tier running alongside Stages 1 and 2. This
+    works precisely because TASK-015 already established that **CRD results are
+    never cached**: an uncached tier may see the patient without creating the
+    cache-poisoning problem at all. The structural constraint being violated
+    today is only that the call currently lives inside Stage 1.
+  - **This makes the request a PHI disclosure to a third party, and that is the
+    bulk of the work.** TASK-015's request carries nothing about a patient, so
+    it needed no disclosure controls. This one does. Prior authorization is a
+    payment purpose and the disclosure is permitted — it is exactly what CRD was
+    designed for — but permitted is not the same as unguarded:
+    - **TLS becomes mandatory rather than a deployment convention.**
+      `CRD_BASE_URL` currently defaults to `http://localhost:8006`, the local
+      Reference Implementation over loopback, and TASK-015's pull request left
+      the TLS checkbox deliberately unticked on the grounds that the request
+      carries nothing. That reasoning expires here. Reject a non-`https://`
+      endpoint outright for any request carrying a patient; a plaintext
+      loopback container is still fine for the patient-free path.
+    - **A per-payer verified endpoint registry replaces the single
+      `CRD_BASE_URL`.** One environment variable naming "the" CRD server is
+      adequate for a payer-policy question. Sending PHI to a misconfigured or
+      unverified endpoint is a disclosure to the wrong party, so the endpoint a
+      patient's data goes to must be bound to that patient's payer.
+    - **The disclosure needs its own `audit_log()` row**, distinct from the
+      access row `/policies/query` already writes. Sending PHI outside the
+      cluster is a different event from reading it, and the audit trail has to
+      be able to answer "what left, to whom" and not only "who looked".
+    - **Minimum necessary applies.** Send the demographics the payer's rule
+      needs, not the whole patient context.
+  - **What this does not do: make CRD the primary path.** CMS-0057-F covers
+    Medicare Advantage, Medicaid managed care, CHIP and ACA marketplace plans
+    only. Commercial employer-sponsored plans — the bulk of what the target
+    private practices see — are not mandated and will not have CRD endpoints.
+    This raises the hit rate *within* mandated payers. RAG remains the engine,
+    and `is_crd_supported()` still gates the whole tier.
+  - **Test:** a rule the Reference Implementation cannot evaluate without
+    demographics (HCPCS E0424, Home Oxygen Therapy) returns a determination
+    once a real `Patient` is supplied, where TASK-015's patient-free request
+    gets "unable to process". This is the regression that proves the task
+    achieved anything.
+  - **Test:** a patient-carrying request to a non-`https://` endpoint is
+    refused before the request is built, and the query still gets an answer
+    from the RAG path rather than an error.
+  - **Test:** the disclosure writes an `audit_log()` row naming the payer and
+    the session, and no clinical detail appears in it.
+  - **Test:** the patient-specific result is never written to the `rag:` cache —
+    the same assertion TASK-015 makes, re-stated here because the data now
+    reaching the tier is what would make a cache write a patient-safety bug
+    rather than merely a staleness one.
+  - **Test:** a payer outside the mandate is not consulted at all, and no
+    patient data is assembled for it (regression — the tier must not widen its
+    own scope by acquiring a data source).
 
 ---
 
