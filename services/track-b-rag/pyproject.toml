@@ -29,7 +29,7 @@ dependencies = [
     "python-multipart>=0.0.12",
     "qdrant-client>=1.12",
     "redis>=8.1.0",
-    "sentence-transformers>=3.3",
+    "sentence-transformers>=6.0.0",
     "sqlalchemy[asyncio]>=2.0.52",
     "uvicorn[standard]>=0.52.4",
 ]
