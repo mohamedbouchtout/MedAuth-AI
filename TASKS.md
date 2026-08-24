@@ -1616,11 +1616,15 @@ The insurance policy RAG is the technical core. Build and validate before other 
       TASK-001 scaffold; this task uses it rather than adding a second variable
       for the same thing. It is an origin with no path — the hook appends
       `/ws/audio/{session_id}`.
-    - The chunking lives in `src/audio/framing.ts` as a plain class with no
-      React and no I/O, because the frame boundary is the part most likely to
-      be wrong in a way a test can catch. It copies each incoming buffer: the
-      native layer is free to reuse the same `ArrayBuffer` on the next capture,
-      and retaining it would let a later capture overwrite audio still queued.
+    - The chunking lives in `PcmFramer` as a plain class with no React and no
+      I/O, because the frame boundary is the part most likely to be wrong in a
+      way a test can catch. It copies each incoming buffer: the native layer is
+      free to reuse the same `ArrayBuffer` on the next capture, and retaining it
+      would let a later capture overwrite audio still queued. It was written
+      here as `src/audio/framing.ts` and moved to `packages/audio-wire` by
+      TASK-023, when the browser client became its second consumer — along with
+      the format constants and the error vocabulary. Nothing about it changed in
+      the move.
     - Audio captured while the socket is still connecting is held, then flushed
       on open — but only up to five seconds, after which capture fails with
       `SEND_BACKLOG_EXCEEDED`. Past that the connection is not coming, and the
@@ -1651,9 +1655,70 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - Prerequisite: TASK-020 (the WebSocket server this streams to — its wire
     contract is fixed and this task conforms to it), TASK-006 (mints the session
     JWT this task presents; this task neither mints nor refreshes it)
-  - App: `apps/web`
-  - `useAudioCapture` hook using MediaRecorder API
-  - Same 16kHz mono, 250ms chunks, WebSocket stream
+  - App: `apps/web` — **currently an empty `.gitkeep`.** This task scaffolds the
+    Vite app before it can add a hook: `package.json`, Vite + React, TypeScript
+    in strict mode, Tailwind, Vitest + React Testing Library, ESLint. The npm
+    workspace entry already exists in the root `package.json`, and `ci.yml`'s
+    `web` job already exists but no-ops on `if [ ! -f apps/web/package.json ]`
+    — so the moment that file lands, CI starts running `lint`, `typecheck`,
+    `test` and `build` and each has to exist and pass.
+  - **Capture uses `getUserMedia` + `AudioContext` + `AudioWorkletNode`, not
+    MediaRecorder.** An earlier draft of this task said MediaRecorder, in the
+    same way earlier drafts said `expo-av` for TASK-022 and Node.js for
+    `fhir-integration`: written without checking. MediaRecorder cannot produce
+    what `audio-ingestion` forwards to Transcribe Medical, and the failure would
+    not be a degraded stream — TASK-020 recorded that Transcribe answers audio
+    it cannot read by *hanging rather than erroring*, so the encounter would
+    simply never produce a transcript. Measured in Chrome 133, 2026-08-24:
+    - **There is no raw PCM or WAV output.** `MediaRecorder.isTypeSupported` is
+      false for `audio/wav`, `audio/wave`, `audio/x-wav`, `audio/pcm`,
+      `audio/x-pcm`, `audio/L16`, `audio/raw` and `audio/flac`; only
+      `audio/webm` and `audio/mp4` are true. Note the trap: `audio/webm;codecs=pcm`
+      *is* supported and does record, so a check that stops at
+      `isTypeSupported` concludes PCM is available. It is not — the bytes begin
+      `1a 45 df a3`, the EBML magic, so it is PCM inside a WebM container, and
+      the sizes say float32 **stereo** (96175 bytes per 250ms against 96000
+      expected at 48kHz; int16 mono would be 24000).
+    - **A `timeslice` chunk is not independently decodable.** Recording at 250ms
+      and calling `decodeAudioData` on each chunk alone: every chunk after the
+      first throws `EncodingError`, and only the whole sequence joined decodes.
+      In one run the container header split so badly that chunk 0 was a single
+      byte (`1a`) and chunk 1 began `45 df a3`. Forwarding these frame by frame
+      sends Transcribe a stream of fragments.
+    - **There is no sample-rate control.** `sampleRate` is not a MediaRecorder
+      property and is not in the `MediaRecorderOptions` IDL at all — passing it
+      to the constructor is silently ignored. The rate follows the source track,
+      and feeding it a 16kHz source does not help either: that recording decoded
+      back at 48000, because Opus always encodes at 48kHz.
+  - The path that does work, and what each step is for:
+    - `getUserMedia({ audio: { channelCount: 1, ... } })` for the microphone.
+    - `new AudioContext({ sampleRate: 16000 })` — the browser's own resampler,
+      which is what makes 16kHz reachable at all when the device captures at
+      48kHz. Verified to honour the request and to read the rate back on
+      `AudioContext.sampleRate`.
+    - An `AudioWorkletNode` whose processor posts each 128-sample render quantum
+      to the main thread. **Keep the processor a pass-through**: it copies the
+      input channel and posts it, and nothing else. Every decision worth testing
+      — conversion, framing, format comparison — belongs on the main thread,
+      because `AudioWorkletProcessor` does not exist in jsdom and code inside it
+      cannot be reached by this task's tests.
+    - `floatToInt16LE()` from `packages/audio-wire`, then `PcmFramer` from the
+      same package for the 8000-byte frames. Web Audio works in normalised
+      floats; the conversion writes little-endian explicitly rather than
+      inheriting host byte order, so the browser needs no `isLittleEndian()`
+      guard.
+  - **The wire format is `packages/audio-wire`, not a second copy.** The
+    constants, `PcmFramer` and the `AudioCaptureError` vocabulary were extracted
+    from `apps/mobile` in this task, before the browser hook was written. Both
+    apps import them; neither defines them.
+  - **The two-stage rate check from TASK-022 applies here, one layer over.** The
+    comparison runs before the socket is opened and it runs twice: once against
+    `AudioContext.sampleRate` after construction, and once against the rate and
+    channel count the first worklet message reports, which is the audio that
+    would really be sent. Until both pass there is no socket and no byte has
+    left the browser. Same terminal `SAMPLE_RATE_UNSUPPORTED` /
+    `CHANNELS_UNSUPPORTED` states, same discriminated union, returned and never
+    thrown.
   - **The session JWT goes in the subprotocol list, not a header.** The native
     `WebSocket` constructor accepts a URL and subprotocols and nothing else, so
     open the socket as `new WebSocket(url, ["medauth.session.v1",
@@ -1663,7 +1728,32 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - A rejected token fails the upgrade rather than surfacing as an `onclose`
     with code 4401 — the same section says why — so treat a connection that
     never opens as an auth failure and re-mint the session before retrying.
-  - **Test:** jsdom mock of MediaRecorder
+  - Streams to `${VITE_AUDIO_WS_URL}/ws/audio/{session_id}` as **binary frames**.
+    A text frame gets the connection closed with 1003 by TASK-020's server.
+    `VITE_AUDIO_WS_URL` already exists in `.env.example` from the TASK-001
+    scaffold — an origin with no path; the hook appends the rest. Do not add a
+    second variable for the same thing.
+  - Audio buffered while the socket is still connecting is flushed on open, up
+    to `MAX_PENDING_BYTES`, after which capture fails with
+    `SEND_BACKLOG_EXCEEDED` — the shared cap, for the reasons recorded against
+    it in `packages/audio-wire`.
+  - Stops the tracks, closes the socket and drops the pending buffer on session
+    end and on unmount. Nothing is written to disk on any path; the token is
+    never logged and never placed in the URL.
+  - **Surfacing any of this to a provider is TASK-070's job.** This hook cannot
+    block a "start visit" button that does not exist yet — the web session UI is
+    TASK-070, the same relationship TASK-022 has with TASK-025. A caller that
+    ignores the `error` state gets no audio and no socket, which fails closed.
+  - **Test:** unit-test the hook in jsdom with `getUserMedia` and `AudioContext`
+    mocked — `AudioWorklet` does not exist in jsdom, so the fake `AudioContext`
+    exposes an `audioWorklet.addModule` that resolves and a node whose `port`
+    the test drives directly. Assert exactly 8000-byte binary frames are sent,
+    that a partial tail is not sent early, that a context rate disagreeing with
+    the request fails before any socket is opened, that permission denial is
+    surfaced, and that stop clears the buffer.
+  - **Test:** the float-to-int16 conversion and the framing are tested as pure
+    functions in `packages/audio-wire`, not through the hook. They are the part
+    most likely to be wrong in a way a test can catch, and they need no DOM.
 
 - [ ] **TASK-024:** Policy query parameters — encounter state and procedure codes
   - Prerequisite: TASK-021 (defines the seam this task fills in), TASK-005
@@ -1747,8 +1837,8 @@ The insurance policy RAG is the technical core. Build and validate before other 
     refusing to start — because the transcript, the SOAP note and every nudge
     that should have fired are all silently absent.
   - **Three of the error codes need distinct handling, not one shared message.**
-    The full set is in `apps/mobile/src/audio/errors.ts`; these are the ones
-    where the right response to the provider differs:
+    The full set is in `packages/audio-wire`; these are the ones where the
+    right response to the provider differs:
     - `PERMISSION_DENIED` — a settings problem. Offer the route to fix it.
     - `SAMPLE_RATE_UNSUPPORTED` / `CHANNELS_UNSUPPORTED` — the device cannot
       capture what Transcribe needs. Not retryable on this hardware; say so
