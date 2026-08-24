@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 
 import jwt
@@ -14,6 +15,7 @@ from track_a_clinical.api.dependencies import get_redis
 from track_a_clinical.api.sessions import (
     ERROR_CODE_SESSION_NOT_FOUND,
     ERROR_CODE_SIGNAL_NOT_PUBLISHED,
+    SESSIONS_STARTED_CHANNEL,
     session_ended_channel,
 )
 from track_a_clinical.config import JWT_ALGORITHM
@@ -80,6 +82,29 @@ async def test_start_audits_the_phi_access(
     assert call["encounter_id"] is not None
     assert str(call["session_id"]) == response.json()["data"]["session_id"]
     assert str(call["provider_id"]) == START_BODY["provider_id"]
+
+
+async def test_start_announces_the_new_session(client: AsyncClient, fake_redis: FakeRedis) -> None:
+    """TASK-021's consumer cannot subscribe to a session it has not been told about."""
+    response = await client.post("/sessions/start", json=START_BODY)
+
+    (channel, payload) = fake_redis.published[0]
+    assert channel == SESSIONS_STARTED_CHANNEL
+    # The channel is fixed, so unlike the end signal the id has to be in the body.
+    assert json.loads(payload) == {"session_id": response.json()["data"]["session_id"]}
+
+
+async def test_start_reports_a_failed_announcement_instead_of_swallowing_it(
+    client: AsyncClient,
+) -> None:
+    """A session nobody is listening to would raise no nudges and look normal."""
+    failing = FakeRedis(fail=True)
+    client._transport.app.dependency_overrides[get_redis] = lambda: failing  # type: ignore[attr-defined]
+
+    response = await client.post("/sessions/start", json=START_BODY)
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == ERROR_CODE_SIGNAL_NOT_PUBLISHED
 
 
 async def test_validation_failure_uses_the_error_envelope(client: AsyncClient) -> None:

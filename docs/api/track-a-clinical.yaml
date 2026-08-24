@@ -32,7 +32,9 @@ paths:
       description: >-
         Creates an `encounters` row with `status='active'` and mints the session
         JWT. `session_id` is generated server-side and is never accepted from the
-        client. The encounter row and its `audit_log` row commit together.
+        client. The encounter row and its `audit_log` row commit together. The
+        new `session_id` is then published to the `sessions:started` channel,
+        which is how per-session transcript consumers learn to subscribe.
       requestBody:
         required: true
         content:
@@ -48,6 +50,16 @@ paths:
                 $ref: '#/components/schemas/StartSessionResponse'
         '422':
           description: The request body or path parameter is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: >-
+            The session was created but its start signal could not be published.
+            The encounter exists and is `active`, but no transcript consumer
+            knows about it, so the client should discard the session and start a
+            new one rather than proceeding unwatched.
           content:
             application/json:
               schema:

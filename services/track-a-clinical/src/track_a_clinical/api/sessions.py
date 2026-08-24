@@ -1,10 +1,21 @@
 """Session lifecycle endpoints — the issuer every real-time service depends on.
 
-``POST /sessions/start`` creates the ``encounters`` row and mints the session JWT
-that ``audio-ingestion`` (TASK-020) and ``nudge-service`` (TASK-041) validate.
+``POST /sessions/start`` creates the ``encounters`` row, mints the session JWT
+that ``audio-ingestion`` (TASK-020) and ``nudge-service`` (TASK-041) validate,
+and announces the new session on ``sessions:started``.
 ``POST /sessions/{session_id}/end`` closes the encounter and publishes the
 ``session:ended:{session_id}`` signal that SOAP generation (TASK-030) and prior
 auth bundle assembly (TASK-060) both subscribe to.
+
+**Why start is announced at all** (added in TASK-021): a service that consumes
+``transcription:{session_id}`` has to learn the session id from somewhere before
+it can subscribe to that exact channel. The alternative was to pattern-subscribe
+``transcription:*``, which puts a wildcard on the one channel family carrying
+PHI and makes every consumer see every session. So this endpoint publishes the
+id on a single fixed channel and consumers subscribe per session. It is
+published *before* the response returns, and a client cannot open the audio
+socket until it has the JWT from that response, so a consumer is always
+subscribed before the first transcript segment can exist.
 
 Both rows and both signals key off ``session_id``, not the encounter primary key:
 that is the identifier already travelling through every Redis channel name in
@@ -13,9 +24,10 @@ CLAUDE.md's canonical list.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
-from typing import Annotated
+from typing import Annotated, Final
 
 import sqlalchemy as sa
 from fastapi import APIRouter, Depends, Request, status
@@ -56,6 +68,21 @@ SESSION_ERROR_DESCRIPTIONS = {
     ),
 }
 
+#: 503 means something different on each of these two routes, so the wording is
+#: per route rather than shared — a spec that says "the session ended" on the
+#: start endpoint would be actively misleading about what happened.
+START_SESSION_ERROR_DESCRIPTIONS = {
+    status.HTTP_503_SERVICE_UNAVAILABLE: (
+        "The session was created but its start signal could not be published."
+    ),
+}
+
+
+#: The one fixed channel in CLAUDE.md's Redis key list. Fixed rather than
+#: per-session because a consumer that does not yet know a session exists cannot
+#: name its channel; the id travels in the payload instead of the channel name.
+SESSIONS_STARTED_CHANNEL: Final = "sessions:started"
+
 
 def session_ended_channel(session_id: uuid.UUID) -> str:
     """Return the Redis channel for a session's end signal."""
@@ -75,13 +102,15 @@ def _client_ip(request: Request) -> str | None:
     response_description="The new session's id and its short-lived JWT.",
     responses=error_responses(
         status.HTTP_422_UNPROCESSABLE_CONTENT,
-        descriptions=SESSION_ERROR_DESCRIPTIONS,
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        descriptions=START_SESSION_ERROR_DESCRIPTIONS,
     ),
 )
 async def start_session(
     body: StartSessionRequest,
     request: Request,
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    redis: Annotated[Redis, Depends(get_redis)],
 ) -> ApiResponse[StartSessionData]:
     """Open an encounter and mint its session JWT.
 
@@ -90,8 +119,15 @@ async def start_session(
     (900 by default). The client passes that token to the audio and nudge
     WebSockets; this is the only endpoint that issues one.
 
+    Also publishes the new ``session_id`` to ``sessions:started``, which is how
+    ``track-b-rag``'s transcript consumer (TASK-021) learns to subscribe to
+    ``transcription:{session_id}``.
+
     Returns 201 with the session id and token. The encounter row and its audit
-    record commit together — neither exists without the other.
+    record commit together — neither exists without the other. Returns 503 when
+    the encounter was created but the start signal could not be published; see
+    :func:`_publish_session_started` for why that is not downgraded to a log
+    line.
     """
     # Minted before the row is written so a misconfigured signing key fails the
     # request outright rather than leaving an encounter nothing can connect to.
@@ -124,6 +160,7 @@ async def start_session(
         user_agent=request.headers.get("user-agent"),
     )
     await session.commit()
+    await _publish_session_started(redis, session_id)
 
     return ApiResponse[StartSessionData](data=StartSessionData(session_id=session_id, jwt=token))
 
@@ -201,6 +238,37 @@ async def end_session(
             already_ended=already_ended,
         )
     )
+
+
+async def _publish_session_started(redis: Redis, session_id: uuid.UUID) -> None:
+    """Announce the new session, or fail the request loudly.
+
+    The payload is ``{"session_id": ...}`` rather than empty, because the
+    channel is fixed and so carries no id of its own. That is the one structural
+    difference from the end signal.
+
+    A failure here is a 503 for the same reason ending one is: a consumer that
+    never hears about this session never subscribes to its transcript channel,
+    so no procedure keyword is ever detected and no nudge is ever raised for the
+    whole encounter. The provider would see a working visit with no alerts,
+    which is indistinguishable from a visit with nothing to alert about —
+    exactly the "silence reads as no authorization concern" failure this
+    pipeline is built to avoid. Better to refuse the session and let the client
+    retry than to run one that is quietly half-wired.
+
+    The cost of that choice is a committed encounter row nobody uses, since the
+    retry mints a new session. An orphaned ``active`` encounter is inert; a
+    silently unwatched live one is not.
+    """
+    try:
+        await redis.publish(SESSIONS_STARTED_CHANNEL, json.dumps({"session_id": str(session_id)}))
+    except RedisError:
+        logger.exception("Failed to publish session-started signal for %s", session_id)
+        raise ApiHTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            ERROR_CODE_SIGNAL_NOT_PUBLISHED,
+            f"Session {session_id} was created but its start signal could not be published",
+        ) from None
 
 
 async def _publish_session_ended(redis: Redis, session_id: uuid.UUID) -> None:
