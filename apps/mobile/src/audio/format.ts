@@ -36,10 +36,24 @@ export const CHUNK_BYTES =
   (SAMPLE_RATE_HZ * BYTES_PER_SAMPLE * CHANNELS * CHUNK_DURATION_MS) / 1000;
 
 /**
- * How much audio may pile up while the WebSocket is still connecting, five
+ * How much audio may pile up while the WebSocket is still connecting: five
  * seconds' worth. Past this the connection is not coming, and continuing to
  * accumulate would trade a visible failure for unbounded memory growth holding
  * PHI. Failing is the better half of that trade.
+ *
+ * **Five seconds is a round-number default, not a measured value.** Nothing has
+ * yet observed real handshake times from a device — there is no mobile session
+ * screen to produce them until TASK-025 — so it was picked to sit clearly
+ * between two bounds: long enough that no healthy handshake on any network
+ * could reach it, short enough that a provider is told the encounter is not
+ * being recorded while the visit is still starting rather than minutes in. It
+ * is safe to change once real connect-time data exists; treat it as a
+ * placeholder for that measurement rather than as a tuned figure.
+ *
+ * Note it is a byte cap, not a timer. Nothing counts seconds — the bound is
+ * reached when this many bytes are held, which is five seconds only because the
+ * capture format is fixed above. Change the format and the wall-clock meaning
+ * changes with it.
  */
 export const MAX_PENDING_BYTES = SAMPLE_RATE_HZ * BYTES_PER_SAMPLE * CHANNELS * 5;
 

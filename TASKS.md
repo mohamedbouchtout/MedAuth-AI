@@ -1622,9 +1622,20 @@ The insurance policy RAG is the technical core. Build and validate before other 
       native layer is free to reuse the same `ArrayBuffer` on the next capture,
       and retaining it would let a later capture overwrite audio still queued.
     - Audio captured while the socket is still connecting is held, then flushed
-      on open — but only up to five seconds. Past that the connection is not
-      coming, and the choice is between a visible failure and unbounded memory
-      growth holding PHI.
+      on open — but only up to five seconds, after which capture fails with
+      `SEND_BACKLOG_EXCEEDED`. Past that the connection is not coming, and the
+      choice is between a visible failure and unbounded memory growth holding
+      PHI. It has its own error code rather than sharing `STREAM_FAILED`
+      because nothing was transmitted and the encounter never started, which is
+      a different thing to tell a provider than a working connection that
+      dropped partway through.
+      **Five seconds is a round-number default, not a measured value** — no
+      device handshake times have been observed, because no screen exists to
+      produce them. It is bounded to be longer than any healthy handshake and
+      shorter than a provider waiting minutes to learn nothing is recording.
+      Safe to change once real connect-time data exists. It is also a byte cap
+      rather than a timer, so its wall-clock meaning is a consequence of the
+      capture format being fixed.
     - `App.tsx` is a placeholder on purpose. Wiring a half-built session screen
       here would be the exact failure TASK-025 exists to prevent: a screen that
       looks like it is recording when it is not.
@@ -1729,13 +1740,26 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - Start visit: `POST /sessions/start` (TASK-006, returns **201** with
     `{session_id, jwt}`), then hand both to `useAudioCapture`.
   - **The screen must not reach an "in progress" state while the capture hook
-    is in `error`.** This is the visible half of TASK-022's contract: a
-    `SAMPLE_RATE_UNSUPPORTED` or permission-denied result blocks the visit from
-    starting and is shown to the provider as an actionable message naming the
-    device problem. A provider who believes an encounter is being recorded
+    is in `error`.** This is the visible half of TASK-022's contract: any error
+    state blocks the visit from starting and is shown to the provider as an
+    actionable message. A provider who believes an encounter is being recorded
     when it is not is the worst outcome this screen can produce — worse than
     refusing to start — because the transcript, the SOAP note and every nudge
     that should have fired are all silently absent.
+  - **Three of the error codes need distinct handling, not one shared message.**
+    The full set is in `apps/mobile/src/audio/errors.ts`; these are the ones
+    where the right response to the provider differs:
+    - `PERMISSION_DENIED` — a settings problem. Offer the route to fix it.
+    - `SAMPLE_RATE_UNSUPPORTED` / `CHANNELS_UNSUPPORTED` — the device cannot
+      capture what Transcribe needs. Not retryable on this hardware; say so
+      rather than inviting a retry loop.
+    - `AUTH_REJECTED` — the session token was refused, so re-mint the session
+      (`POST /sessions/start`) before retrying rather than reusing the old one.
+    - `SEND_BACKLOG_EXCEEDED` — the socket never opened and buffered audio hit
+      its cap. Nothing was recorded and the encounter never started, so a plain
+      retry is the right offer. Distinct from `STREAM_FAILED`, which means a
+      working connection dropped partway through and part of the encounter did
+      reach the server.
   - End visit: `POST /sessions/{session_id}/end`, stop capture, clear buffers.
   - The JWT lives `SESSION_TTL_SECONDS` (15 min) and a visit can outlast it;
     decide deliberately whether this screen re-mints or the encounter ends, and
