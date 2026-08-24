@@ -39,6 +39,8 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "langchain*"
         update-types: ["version-update:semver-major"]
+      - dependency-name: "sentence-transformers*"
+        update-types: ["version-update:semver-major"]
 
   # -------------------------------------------------------------------------
   # JavaScript — frontends only (all backend services are Python)
