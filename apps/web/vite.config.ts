@@ -14,6 +14,16 @@ import { defineConfig } from 'vitest/config';
  */
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  build: {
+    // Never inline the AudioWorklet processor. It is imported with `?url` and
+    // is small enough to fall under the default 4KB inline limit, which turns
+    // it into a `data:text/javascript;base64,...` string — verified by
+    // inspecting a production bundle. `audioWorklet.addModule()` would then be
+    // fetching a data: URL, which any `script-src 'self'` content security
+    // policy blocks, and this app is one that should have one. Emitting it as a
+    // hashed asset keeps it a same-origin script.
+    assetsInlineLimit: (filePath: string) => (filePath.endsWith('.js') ? false : undefined),
+  },
   test: {
     environment: 'jsdom',
     setupFiles: ['./tests/setup.ts'],

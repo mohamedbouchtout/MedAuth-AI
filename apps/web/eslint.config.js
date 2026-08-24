@@ -20,10 +20,15 @@ export default tseslint.config(
   {
     // The AudioWorklet processor runs in AudioWorkletGlobalScope, which has
     // neither `window` nor the DOM. Plain JS on purpose — see the comment at
-    // the top of the file.
+    // the top of the file. `sampleRate` is a global of that scope and is not in
+    // eslint's built-in list, unlike the other two.
     files: ['src/audio/pcm-capture-processor.js'],
     languageOptions: {
-      globals: { AudioWorkletProcessor: 'readonly', registerProcessor: 'readonly' },
+      globals: {
+        AudioWorkletProcessor: 'readonly',
+        registerProcessor: 'readonly',
+        sampleRate: 'readonly',
+      },
     },
   },
 );

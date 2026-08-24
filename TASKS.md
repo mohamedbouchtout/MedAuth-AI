@@ -1651,7 +1651,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
       no-opping the moment `apps/mobile/package.json` landed. Verified locally
       from a clean `npm ci`: lint, `tsc --noEmit` and 49 tests all pass.
 
-- [ ] **TASK-023:** Browser audio capture (React Web)
+- [x] **TASK-023:** Browser audio capture (React Web)
   - Prerequisite: TASK-020 (the WebSocket server this streams to — its wire
     contract is fixed and this task conforms to it), TASK-006 (mints the session
     JWT this task presents; this task neither mints nor refreshes it)
@@ -1754,6 +1754,59 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **Test:** the float-to-int16 conversion and the framing are tested as pure
     functions in `packages/audio-wire`, not through the hook. They are the part
     most likely to be wrong in a way a test can catch, and they need no DOM.
+  - Built (27 tests, 97% coverage; the shared package adds 27 more). Decisions
+    worth knowing before touching this:
+    - **A worklet node with `numberOfOutputs: 0` really is pulled.** Verified in
+      Chrome against an oscillator source: 188 render quanta arrived in a second
+      of audio, each 128 samples, with the worklet's own `sampleRate` global
+      reporting 16000. This mattered enough to check because the usual fix for a
+      node that is not pulled — connecting it to `context.destination` — would
+      play the encounter back through the room's speakers during the visit.
+    - **The processor must not be inlined, and Vite inlines it by default.** It
+      is imported with `?url`, it is under 2KB, and the default
+      `assetsInlineLimit` is 4KB — so a production bundle carried it as
+      `data:text/javascript;base64,...` and `addModule()` was fetching a data
+      URL. Any `script-src 'self'` content security policy blocks that, and this
+      app should have one. `build.assetsInlineLimit` now refuses to inline `.js`,
+      which emits it as a hashed same-origin asset instead. Confirmed by reading
+      the built bundle, not by assuming.
+    - **`MediaStreamTrackProcessor` would have avoided the worklet entirely** —
+      it hands `AudioData` frames to the main thread through a `ReadableStream`,
+      with no second file and no separate global scope. It is Chrome-only, and
+      this is a screen providers will open in whatever browser their practice
+      standardises on, so it is not worth the portability.
+    - `getUserMedia` rejections are split: `NotAllowedError` and `SecurityError`
+      become `PERMISSION_DENIED`, everything else `CAPTURE_FAILED`. The
+      distinction reaches a person — TASK-070 offers a route into browser
+      settings for the first and a plain retry for the second. The rejection's
+      own message is never surfaced; it can name device paths.
+    - `start()` awaits twice — `getUserMedia`, then `addModule` — so a provider
+      can end the visit mid-startup. The graph is not built if the hook stopped
+      while either was in flight; otherwise a live microphone would be left
+      attached to a hook that believes it has stopped. There is a test for it.
+    - Teardown calls `stop()` on every track rather than only dropping the
+      stream. An un-stopped track leaves the browser's recording indicator lit
+      after the encounter ends, which tells a provider the opposite of the truth.
+    - `ENDIANNESS_UNSUPPORTED` cannot occur on this platform. The browser writes
+      its own samples through `DataView.setInt16(..., true)`, so byte order is an
+      argument rather than a property of the host. The code stays in the shared
+      vocabulary because mobile can still emit it.
+    - **jsdom is pinned to 29, not 30.** Version 30 requires Node >= 22.22 and
+      `ci.yml` runs Node 20, so 30 resolves on a laptop and fails in CI. Worth
+      revisiting with the Node version itself rather than in isolation.
+    - React 19, not the React 18 CLAUDE.md named before this app existed;
+      `apps/mobile` is already on 19.2.x through Expo SDK 57. Zustand is listed
+      in CLAUDE.md for this app but is not installed — TASK-070 brings it with
+      the first state worth keeping. Tailwind is v4, configured through
+      `@tailwindcss/vite` with no `tailwind.config.js`.
+    - `App.tsx` is a placeholder on purpose, for the same reason TASK-022's is:
+      a screen that looks like it is recording when it is not is the failure
+      TASK-070 exists to prevent.
+    - CI needed no change for `apps/web`: the `web` job already existed and
+      stopped no-opping the moment `apps/web/package.json` landed. The
+      `audio-wire` job is new and shipped with the package. Verified locally
+      from a clean `npm ci`: lint, `tsc --noEmit`, tests and a production build
+      pass for `apps/web`, `apps/mobile` and `packages/audio-wire`.
 
 - [ ] **TASK-024:** Policy query parameters — encounter state and procedure codes
   - Prerequisite: TASK-021 (defines the seam this task fills in), TASK-005

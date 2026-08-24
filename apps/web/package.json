@@ -13,6 +13,7 @@
     "test": "vitest run --coverage"
   },
   "dependencies": {
+    "@medauth/audio-wire": "*",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
