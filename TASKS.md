@@ -1275,7 +1275,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
 
 ## Phase 2 — Audio Pipeline
 
-- [ ] **TASK-020:** Audio ingestion WebSocket server
+- [x] **TASK-020:** Audio ingestion WebSocket server
   - Prerequisite: TASK-006 (session lifecycle) — this task validates the JWT
     that TASK-006 mints, it does not mint or manage sessions itself
   - Service: `services/audio-ingestion`
@@ -1300,6 +1300,75 @@ The insurance policy RAG is the technical core. Build and validate before other 
     transcript events in Redis
   - **Test:** connect with an expired or malformed JWT, verify connection closes
     with 4401 and no Transcribe stream is opened
+  - Built (112 tests, 100% coverage). Decisions worth knowing before touching this:
+    - **`amazon-transcribe` cannot do Transcribe Medical, and this service
+      patches it so it can.** The official AWS streaming SDK, pinned at 0.6.4,
+      implements `StartStreamTranscription` only: there is no
+      `start_medical_stream_transcription`, no `specialty` or `type` anywhere in
+      the package, and its serializer writes `/stream-transcription` as a
+      literal. `boto3` is not a fallback — it has no streaming transcription API
+      at all. So `src/transcribe_medical.py` subclasses the SDK's serializer and
+      client to reach the medical operation, which differs only by a request URI
+      and two headers. The response side needed nothing: the medical stream
+      emits the same `:event-type: TranscriptEvent` framing and the SDK's parser
+      reads every field with a tolerant `.get()`.
+      This is a patch of internals, not configuration, so: the dependency is
+      pinned `==0.6.4` rather than given a floor, and
+      `tests/unit/test_transcribe_medical.py` asserts the *serialized request*
+      rather than that the subclass exists. The failure mode being guarded
+      against is silent — an override that stopped taking effect would still
+      transcribe, just with the general model, quietly losing the clinical
+      vocabulary TASK-021 and TASK-030 depend on. Treat a Dependabot bump here
+      as a change to review.
+    - **The JWT arrives by either carrier**, header or `Sec-WebSocket-Protocol`
+      — see CLAUDE.md, "How the JWT reaches a WebSocket endpoint", which is
+      where the mechanism is defined rather than here, because TASK-041 and
+      TASK-023 both need it.
+    - **4401 cannot reach a browser, and that is the right trade.** Validation
+      happens before the handshake is accepted, so there is no WebSocket frame
+      to carry a close code in and a real server answers the upgrade with an
+      HTTP status instead. The 4401 is what the application emits and what an
+      ASGI-level test observes. Accepting an unauthenticated handshake purely so
+      the rejection reads nicely would be worse.
+    - **Only stabilized segments are published.** Transcribe revises a partial
+      result repeatedly under one `result_id` before finalising it. Forwarding
+      those would multiply bus traffic and make TASK-021 fire the same procedure
+      keyword over and over as one sentence is re-transcribed — one order
+      becoming a stream of duplicate nudges. `is_partial` is in the payload, so
+      a later task wanting earlier signal changes the publisher and not the
+      message shape.
+    - One audit row per accepted connection, not per segment: a ten-minute
+      encounter is one act of access by one provider. A refused connection
+      writes none — no PHI was reached — and logs at WARNING instead. The write
+      goes on hipaa-logger's own pool rather than joining a transaction, because
+      this service owns no tables and holds no database session.
+    - `GET /health` reports Redis only. Transcribe is deliberately not probed:
+      opening a streaming transcription per probe interval would bill for it and
+      would report on a credential path rather than on this process's readiness.
+    - **The integration suite fakes transcription too, and this is a real gap.**
+      Transcribe Medical has no local emulator and moto does not implement the
+      HTTP/2 event-stream protocol its streaming API uses — moto's `transcribe`
+      support is batch jobs only. A live test would need real AWS credentials,
+      which CI deliberately holds none of. So nothing in this repository proves
+      an actual medical stream is accepted by AWS; the serialized-request
+      assertions are the closest guard. This is *not* an env-gated test, because
+      a gate with no scheduled run that opens it is a deletion — if the live
+      check is ever wanted, it needs credentials and a
+      `nightly-live-checks.yml` job in the same change.
+    - Assertions in the integration suite happen while the socket is still open.
+      The synchronous `TestClient` cancels the application task as soon as the
+      WebSocket context exits, so anything the service does after the disconnect
+      — including opening its first real Redis connection — loses that race.
+    - The service keeps its bare `src/` package rather than being renamed the
+      way TASK-010 renamed track-b-rag. Nothing imports it; it communicates by
+      publishing to Redis. The task that first needs to import from here is the
+      task that should rename it.
+    - New environment variables: `TRANSCRIBE_MEDICAL_SAMPLE_RATE_HZ` and
+      `TRANSCRIBE_MEDICAL_MEDIA_ENCODING`, both in `.env.example`. They must
+      match what TASK-022 and TASK-023 capture — Transcribe answers a sample
+      rate that disagrees with the audio by hanging, not by erroring.
+    - CI needed no change: `audio-ingestion` was already in `all_services`, and
+      the suite needs only the Redis that `docker compose` already starts.
 
 - [ ] **TASK-021:** Transcription event fan-out
   - Prerequisite: TASK-020 (publishes the events this task consumes), TASK-006
