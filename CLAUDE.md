@@ -35,6 +35,7 @@ medauth-ai/
 │   ├── api-envelope/     # Shared HTTP response envelope + FastAPI error handlers
 │   ├── hipaa-logger/     # Shared audit logging — every service imports this
 │   ├── fhir-types/       # Shared FHIR R4 type definitions (Python + TypeScript)
+│   ├── audio-wire/       # Encounter-audio wire format — both frontends (TypeScript)
 │   └── crypto-utils/     # AES-256 helpers used across services
 ├── infrastructure/
 │   ├── terraform/        # AWS infrastructure as code
@@ -71,12 +72,21 @@ medauth-ai/
   consistent tooling, testing, and deployment patterns.
 
 ### Frontend (apps/web)
-- **Framework:** React 18 + TypeScript
+- **Framework:** React 19 + TypeScript. Earlier drafts of this file said React
+  18, written before `apps/web` was scaffolded; TASK-023 scaffolded it on 19
+  because `apps/mobile` is already on 19.2.x through Expo SDK 57, and two React
+  majors in one npm workspace root is a cost with nothing to buy — there was no
+  existing web code to migrate.
 - **Build:** Vite
 - **Styling:** Tailwind CSS
-- **State:** Zustand
+- **State:** Zustand — not installed until a task has state to keep in it.
 - **FHIR:** fhirclient.js for SMART on FHIR OAuth flow
 - **WebSocket:** native WebSocket API (no socket.io)
+- **Audio:** `getUserMedia` → `AudioContext({ sampleRate: 16000 })` →
+  `AudioWorkletNode`, with the float-to-int16 conversion and 250ms framing in
+  `packages/audio-wire`. **Not MediaRecorder**, which cannot emit raw PCM at
+  all, offers no sample-rate control, and whose `timeslice` chunks are not
+  independently decodable — measured, see TASK-023.
 - **Testing:** Vitest + React Testing Library
 
 ### Frontend (apps/mobile)
@@ -830,6 +840,10 @@ Path filter groups (each maps to a test job):
   It is the only package with two languages in one job. The TypeScript side is
   its own npm workspace (see TASK-004) so tsc actually catches drift between
   the Pydantic models and their TS mirrors, not just compiles them in isolation.
+- `audio-wire`: packages/audio-wire/** — TypeScript only, so it runs `tsc
+  --noEmit` and Vitest rather than joining the Python matrix. A change here also
+  sets the `web` and `mobile` filters, because the package ships source that
+  both apps compile into themselves rather than a built artifact.
 - `track-b-rag`: services/track-b-rag/** or packages/**
 - `track-a-clinical`: services/track-a-clinical/** or packages/**
 - `audio-ingestion`: services/audio-ingestion/** or packages/**
