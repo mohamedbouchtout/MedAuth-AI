@@ -284,7 +284,15 @@ otherwise has no issuer. Fixed here:
   i.e. 15 min) — not a hardcoded literal. `session_id` is generated server-side
   (UUID), never client-supplied, per the UUID convention in Code Conventions.
   Returns `{session_id, jwt}`. This is what apps/web and apps/mobile call when
-  a provider taps "start visit."
+  a provider taps "start visit." It also publishes the new `session_id` to the
+  fixed `sessions:started` channel — added in TASK-021, because a consumer of
+  `transcription:{session_id}` has to learn a session exists before it can
+  subscribe to that channel by name, and the alternative is a wildcard
+  subscription across the channels carrying speech. The publish precedes the
+  response, so the JWT a client needs to open its audio socket cannot exist
+  before a consumer is listening. A failed publish is a 503 and the session is
+  not usable: an encounter nobody watches raises no nudges and looks exactly
+  like an encounter with nothing to flag.
 - `POST /sessions/{session_id}/end` — sets `encounters.status='completed'`,
   `ended_at=NOW()`, and publishes `session:ended:{session_id}` to Redis
   (empty payload — it's a signal, not a data carrier). This is the trigger
@@ -362,8 +370,22 @@ nudges:{session_id}              pub/sub — nudge events, published by track-b-
                                  (TASK-040), consumed by nudge-service (TASK-041)
 session:ended:{session_id}       pub/sub — empty-payload signal, published by
                                  track-a-clinical (TASK-006), consumed by
-                                 track-a-clinical itself (TASK-030) and
-                                 prior-auth (TASK-060)
+                                 track-a-clinical itself (TASK-030),
+                                 prior-auth (TASK-060) and track-b-rag's
+                                 transcript consumer (TASK-021)
+sessions:started                 pub/sub — the one fixed channel here, carrying
+                                 {"session_id": ...} as its payload because the
+                                 channel name has no room for it. Published by
+                                 track-a-clinical (TASK-006), consumed by
+                                 track-b-rag (TASK-021). It exists so a
+                                 consumer can subscribe to one session's
+                                 transcript channel by name; the alternative
+                                 was pattern-subscribing transcription:*, a
+                                 wildcard over the channel family that carries
+                                 speech. Published before /sessions/start
+                                 returns the JWT, so a consumer is always
+                                 listening before the client can open its
+                                 audio socket.
 rag:{payer}:{plan_type}:{state}:{cpt_code}
                                   cache, 24h TTL — payer-policy fields ONLY
                                   (requires_auth, auth_criteria,
