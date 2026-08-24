@@ -289,6 +289,12 @@ Claude Code should read this before starting any task to understand current stat
     (default 900), not a hardcoded literal. Signed with `JWT_SIGNING_KEY`.
     Response: `{"data": {"session_id": ..., "jwt": ...}, "error": null}` per
     the standard API envelope. All PHI access logged via hipaa-logger.
+    Also publishes the new `session_id` to the fixed `sessions:started`
+    channel — added in TASK-021, which needs it to subscribe to one session's
+    transcript channel by name instead of pattern-subscribing across all of
+    them. Published before the response, so no client can be speaking before a
+    consumer is listening; a failed publish is a 503, because a session nobody
+    watches raises no nudges and looks like a session with nothing to flag.
   - `POST /sessions/{session_id}/end` — sets `status='completed'`, `ended_at`,
     publishes `session:ended:{session_id}` to Redis (empty payload, signal only).
     404 if `session_id` unknown or belongs to a soft-deleted encounter. Idempotent:
@@ -337,6 +343,13 @@ Claude Code should read this before starting any task to understand current stat
       fields, so the spec cannot drift silently. Descriptions are not compared.
     - CI needed no change. `pyyaml` moved into the root dev group for that drift
       test rather than being relied on transitively through moto.
+    - **TASK-021 added the `sessions:started` publish** to `/sessions/start`,
+      and with it a 503 path this endpoint did not previously have. The two
+      publishes are not symmetric and should not be made so: the end signal is
+      empty because its channel names the session, while the start signal
+      carries `{"session_id": ...}` in its payload because its channel is fixed
+      and cannot. The known gap noted above — a broker failure after the commit,
+      with no durable outbox — now applies to both ends of the lifecycle.
 
 ---
 
@@ -1370,26 +1383,109 @@ The insurance policy RAG is the technical core. Build and validate before other 
     - CI needed no change: `audio-ingestion` was already in `all_services`, and
       the suite needs only the Redis that `docker compose` already starts.
 
-- [ ] **TASK-021:** Transcription event fan-out
+- [x] **TASK-021:** Transcription event fan-out
   - Prerequisite: TASK-020 (publishes the events this task consumes), TASK-006
-    (session lifecycle — Track A's consumer needs to know when to start
-    accumulating and when the session it's tracking has ended)
+    (session lifecycle — the start signal this consumer subscribes on, and the
+    end signal it releases on)
   - This is two separate consumers in two separate services, not one shared
     fan-out component — each subscribes to the same Redis channel independently:
     - Track A consumer lives in `services/track-a-clinical` (implemented as
       part of TASK-030) — accumulates full transcript per session_id
     - Track B consumer lives in `services/track-b-rag` — scans for procedure
       order keywords, implemented in this task
-  - Subscribe to `transcription:{session_id}` per CLAUDE.md's Redis key list
+  - Subscribe to `transcription:{session_id}` per CLAUDE.md's Redis key list,
+    **per session and never by pattern**. `transcription:*` would put a wildcard
+    across the one channel family carrying speech and hand every consumer every
+    encounter. Subscribe when `sessions:started` announces a session,
+    unsubscribe on `session:ended:{session_id}` — the same shape as TASK-041's
+    subscribe-on-connect/unsubscribe-on-disconnect, applied to a Redis consumer.
   - Keyword detection list: MRI, CT scan, X-ray, biopsy, injection, arthroscopy,
     echocardiogram, stress test, biologic, chemotherapy, referral to [specialist]
   - On keyword detected: extract surrounding context (the sentence or two
-    containing the keyword), call TASK-012's `/policies/query` endpoint with
-    that context as `clinical_context`, plus the `session_id` and `provider_id`
-    for the active encounter — TASK-012 audits this call as a PHI access and
-    needs both for the audit row
+    containing the keyword) and call TASK-012's `/policies/query` **over HTTP**,
+    with that context as `clinical_context` — not by importing
+    `answer_policy_query()`, even though the route lives in this same service.
+    The `audit_log()` write is in the route layer, and it records that a
+    PHI-carrying request was made for a given provider and session; an
+    in-process call would skip it, and moving the audit into the shared function
+    so both paths were covered would put one compliance obligation in two
+    places. One call path, one audit site.
+  - **Suppress repeat mentions for the life of the encounter.** A procedure
+    named three times in a visit is one order and must raise one nudge. The
+    guard is Redis-backed rather than in-process, so it holds across replicas.
+  - **This task does not produce real policy queries end to end, by design.**
+    `/policies/query` needs `payer`, `plan_type`, `state` and `cpt_code`, and
+    nothing in the system can supply them yet — see **TASK-024**, which is the
+    task that closes it. So this task calls a seam,
+    `policy_dispatch.resolve_and_query_policy()`, whose parameter-resolution
+    half raises and whose HTTP half is real and tested. Placeholder values were
+    considered and rejected: the cache key is
+    `rag:{payer}:{plan_type}:{state}:{cpt_code}`, so a fabricated CPT code would
+    file a real policy answer under a key standing for a different procedure and
+    serve it to the next encounter. Same "build behind a seam and be honest
+    about what is stubbed" pattern as TASK-012's Stage 1 seam and the CRD split.
   - **Test:** publish transcript with "let's order an MRI" — verify policy
     query fires with the correct extracted context
+  - Built (539 unit tests + 5 integration, 100% coverage). Decisions worth
+    knowing before touching this:
+    - **TASK-006 gained a publish.** `POST /sessions/start` now announces the
+      new `session_id` on the fixed `sessions:started` channel, because a
+      per-session subscriber cannot name a channel for a session it has never
+      heard of, and the only alternative was the wildcard this task rules out.
+      The publish precedes the response, and a client cannot open the audio
+      socket without the JWT in that response, so a consumer is always listening
+      before the first segment can exist. A failed publish is a 503: an
+      encounter nobody watches raises no nudges and is indistinguishable from an
+      encounter with nothing to flag.
+    - **`transcript_consumer` is now a `GET /health` flag** on track-b-rag, and
+      it is the only one that is not a network dependency. It earns the place
+      for the reason above — a stopped consumer silently disables nudges for
+      every encounter on that instance, and nothing else in the service notices.
+    - **The dedup key is the canonical keyword today, not the CPT code.** The
+      guard is `SADD procedure_seen:{session_id}`, which reports first-add
+      atomically in one round trip; a read-then-write pair would race, and
+      Transcribe delivers stabilized results in bursts. `claim_procedure()`
+      takes an opaque `procedure_key` so TASK-024 changes the call site and not
+      the guard. Worth knowing: until it does, two keywords that map to one CPT
+      code hold separate claims, because nothing yet knows they are the same
+      procedure.
+    - **A structural failure keeps its claim; a transient one gives it back.**
+      `MissingQueryParameters` means every later mention would fail identically,
+      so the claim stands and the TASK-024 warning is logged once per procedure
+      per session rather than once per segment. A timeout or transport error
+      releases the claim, so a later mention gets another attempt instead of
+      being silently suppressed for the rest of the visit.
+    - **`clinical_context` carries the excerpt and nothing else.** Stage 2's
+      matcher flattens every value in that mapping into a term vocabulary and
+      keeps digits of any length, deliberately, because a criterion's numbers
+      usually *are* the criterion. Putting the segment's `start_time` or
+      `result_id` in would feed stray digits into it and let a criterion reading
+      "6 weeks" match a timestamp.
+    - The excerpt cannot cross segment boundaries: this service holds no
+      transcript, and a keyword in a segment's opening words carries only what
+      preceded it in that segment. Buffering a rolling transcript here would
+      mean two services holding the same PHI in memory for the whole encounter,
+      and TASK-030 already holds one.
+    - Partial results are dropped again here even though TASK-020 already drops
+      them. The publisher's docstring is the contract; this is the belt to it,
+      and it costs one dictionary lookup.
+    - **Known gap: a restart loses the sessions in flight.** The watch set is in
+      process, so a redeploy or a dropped Redis connection mid-encounter leaves
+      those visits unwatched until they end. The consumer logs at WARNING naming
+      the count. Rebuilding it would mean querying `encounters` for active rows
+      on reconnect — real work with its own failure modes, and it belongs with
+      the task that makes this path produce actual queries. TASK-030 makes the
+      same trade for its transcript buffer.
+    - The service keeps its `src/track_b_rag/` package and needs no rename; it
+      was renamed in TASK-010. `audio-ingestion` still publishes into a bare
+      `src/`, and nothing here imports it.
+    - New environment variables: `POLICY_QUERY_BASE_URL` and
+      `POLICY_QUERY_TIMEOUT_SECONDS`, both in `.env.example`. The first is
+      track-b-rag's own address, since the caller and the route are the same
+      process.
+    - CI needed no change: both services were already in `all_services`, and the
+      new integration suite needs only the Redis `docker compose` already
+      starts.
 
 - [ ] **TASK-022:** Mobile audio capture (React Native)
   - App: `apps/mobile`
@@ -1414,6 +1510,69 @@ The insurance policy RAG is the technical core. Build and validate before other 
     with code 4401 — the same section says why — so treat a connection that
     never opens as an auth failure and re-mint the session before retrying.
   - **Test:** jsdom mock of MediaRecorder
+
+- [ ] **TASK-024:** Policy query parameters — encounter state and procedure codes
+  - Prerequisite: TASK-021 (defines the seam this task fills in), TASK-005
+    (owns the `encounters` migration this task adds a column to)
+  - **What this closes.** TASK-021 detects a procedure in a live transcript and
+    can name it, but `POST /policies/query` also needs `payer`, `plan_type`,
+    `state` and `cpt_code`, and nothing supplies them. The gap was found while
+    building TASK-021 and deliberately left open there rather than papered over:
+    `policy_dispatch.resolve_query_parameters()` raises
+    `MissingQueryParameters` on every call, the consumer logs it once per
+    procedure per session, and this task replaces that function body. Nothing
+    else in the consumer changes — that is what the seam is for.
+  - **Nothing here may be approximated.** The Redis cache key is
+    `rag:{payer}:{plan_type}:{state}:{cpt_code}`. A guessed CPT code does not
+    merely return a poor answer for one encounter: it writes a real, cacheable
+    policy answer under a key that stands for a different procedure, and the
+    next encounter matching that key is served it. The failure is silent and
+    crosses patients, which is why this is its own reviewed task.
+  - **Add `state` to `encounters`** via a real Alembic migration in
+    track-a-clinical (`alembic_version_track_a_clinical`, per CLAUDE.md).
+    Two-character USPS code, nullable — it is unknown until an EHR launch
+    supplies it. Note it is *not* the payer's jurisdiction: TASK-013 already
+    normalises CMS's sub-state codes (`DN`/`QN`/`UN`, `NF`/`SF`, `EM`/`WM`,
+    `CNMI`) to a parent state on the ingestion side, and this column is the
+    other half of the comparison, so it must use the same vocabulary.
+  - **Design the keyword-to-CPT mapping.** This is the part with real design
+    content and should not be reduced to a dictionary literal without answering:
+    - Which code, when a keyword covers many? "MRI" alone spans dozens of CPT
+      codes by body part and contrast. The transcript excerpt names the body
+      part often enough to matter, and the excerpt is already extracted.
+    - What happens when the mapping is ambiguous or absent? A wrong code is
+      worse than no query, per the cache reasoning above — so the honest answer
+      is likely to be "do not query, and say so", the same shape TASK-021 uses
+      now.
+    - How does a new specialty extend it? MedAuth targets orthopedics and
+      dermatology first (see the EHR priority order); a hardcoded dict that a
+      dermatologist cannot extend without a deploy is a product problem, not
+      only a code one.
+    - Where does it live? Both track-b-rag and, later, prior-auth need procedure
+      codes. If a second consumer appears, it belongs in `packages/`, on the
+      same reasoning as `packages/payer-vocab`.
+  - **Populate `payer`, `plan_type` and `state` at SMART launch.** The payer
+    columns already exist on `encounters` and are filled from a FHIR `Coverage`
+    resource — that is TASK-051/TASK-052's work, so this task depends on them
+    for a *real* value and should not invent one meanwhile. Resolve the payer
+    through `normalize_payer()` from `packages/payer-vocab`, never a raw
+    display name.
+  - **Move TASK-021's dedup key to the CPT code** once the mapping exists.
+    `claim_procedure()` already takes an opaque `procedure_key`; today the
+    caller passes the canonical keyword, so two keywords naming one code hold
+    separate claims and can raise two nudges for one order.
+  - Consider, and decide deliberately: whether the consumer reading `encounters`
+    to build a query is itself a PHI access needing its own `audit_log()` row,
+    or whether the row `/policies/query` already writes covers it. Reading only
+    the non-patient columns is the reason to say no; Known Constraints #6 says
+    to flag rather than guess, and this is the flag.
+  - **Test:** a transcript naming "MRI of the left knee" produces a query with a
+    knee MRI CPT code, not a generic one
+  - **Test:** a keyword with no confident code mapping produces no query and a
+    log line naming the keyword — never a query with a placeholder code
+  - **Test:** the migration adds `state` and the model round-trips it
+  - **Test:** end to end over Redis, replacing TASK-021's stubbed seam — a
+    published transcript segment produces a real `/policies/query` call
 
 ---
 
