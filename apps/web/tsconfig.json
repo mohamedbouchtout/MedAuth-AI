@@ -1,0 +1,29 @@
+{
+  // Mirrors the strictness of packages/audio-wire and apps/mobile rather than
+  // settling for Vite's template defaults. This app handles a session credential
+  // and a live PHI audio stream; `noUncheckedIndexedAccess` and
+  // `exactOptionalPropertyTypes` are exactly the settings that stop an absent
+  // value being treated as a present one.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["vite/client", "@testing-library/jest-dom"]
+  },
+  "include": ["src", "tests", "vite.config.ts", "eslint.config.js"]
+}
