@@ -1,0 +1,18 @@
+{
+  // Mirrors the strictness of packages/fhir-types/typescript rather than settling
+  // for Expo's defaults. This app handles a session credential and a live PHI
+  // audio stream; `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` are
+  // exactly the settings that stop an absent value being treated as a present one.
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["jest", "react-native"]
+  },
+  "include": ["**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules"]
+}

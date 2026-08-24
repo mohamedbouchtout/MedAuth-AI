@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "MedAuth AI",
+    "slug": "medauth-ai",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "ai.medauth.mobile",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "MedAuth AI records the clinical encounter to generate your note and check prior authorization requirements. Audio is processed in memory and never stored on this device."
+      }
+    },
+    "android": {
+      "package": "ai.medauth.mobile",
+      "permissions": ["android.permission.RECORD_AUDIO"]
+    },
+    "plugins": ["expo-audio"]
+  }
+}
