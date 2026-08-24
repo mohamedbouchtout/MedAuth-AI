@@ -1632,8 +1632,10 @@ version = "0.1.0"
 source = { editable = "services/audio-ingestion" }
 dependencies = [
     { name = "amazon-transcribe" },
+    { name = "anyio" },
     { name = "boto3" },
     { name = "fastapi" },
+    { name = "medauth-api-envelope" },
     { name = "medauth-hipaa-logger" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -1645,9 +1647,11 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "amazon-transcribe", specifier = ">=0.6" },
+    { name = "amazon-transcribe", specifier = "==0.6.4" },
+    { name = "anyio", specifier = ">=4.6" },
     { name = "boto3", specifier = ">=1.43.71" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "medauth-api-envelope", editable = "packages/api-envelope" },
     { name = "medauth-hipaa-logger", editable = "packages/hipaa-logger" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },

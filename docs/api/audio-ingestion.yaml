@@ -1,0 +1,146 @@
+openapi: 3.1.0
+
+# The published contract for services/audio-ingestion.
+#
+# Kept in step with the FastAPI app by
+# services/audio-ingestion/tests/unit/api/test_openapi_contract.py, which fails
+# if a route, method or status code here drifts from the application. Update
+# this file in the same change that adds or alters a route.
+#
+# NOTE: this service's principal surface is a WebSocket, and OpenAPI 3.1 has no
+# way to describe one — there is no `websocket:` operation and no place to put a
+# close code. It is documented in prose under `x-websocket-endpoints` below,
+# which is an extension field rather than something a generator understands.
+# The drift test therefore covers `/health` only; what keeps the WebSocket
+# honest is tests/unit/api/test_websocket.py.
+
+info:
+  title: MedAuth AI — audio-ingestion
+  version: 0.1.0
+  description: >-
+    Streams encounter audio from the clinical apps to AWS Transcribe Medical
+    and publishes transcript segments to Redis for track-a-clinical (TASK-030)
+    and track-b-rag (TASK-021) to consume. Audio is buffered in memory and
+    never written to disk (TASK-020).
+
+servers:
+  - url: http://localhost:8001
+    description: Local development (see the port table in CLAUDE.md)
+
+tags:
+  - name: health
+    description: Readiness of this service's backing dependencies.
+
+x-websocket-endpoints:
+  /ws/audio/{session_id}:
+    summary: Encounter audio in, transcript segments onto the Redis bus.
+    description: >-
+      The client streams 16kHz mono signed 16-bit PCM as binary frames, 250ms
+      per frame. Text frames are not accepted and close the socket with 1003.
+      Transcript segments are published to `transcription:{session_id}`;
+      nothing is returned over the socket itself.
+    authentication: >-
+      A session JWT minted by track-a-clinical's `POST /sessions/start`
+      (TASK-006), carried in EITHER the `Authorization: Bearer <jwt>` header OR
+      as a `medauth.jwt.<jwt>` entry in `Sec-WebSocket-Protocol` alongside
+      `medauth.session.v1`. Either carrier is sufficient. The subprotocol form
+      exists because a browser cannot set a header on the native `WebSocket`
+      constructor, which apps/web is required to use. The server echoes
+      `medauth.session.v1` and never the token entry. See CLAUDE.md, "How the
+      JWT reaches a WebSocket endpoint".
+    validation: >-
+      Signature against `JWT_SIGNING_KEY`, `exp` in the future, and the token's
+      `session_id` claim equal to the path parameter. Checked before the
+      handshake is accepted; no transcription stream is opened for a token that
+      fails.
+    close-codes:
+      4401: >-
+        The session token is missing, malformed, expired, signed with another
+        key, or was minted for a different session. Because the refusal happens
+        before the handshake completes, a browser observes a failed upgrade
+        rather than an onclose carrying this code.
+      1003: The client sent a text frame on a socket that carries audio.
+      1011: Transcription failed, or the client outran the audio buffer.
+    audit: >-
+      One `STREAM_AUDIO` row per accepted connection, written before audio
+      flows. A refused connection writes none — no PHI was reached.
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      operationId: health
+      summary: Service health
+      description: >-
+        Reports whether the Redis bus this service publishes transcripts to is
+        reachable. 200 when it answers, 503 when it does not. The body is the
+        standard envelope in both cases — a 503 carries `data`, not `error`,
+        because the request itself succeeded and the flags are the only
+        diagnostic the endpoint has.
+
+        AWS Transcribe Medical is deliberately not probed: opening a streaming
+        transcription per probe interval would bill for it and would report on
+        a credential path rather than on this process's readiness.
+
+        Unauthenticated and deliberately unaudited: this is what the Kubernetes
+        readiness probe calls, it exposes no patient data, and CLAUDE.md exempts
+        health endpoints from the hipaa-logger requirement.
+      responses:
+        '200':
+          description: Readiness of the Redis bus transcripts are published to.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: At least one dependency is unreachable. The body names which.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+components:
+  schemas:
+    ComponentStatus:
+      type: string
+      enum: [ok, error]
+
+    HealthData:
+      type: object
+      required: [redis]
+      properties:
+        redis:
+          $ref: '#/components/schemas/ComponentStatus'
+          description: >-
+            Whether the Redis bus that transcript segments are published to
+            answers. Fatal rather than advisory here: there is no degraded mode,
+            and a transcript this service cannot publish is one nobody receives.
+
+    HealthResponse:
+      type: object
+      description: The standard envelope, carrying health flags.
+      required: [data, error]
+      properties:
+        data:
+          oneOf:
+            - $ref: '#/components/schemas/HealthData'
+            - type: 'null'
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/Error'
+            - type: 'null'
+
+    Error:
+      type: object
+      description: >-
+        The error half of the envelope. Health never populates it; the shared
+        error handlers do, for routes that fail.
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - validation_error
+            - http_error
+        message:
+          type: string

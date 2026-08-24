@@ -4,9 +4,17 @@ version = "0.1.0"
 description = "WebSocket audio intake, streamed to AWS Transcribe Medical. Audio never touches disk."
 requires-python = ">=3.12"
 dependencies = [
-    "amazon-transcribe>=0.6",
+    # PINNED EXACTLY, ON PURPOSE. src/transcribe_medical.py subclasses this
+    # library's serializer and client to reach StartMedicalStreamTranscription,
+    # which the library itself does not implement — see that module's docstring.
+    # That makes internals we do not own part of our interface, so the version
+    # is not a floor to drift upward from. A Dependabot bump is a change to
+    # review against tests/unit/test_transcribe_medical.py, not a routine one.
+    "amazon-transcribe==0.6.4",
+    "anyio>=4.6",
     "boto3>=1.43.71",
     "fastapi>=0.115",
+    "medauth-api-envelope",
     "medauth-hipaa-logger",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
