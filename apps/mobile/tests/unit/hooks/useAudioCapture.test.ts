@@ -321,7 +321,7 @@ describe('useAudioCapture — chunking', () => {
     expect(socket()?.sent).toHaveLength(1);
   });
 
-  it('fails rather than buffering without bound when the socket never opens', async () => {
+  it('reports SEND_BACKLOG_EXCEEDED, not STREAM_FAILED, when the socket never opens', async () => {
     const { result } = await renderHook(() => useAudioCapture(OPTIONS));
     await act(async () => {
       await result.current.start();
@@ -332,9 +332,12 @@ describe('useAudioCapture — chunking', () => {
       await deliver(buffer({ data: pcm(CHUNK_BYTES) }));
     }
 
+    // Nothing was transmitted and the encounter never started, which is a
+    // different thing to tell a provider than a connection that dropped
+    // partway through — so it does not share STREAM_FAILED's code.
     expect(result.current.state).toMatchObject({
       status: 'error',
-      error: { code: 'STREAM_FAILED' },
+      error: { code: 'SEND_BACKLOG_EXCEEDED' },
     });
   });
 });

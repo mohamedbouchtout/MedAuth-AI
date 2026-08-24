@@ -202,9 +202,9 @@ export function useAudioCapture({
       } catch (error) {
         if (error instanceof PendingAudioOverflow) {
           fail({
-            code: 'STREAM_FAILED',
+            code: 'SEND_BACKLOG_EXCEEDED',
             message:
-              'Audio is being captured faster than it can be sent. The connection was not established.',
+              'The audio connection could not be established. No part of this encounter was recorded.',
           });
           return;
         }

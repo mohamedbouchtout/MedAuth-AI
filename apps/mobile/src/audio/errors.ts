@@ -26,7 +26,16 @@ export type AudioCaptureErrorCode =
    * retrying rather than treating it as a network blip.
    */
   | 'AUTH_REJECTED'
-  /** The socket opened and then failed, or audio outran it while connecting. */
+  /**
+   * The socket never opened and audio piled up past the cap while waiting.
+   *
+   * Distinct from `STREAM_FAILED` on purpose: nothing has been transmitted, the
+   * encounter has not started, and retrying may well work. `STREAM_FAILED`
+   * means a working connection dropped partway through, which is a different
+   * conversation to have with a provider.
+   */
+  | 'SEND_BACKLOG_EXCEEDED'
+  /** A socket that had opened and was carrying audio failed or closed. */
   | 'STREAM_FAILED';
 
 export interface AudioFormatDetail {
