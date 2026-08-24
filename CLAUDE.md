@@ -192,6 +192,8 @@ Bedrock is the only AWS service called during local dev (no local mock available
   history has to stay bisectable.
 - One logical change per commit. A branch that mixes CI changes, docs, and feature
   code should be three commits, not one.
+- Every commit message should have my sign-off at the end co-authered by you right
+  you contributed to the commit.
 
 ```
 feat(hipaa-logger): add audit_log [TASK-002]
