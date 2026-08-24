@@ -11,8 +11,9 @@ The names here are the ones already in ``.env.example`` — ``QDRANT_HOST``,
 ``EMBEDDING_MODEL_NAME``, ``EMBEDDING_DIMENSIONS``, and, added for the query
 endpoint in TASK-012, ``REDIS_URL``, ``AWS_REGION`` and
 ``BEDROCK_MODEL_ID_REASONING``. TASK-015 adds ``CRD_BASE_URL`` and
-``CRD_TIMEOUT_SECONDS``, which are new to ``.env.example`` rather than names
-already sitting there. Every one has a working local-dev default, so the
+``CRD_TIMEOUT_SECONDS``, and TASK-021 adds ``POLICY_QUERY_BASE_URL`` and
+``POLICY_QUERY_TIMEOUT_SECONDS``, all four new to ``.env.example`` rather than
+names already sitting there. Every one has a working local-dev default, so the
 service starts against ``docker compose up`` with no environment set at all.
 
 TASK-012 deliberately introduces no *new* environment variable: the three names
@@ -64,6 +65,21 @@ DEFAULT_CRD_BASE_URL: Final = "http://localhost:8006"
 #: is what a timeout does.
 DEFAULT_CRD_TIMEOUT_SECONDS: Final = 4.0
 
+#: This service's own base URL. The transcript consumer calls
+#: ``POST /policies/query`` over HTTP rather than importing the function behind
+#: it, so that the route layer's ``audit_log()`` write stays the single place a
+#: PHI-carrying policy query is recorded — see
+#: :mod:`track_b_rag.policy_dispatch`. Configurable because the loopback address
+#: differs between a laptop, a pod and a test.
+DEFAULT_POLICY_QUERY_BASE_URL: Final = "http://localhost:8002"
+
+#: Generous next to the CRD tier's four seconds, because this call is the whole
+#: query: a cache miss embeds the question, searches Qdrant and reasons over the
+#: retrieved policy text with Sonnet. It bounds a hung connection rather than
+#: expressing a latency target — a query that takes this long has already missed
+#: the moment it was meant to inform.
+DEFAULT_POLICY_QUERY_TIMEOUT_SECONDS: Final = 15.0
+
 #: Sonnet, because ``/policies/query`` reasons over retrieved policy text rather
 #: than extracting from it — CLAUDE.md's Bedrock Model Assignment table names
 #: this call site explicitly. The default exists so local dev works unset; code
@@ -106,6 +122,14 @@ class Settings(BaseSettings):
     #: unaffected either way, which is what makes the tier safe to turn off.
     crd_base_url: OptionalSecret = DEFAULT_CRD_BASE_URL
     crd_timeout_seconds: float = Field(default=DEFAULT_CRD_TIMEOUT_SECONDS, gt=0)
+
+    #: Where the transcript consumer (TASK-021) sends its policy queries. This
+    #: service's own address: the caller and the route are the same process.
+    policy_query_base_url: str = Field(default=DEFAULT_POLICY_QUERY_BASE_URL, min_length=1)
+    policy_query_timeout_seconds: float = Field(
+        default=DEFAULT_POLICY_QUERY_TIMEOUT_SECONDS,
+        gt=0,
+    )
 
     aws_region: str = Field(default=DEFAULT_AWS_REGION, min_length=1)
     bedrock_model_id_reasoning: str = Field(

@@ -25,6 +25,38 @@ class FakeClient:
         self.closed = True
 
 
+class FakeConsumer:
+    """Stands in for the transcript consumer so startup opens no connection."""
+
+    instances: list[FakeConsumer] = []
+
+    def __init__(self, redis: Any, **_: Any) -> None:
+        self.redis = redis
+        self.started = 0
+        self.stopped = 0
+        FakeConsumer.instances.append(self)
+
+    def start(self) -> None:
+        self.started += 1
+
+    async def stop(self) -> None:
+        self.stopped += 1
+
+
+@pytest.fixture
+def fake_consumer(monkeypatch: pytest.MonkeyPatch) -> Iterator[type[FakeConsumer]]:
+    """Replace the consumer for every test that enters the lifespan.
+
+    Without this, startup would launch the real read loop and it would try to
+    reach Redis on localhost — a unit test must not depend on a broker being up.
+    """
+    FakeConsumer.instances = []
+    monkeypatch.setattr(main, "TranscriptConsumer", FakeConsumer)
+    monkeypatch.setattr(main, "get_redis_client", lambda: object())
+    yield FakeConsumer
+    FakeConsumer.instances = []
+
+
 @pytest.fixture(autouse=True)
 def clean_settings() -> Iterator[None]:
     get_settings.cache_clear()
@@ -102,15 +134,51 @@ async def test_an_unreachable_qdrant_does_not_stop_the_service(
     assert "Could not reach Qdrant" in caplog.text
 
 
-async def test_the_app_starts_and_shuts_down(fake_client: FakeClient) -> None:
+async def test_the_app_starts_and_shuts_down(
+    fake_client: FakeClient, fake_consumer: type[FakeConsumer]
+) -> None:
     async with lifespan(create_app()):
         pass
 
     assert fake_client.ensured == [("insurance_policies", 1024)]
 
 
+async def test_startup_starts_the_transcript_consumer(
+    fake_client: FakeClient, fake_consumer: type[FakeConsumer]
+) -> None:
+    """Nothing else creates it, and without it no encounter raises a nudge."""
+    app = create_app()
+
+    async with lifespan(app):
+        (consumer,) = fake_consumer.instances
+        assert consumer.started == 1
+        assert app.state.transcript_consumer is consumer
+
+
+async def test_shutdown_stops_the_consumer_before_closing_redis(
+    fake_client: FakeClient, fake_consumer: type[FakeConsumer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It holds a pub/sub connection on that client; the order is not incidental."""
+    order: list[str] = []
+
+    class Recording(FakeConsumer):
+        async def stop(self) -> None:
+            order.append("consumer")
+
+    async def close_redis() -> None:
+        order.append("redis")
+
+    monkeypatch.setattr(main, "TranscriptConsumer", Recording)
+    monkeypatch.setattr(main, "close_redis", close_redis)
+
+    async with lifespan(create_app()):
+        pass
+
+    assert order == ["consumer", "redis"]
+
+
 async def test_shutdown_releases_the_client_and_the_model(
-    monkeypatch: pytest.MonkeyPatch,
+    fake_consumer: type[FakeConsumer], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     released: list[str] = []
     monkeypatch.setattr(main, "ensure_collection", lambda *_: True)

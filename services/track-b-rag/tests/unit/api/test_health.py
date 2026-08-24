@@ -7,7 +7,7 @@ from collections.abc import Callable
 import pytest
 from httpx import AsyncClient
 
-from tests.unit.api.conftest import FakeQdrant, FakeRedis
+from tests.unit.api.conftest import FakeConsumer, FakeQdrant, FakeRedis
 
 
 async def test_both_up_is_200_in_the_standard_envelope(client: AsyncClient) -> None:
@@ -15,7 +15,12 @@ async def test_both_up_is_200_in_the_standard_envelope(client: AsyncClient) -> N
 
     assert response.status_code == 200
     assert response.json() == {
-        "data": {"qdrant": "ok", "embedding_model": "ok", "redis": "ok"},
+        "data": {
+            "qdrant": "ok",
+            "embedding_model": "ok",
+            "redis": "ok",
+            "transcript_consumer": "ok",
+        },
         "error": None,
     }
 
@@ -32,6 +37,7 @@ async def test_qdrant_down_is_503_and_names_qdrant(
         "qdrant": "error",
         "embedding_model": "ok",
         "redis": "ok",
+        "transcript_consumer": "ok",
     }
 
 
@@ -47,6 +53,7 @@ async def test_the_model_down_is_503_and_names_the_model(
         "qdrant": "ok",
         "embedding_model": "error",
         "redis": "ok",
+        "transcript_consumer": "ok",
     }
 
 
@@ -67,17 +74,53 @@ async def test_redis_down_is_503_and_names_redis(
         "qdrant": "ok",
         "embedding_model": "ok",
         "redis": "error",
+        "transcript_consumer": "ok",
     }
+
+
+async def test_a_stopped_consumer_is_503_and_names_it(
+    client: AsyncClient, fake_consumer: FakeConsumer
+) -> None:
+    """The failure this flag exists for looks exactly like a quiet clinic.
+
+    With no consumer running, no transcript is scanned and no nudge is raised
+    for any encounter on this pod — and nothing else in the service notices.
+    """
+    fake_consumer.healthy = False
+
+    response = await client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["data"] == {
+        "qdrant": "ok",
+        "embedding_model": "ok",
+        "redis": "ok",
+        "transcript_consumer": "error",
+    }
+
+
+async def test_no_consumer_at_all_is_reported_as_error(client: AsyncClient) -> None:
+    """An app built without the lifespan has none; that is not "ok"."""
+    from track_b_rag.api.dependencies import get_transcript_consumer
+
+    client._transport.app.dependency_overrides[get_transcript_consumer] = lambda: None  # type: ignore[attr-defined]
+
+    response = await client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["data"]["transcript_consumer"] == "error"
 
 
 async def test_everything_down_is_503(
     client: AsyncClient,
     fake_qdrant: FakeQdrant,
     fake_redis: FakeRedis,
+    fake_consumer: FakeConsumer,
     embedding_health: Callable[[bool], None],
 ) -> None:
     fake_qdrant.healthy = False
     fake_redis.healthy = False
+    fake_consumer.healthy = False
     embedding_health(False)
 
     response = await client.get("/health")
@@ -87,6 +130,7 @@ async def test_everything_down_is_503(
         "qdrant": "error",
         "embedding_model": "error",
         "redis": "error",
+        "transcript_consumer": "error",
     }
 
 
@@ -100,7 +144,12 @@ async def test_a_503_still_carries_data_not_an_error(
     body = (await client.get("/health")).json()
 
     assert body["error"] is None
-    assert set(body["data"]) == {"qdrant", "embedding_model", "redis"}
+    assert set(body["data"]) == {
+        "qdrant",
+        "embedding_model",
+        "redis",
+        "transcript_consumer",
+    }
 
 
 async def test_health_writes_no_audit_row(

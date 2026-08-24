@@ -16,7 +16,7 @@ from httpx import ASGITransport, AsyncClient
 from redis.exceptions import RedisError
 
 from track_b_rag import embeddings, vector_store
-from track_b_rag.api.dependencies import get_qdrant, get_redis
+from track_b_rag.api.dependencies import get_qdrant, get_redis, get_transcript_consumer
 from track_b_rag.config import get_settings
 from track_b_rag.main import create_app
 
@@ -65,6 +65,21 @@ class FakeRedis:
         return True
 
 
+class FakeConsumer:
+    """The transcript consumer as /health sees it: one liveness question.
+
+    Defaults to healthy so a test about Qdrant does not have to say anything
+    about the consumer. The real one is exercised in
+    ``tests/unit/test_transcript_consumer.py``.
+    """
+
+    def __init__(self, *, healthy: bool = True) -> None:
+        self.healthy = healthy
+
+    def is_healthy(self) -> bool:
+        return self.healthy
+
+
 @pytest.fixture(autouse=True)
 def clean_settings() -> Iterator[None]:
     get_settings.cache_clear()
@@ -80,6 +95,11 @@ def fake_qdrant() -> FakeQdrant:
 @pytest.fixture
 def fake_redis() -> FakeRedis:
     return FakeRedis()
+
+
+@pytest.fixture
+def fake_consumer() -> FakeConsumer:
+    return FakeConsumer()
 
 
 @pytest.fixture
@@ -101,19 +121,22 @@ def embedding_health(monkeypatch: pytest.MonkeyPatch) -> Callable[[bool], None]:
 async def client(
     fake_qdrant: FakeQdrant,
     fake_redis: FakeRedis,
+    fake_consumer: FakeConsumer,
     embedding_health: Callable[[bool], None],
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[AsyncClient]:
     """An HTTP client bound to the app with every dependency replaced.
 
     ``create_app``'s lifespan is not entered — ASGITransport does not run it —
-    so nothing here reaches for a real Qdrant on startup. The startup path has
-    its own tests in ``test_main.py``.
+    so nothing here reaches for a real Qdrant on startup, and no transcript
+    consumer is created either. The startup path has its own tests in
+    ``test_main.py``.
     """
     monkeypatch.setattr(vector_store, "get_client", lambda: fake_qdrant)
     app = create_app()
     app.dependency_overrides[get_qdrant] = lambda: fake_qdrant
     app.dependency_overrides[get_redis] = lambda: fake_redis
+    app.dependency_overrides[get_transcript_consumer] = lambda: fake_consumer
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://track-b-rag") as http:
         yield http

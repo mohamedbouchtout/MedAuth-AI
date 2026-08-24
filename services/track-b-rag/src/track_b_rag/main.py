@@ -14,6 +14,12 @@ container is up, which is more useful than a crash loop that hides the cause.
 The embedding model is *not* loaded here. It is a lazy singleton, so the first
 health probe or query pays for the load; loading 1.3 GB of weights before the
 port opens would make every rollout look like a failure to the orchestrator.
+
+Startup also launches the transcript consumer (TASK-021), which watches the
+Redis bus for the length of the process. It is started rather than awaited: its
+whole life is a read loop, and a Redis that is unreachable at boot is handled
+inside that loop by retrying, for the same reason an unreachable Qdrant does not
+stop the service booting. ``GET /health`` is where either one becomes visible.
 """
 
 from __future__ import annotations
@@ -31,9 +37,11 @@ from track_b_rag.api.policies import router as policies_router
 from track_b_rag.api.query import router as query_router
 from track_b_rag.bedrock import reset_clients as reset_bedrock_clients
 from track_b_rag.cache import close_client as close_redis
+from track_b_rag.cache import get_client as get_redis_client
 from track_b_rag.config import get_settings
 from track_b_rag.db import dispose_engine
 from track_b_rag.embeddings import reset_embedder
+from track_b_rag.transcript_consumer import TranscriptConsumer
 from track_b_rag.vector_store import (
     close_client,
     ensure_collection,
@@ -81,10 +89,24 @@ async def initialize_vector_store() -> bool:
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Ensure the collection on startup; release every held resource on shutdown."""
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Ensure the collection and start the consumer; release everything on shutdown.
+
+    The consumer is stashed on ``app.state`` rather than in a module global so
+    that it belongs to the application that started it — ``GET /health`` reads
+    it back through a dependency, and a test that builds an app without this
+    lifespan correctly finds none.
+    """
     await initialize_vector_store()
+    consumer = TranscriptConsumer(get_redis_client())
+    consumer.start()
+    app.state.transcript_consumer = consumer
+
     yield
+
+    # Before the Redis client closes: the consumer holds a pub/sub connection on
+    # it and cancelling it afterwards would unwind against a closed pool.
+    await consumer.stop()
     close_client()
     reset_embedder()
     reset_bedrock_clients()
