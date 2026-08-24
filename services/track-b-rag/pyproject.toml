@@ -10,7 +10,7 @@ dependencies = [
     # TASK-015. The Da Vinci CRD tier posts a CDS Hooks request to the payer's
     # endpoint; this is the first outbound HTTP call this service makes.
     "httpx>=0.28",
-    "langchain>=1.3.15",
+    "langchain>=1.3.16",
     "langchain-aws>=0.2",
     "langchain-text-splitters>=0.3",
     "medauth-api-envelope",
