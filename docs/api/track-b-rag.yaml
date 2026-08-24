@@ -181,7 +181,7 @@ components:
 
     HealthData:
       type: object
-      required: [qdrant, embedding_model, redis]
+      required: [qdrant, embedding_model, redis, transcript_consumer]
       properties:
         qdrant:
           $ref: '#/components/schemas/ComponentStatus'
@@ -197,6 +197,13 @@ components:
           description: >-
             Whether the Redis cache behind `/policies/query` answers. A query
             still succeeds without it, at full Bedrock cost on every call.
+        transcript_consumer:
+          $ref: '#/components/schemas/ComponentStatus'
+          description: >-
+            Whether the transcript consumer is running and subscribed. When it
+            is not, no procedure keyword is detected in any encounter on this
+            instance and no nudge is raised — a failure that otherwise looks
+            exactly like a clinic with nothing to flag.
 
     HealthResponse:
       type: object
