@@ -1,13 +1,20 @@
 /**
- * The failure vocabulary for audio capture.
+ * The failure vocabulary for audio capture, shared by every client.
  *
  * Every one of these is *returned* in the hook's state, never thrown. A thrown
  * error is what a React error boundary swallows, and a swallowed capture
  * failure would recreate the exact problem this module exists to prevent: a
  * provider believing an encounter is being recorded when it is not.
+ *
+ * One vocabulary rather than one per app, because the screens that surface
+ * these — TASK-025 on mobile, TASK-070 on web — owe a provider the same answer
+ * to the same failure, and a code that exists on one platform only is still
+ * worth naming in one place. Which codes a given platform can actually emit is
+ * noted on the codes themselves.
  */
 
 import { CHANNELS, REQUESTED_FORMAT, SAMPLE_RATE_HZ, type AudioFormat } from './format';
+
 export type AudioCaptureErrorCode =
   /** The provider declined the microphone, or the OS refused it. */
   | 'PERMISSION_DENIED'
@@ -15,7 +22,13 @@ export type AudioCaptureErrorCode =
   | 'SAMPLE_RATE_UNSUPPORTED'
   /** The hardware delivered a channel count we did not ask for. */
   | 'CHANNELS_UNSUPPORTED'
-  /** This platform is big-endian; the PCM would reach Transcribe byte-swapped. */
+  /**
+   * This platform is big-endian; the PCM would reach Transcribe byte-swapped.
+   *
+   * Only the mobile path can produce this. The browser writes its own samples
+   * with an explicit little-endian `DataView`, so there is nothing for the host
+   * byte order to get wrong — see `pcm.ts`.
+   */
   | 'ENDIANNESS_UNSUPPORTED'
   /** The microphone stream itself failed to start. */
   | 'CAPTURE_FAILED'

@@ -6,6 +6,7 @@
   "workspaces": [
     "apps/web",
     "apps/mobile",
+    "packages/audio-wire",
     "packages/fhir-types/typescript"
   ],
   "engines": {

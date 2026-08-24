@@ -1,16 +1,28 @@
 /**
  * Test layout mirrors src/, the same convention the Python services use:
- * `src/audio/framing.ts` is covered by `tests/unit/audio/framing.test.ts`.
+ * `src/hooks/useAudioCapture.ts` is covered by
+ * `tests/unit/hooks/useAudioCapture.test.ts`.
  *
  * The coverage gate is the same 80% CI applies to services/ and packages/.
  * `App.tsx` and `index.ts` are excluded because they are the Expo entry point
  * and a placeholder screen — TASK-025 builds the real session UI and brings its
  * own tests. Everything that carries logic is inside src/.
+ *
+ * `@medauth/audio-wire` is mapped to its TypeScript source rather than resolved
+ * through node_modules. The package publishes no build output on purpose (see
+ * its tsconfig), and jest's default `transformIgnorePatterns` would otherwise
+ * skip transforming it because npm links workspace packages under
+ * node_modules/. It is not in `collectCoverageFrom` either — the package has
+ * its own suite and its own gate, and counting it here would let this app's
+ * coverage ride on tests it does not own.
  */
 module.exports = {
   preset: 'jest-expo',
   roots: ['<rootDir>/tests'],
   testMatch: ['**/*.test.ts', '**/*.test.tsx'],
+  moduleNameMapper: {
+    '^@medauth/audio-wire$': '<rootDir>/../../packages/audio-wire/src/index.ts',
+  },
   collectCoverage: true,
   collectCoverageFrom: ['src/**/*.{ts,tsx}'],
   coverageThreshold: {

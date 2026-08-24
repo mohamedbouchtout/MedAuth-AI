@@ -44,6 +44,7 @@ jobs:
       web: ${{ steps.detect.outputs.web }}
       mobile: ${{ steps.detect.outputs.mobile }}
       fhir_types: ${{ steps.detect.outputs.fhir_types }}
+      audio_wire: ${{ steps.detect.outputs.audio_wire }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -107,13 +108,16 @@ jobs:
             echo "any_python=true" >> "$GITHUB_OUTPUT"
           fi
 
-          if echo "$changed" | grep -q '^apps/web/'; then
+          # Both apps import @medauth/audio-wire, and it ships as TypeScript
+          # source rather than a build, so a change there is a change to code
+          # that runs inside them — test them when it moves.
+          if echo "$changed" | grep -qE '^(apps/web/|packages/audio-wire/)'; then
             echo "web=true" >> "$GITHUB_OUTPUT"
           else
             echo "web=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if echo "$changed" | grep -q '^apps/mobile/'; then
+          if echo "$changed" | grep -qE '^(apps/mobile/|packages/audio-wire/)'; then
             echo "mobile=true" >> "$GITHUB_OUTPUT"
           else
             echo "mobile=false" >> "$GITHUB_OUTPUT"
@@ -126,6 +130,16 @@ jobs:
             echo "fhir_types=true" >> "$GITHUB_OUTPUT"
           else
             echo "fhir_types=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # audio-wire is TypeScript only, so it gets an npm job rather than a
+          # place in all_packages. It reacts to the npm root for the same reason
+          # fhir-types does: a lockfile change can break `npm ci` without
+          # touching the package.
+          if echo "$changed" | grep -qE '^(package\.json|package-lock\.json|\.github/workflows/ci\.yml|packages/audio-wire/)'; then
+            echo "audio_wire=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "audio_wire=false" >> "$GITHUB_OUTPUT"
           fi
 
   # ---------------------------------------------------------------------------
@@ -339,6 +353,26 @@ jobs:
 
       - name: tsc --noEmit — TypeScript mirrors
         run: npm run typecheck --workspace @medauth/fhir-types
+
+  audio-wire:
+    name: Audio wire format (packages/audio-wire)
+    needs: changes
+    if: needs.changes.outputs.audio_wire == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - run: npm ci
+
+      - name: tsc --noEmit
+        run: npm run typecheck --workspace @medauth/audio-wire
+
+      - name: vitest — 80% coverage gate, same as services/ and packages/
+        run: npm run test --workspace @medauth/audio-wire
 
   # ---------------------------------------------------------------------------
   # Frontends — only when the app actually changed and has a package.json.

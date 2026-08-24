@@ -1,3 +1,5 @@
+import { describe, expect, it } from 'vitest';
+
 import {
   CHANNELS,
   CHUNK_BYTES,
@@ -7,7 +9,7 @@ import {
   SAMPLE_RATE_HZ,
   formatOf,
   isLittleEndian,
-} from '../../../src/audio/format';
+} from '../src/format';
 
 describe('wire format constants', () => {
   it('matches TRANSCRIBE_MEDICAL_SAMPLE_RATE_HZ and _MEDIA_ENCODING', () => {
@@ -29,10 +31,11 @@ describe('wire format constants', () => {
 });
 
 describe('isLittleEndian', () => {
-  it('is true on the platforms this app targets', () => {
+  it('is true on the platforms the mobile app targets', () => {
     // Both iOS and Android are little-endian; Transcribe requires 16-bit signed
     // little-endian PCM. Asserted because the failure would be inaudible noise
-    // reaching the transcriber rather than a crash.
+    // reaching the transcriber rather than a crash. The browser path does not
+    // depend on this — it writes its own byte order, see pcm.ts.
     expect(isLittleEndian()).toBe(true);
   });
 });

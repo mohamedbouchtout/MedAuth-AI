@@ -1,0 +1,30 @@
+{
+  // Mirrors packages/fhir-types/typescript. This package decides how encounter
+  // audio is laid out on the wire, and a loose type here becomes a silent
+  // format disagreement that Transcribe answers by hanging rather than erroring.
+  //
+  // No `outDir` and no build: consumers import `src/index.ts` directly, so both
+  // Vite (apps/web) and Metro/Jest (apps/mobile) transpile it as source. A dist
+  // build would have to be produced before either app's test run, which is a
+  // build-ordering rule that nothing enforces and everyone forgets.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": []
+  },
+  "include": ["src", "tests", "vitest.config.ts"]
+}

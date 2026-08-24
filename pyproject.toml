@@ -9,6 +9,11 @@
 
 [tool.uv.workspace]
 members = ["services/*", "packages/*"]
+# packages/audio-wire is TypeScript only — it is an npm workspace member, not a
+# uv one, and has no pyproject.toml. Without this exclusion the `packages/*`
+# glob claims it and `uv sync` fails outright for every Python job. Any future
+# TypeScript-only package under packages/ needs a line here too.
+exclude = ["packages/audio-wire"]
 
 [tool.uv.sources]
 medauth-api-envelope = { workspace = true }
