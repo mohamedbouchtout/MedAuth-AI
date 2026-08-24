@@ -10,7 +10,7 @@ dependencies = [
     "pydantic-settings>=2.6",
     "pyjwt>=2.13.0",
     "redis>=8.1.0",
-    "uvicorn[standard]>=0.52.3",
+    "uvicorn[standard]>=0.52.4",
     "websockets>=13.1",
 ]
 
