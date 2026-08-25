@@ -21,6 +21,11 @@
 
 class PcmCaptureProcessor extends AudioWorkletProcessor {
   /**
+   * Nothing is written to `outputs`, which Web Audio zero-fills every quantum.
+   * The node has an output only so the graph can reach the destination and be
+   * guaranteed a `process()` call in every engine; what travels down it is
+   * silence, and `useAudioCapture` puts a zero gain in the way as well.
+   *
    * @param {Float32Array[][]} inputs — one entry per input, each a list of channels.
    * @returns {boolean} true, always: the node stays alive until it is disconnected.
    */

@@ -1702,6 +1702,14 @@ The insurance policy RAG is the technical core. Build and validate before other 
       — conversion, framing, format comparison — belongs on the main thread,
       because `AudioWorkletProcessor` does not exist in jsdom and code inside it
       cannot be reached by this task's tests.
+    - **The node reaches `context.destination` through a `GainNode` at zero
+      gain.** A node with no outputs is *specified* to keep processing on its
+      connected inputs alone, and Chrome does — measured. But that is one engine,
+      and an engine that disagreed would produce no audio, no error, and nothing
+      to diagnose from. Being reachable from the destination is what every engine
+      pulls. The zero gain is what stops that path from playing the encounter
+      back through the room's speakers, and the processor writes nothing to its
+      output either, so the silence does not rest on the gain value alone.
     - `floatToInt16LE()` from `packages/audio-wire`, then `PcmFramer` from the
       same package for the 8000-byte frames. Web Audio works in normalised
       floats; the conversion writes little-endian explicitly rather than
@@ -1719,6 +1727,16 @@ The insurance policy RAG is the technical core. Build and validate before other 
     left the browser. Same terminal `SAMPLE_RATE_UNSUPPORTED` /
     `CHANNELS_UNSUPPORTED` states, same discriminated union, returned and never
     thrown.
+  - **Capture that starts and then delivers nothing must fail, not hang.** An
+    `AudioContext` created without sticky user activation starts *suspended*, and
+    a suspended context reports no error — it simply never runs the worklet. The
+    hook asks a suspended context to `resume()` but **does not await it**: with
+    no activation that promise may never settle at all, so awaiting it would move
+    the silent hang from Web Audio into `start()`. What decides the outcome is a
+    deadline: if no quantum arrives within `FIRST_AUDIO_TIMEOUT_MS`, capture
+    fails with `CAPTURE_TIMED_OUT`. Without it the hook sits in `starting`
+    forever, which is the silent hang this whole error vocabulary exists to
+    prevent.
   - **The session JWT goes in the subprotocol list, not a header.** The native
     `WebSocket` constructor accepts a URL and subprotocols and nothing else, so
     open the socket as `new WebSocket(url, ["medauth.session.v1",
@@ -1756,12 +1774,21 @@ The insurance policy RAG is the technical core. Build and validate before other 
     most likely to be wrong in a way a test can catch, and they need no DOM.
   - Built (27 tests, 97% coverage; the shared package adds 27 more). Decisions
     worth knowing before touching this:
-    - **A worklet node with `numberOfOutputs: 0` really is pulled.** Verified in
-      Chrome against an oscillator source: 188 render quanta arrived in a second
-      of audio, each 128 samples, with the worklet's own `sampleRate` global
-      reporting 16000. This mattered enough to check because the usual fix for a
-      node that is not pulled — connecting it to `context.destination` — would
-      play the encounter back through the room's speakers during the visit.
+    - **A worklet node with `numberOfOutputs: 0` really is pulled — in Chrome.**
+      Verified against an oscillator source: 188 render quanta arrived in a
+      second of audio, each 128 samples, with the worklet's own `sampleRate`
+      global reporting 16000. That measurement is why the shipped graph does
+      *not* rely on it. It holds in one engine, and the compatibility tables do
+      not cover behaviour of this kind, so a browser that disagreed would give no
+      audio and no error. The node therefore has one output and reaches the
+      destination through a zero-gain `GainNode` — portable by construction
+      rather than by measurement. The measured first-quantum latency from that
+      run, effectively one render quantum, is what
+      `FIRST_AUDIO_TIMEOUT_MS = 3000` is set several hundred times above.
+      **The zero-gain graph itself has not been exercised in a live browser** —
+      the extension's input events stopped reaching the page during the attempt.
+      It is the conventional shape and is asserted in the jsdom tests, but it is
+      an assertion about construction, not a measurement of audio flowing.
     - **The processor must not be inlined, and Vite inlines it by default.** It
       is imported with `?url`, it is under 2KB, and the default
       `assetsInlineLimit` is 4KB — so a production bundle carried it as
@@ -1780,6 +1807,11 @@ The insurance policy RAG is the technical core. Build and validate before other 
       distinction reaches a person — TASK-070 offers a route into browser
       settings for the first and a plain retry for the second. The rejection's
       own message is never surfaced; it can name device paths.
+    - **`CAPTURE_TIMED_OUT` was added to the shared vocabulary in this task**,
+      after the suspended-context hole was found. `apps/mobile` has the same
+      shape of gap — `useAudioCapture` there waits on a first `onBuffer` that a
+      wedged stream may never deliver — and closing it is **TASK-026**, not this
+      task. The code lives in `packages/audio-wire` so both can use it.
     - `start()` awaits twice — `getUserMedia`, then `addModule` — so a provider
       can end the visit mid-startup. The graph is not built if the hook stopped
       while either was in flight; otherwise a live microphone would be left
@@ -1807,6 +1839,35 @@ The insurance policy RAG is the technical core. Build and validate before other 
       `audio-wire` job is new and shipped with the package. Verified locally
       from a clean `npm ci`: lint, `tsc --noEmit`, tests and a production build
       pass for `apps/web`, `apps/mobile` and `packages/audio-wire`.
+
+- [ ] **TASK-026:** Mobile capture deadline — fail when no audio arrives
+  - Prerequisite: TASK-022 (the hook this adds a deadline to)
+  - App: `apps/mobile`
+  - **What this closes.** `useAudioCapture` sets `starting`, calls
+    `stream.start()`, and then waits for a first `onBuffer` to validate the
+    format and open the socket. Nothing bounds that wait. A stream that starts
+    successfully and then delivers no buffer — a microphone seized by another
+    app, a route change mid-start — leaves the hook in `starting` indefinitely,
+    with no error for TASK-025's screen to show. The provider sees a session
+    that never begins and is told nothing.
+  - The browser hook has the same shape of gap and closed it in TASK-023 with a
+    deadline plus the `CAPTURE_TIMED_OUT` code, which already lives in
+    `packages/audio-wire` and is shared. This task applies the same treatment
+    here; it was opened rather than folded into TASK-023 because it changes a
+    hook that has already shipped and deserves its own review.
+  - There is no `resume()` equivalent on this side — the suspended-`AudioContext`
+    half of the browser problem is browser-specific. Only the deadline applies.
+  - Pick the timeout deliberately and record where it came from, per the same
+    rule the five-second backlog cap follows: no device start-up latencies have
+    been observed yet, so whatever lands is a bounded default until TASK-025
+    produces real numbers.
+  - Add `CAPTURE_TIMED_OUT` to TASK-025's list of codes needing distinct
+    handling — nothing was recorded, so a plain retry is the right offer, which
+    is different from the not-retryable format failures next to it.
+  - **Test:** a stream that starts and never delivers a buffer settles in
+    `error` with `CAPTURE_TIMED_OUT`, and opens no socket
+  - **Test:** a buffer arriving before the deadline cancels it, and a long
+    encounter is never torn down by its own start-up timer
 
 - [ ] **TASK-024:** Policy query parameters — encounter state and procedure codes
   - Prerequisite: TASK-021 (defines the seam this task fills in), TASK-005
@@ -1898,6 +1959,10 @@ The insurance policy RAG is the technical core. Build and validate before other 
       rather than inviting a retry loop.
     - `AUTH_REJECTED` — the session token was refused, so re-mint the session
       (`POST /sessions/start`) before retrying rather than reusing the old one.
+    - `CAPTURE_TIMED_OUT` — the microphone started and then delivered nothing.
+      Nothing was recorded, so a plain retry is the right offer, unlike the
+      format failures above which are not retryable on this hardware. Added by
+      TASK-023 on the browser side; TASK-026 is what makes this hook emit it.
     - `SEND_BACKLOG_EXCEEDED` — the socket never opened and buffered audio hit
       its cap. Nothing was recorded and the encounter never started, so a plain
       retry is the right offer. Distinct from `STREAM_FAILED`, which means a

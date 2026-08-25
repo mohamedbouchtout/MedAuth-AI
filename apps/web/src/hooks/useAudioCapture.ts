@@ -51,6 +51,22 @@ const SOCKET_OPEN = 1;
 const PROCESSOR_NAME = 'pcm-capture';
 
 /**
+ * How long after the graph is built the first quantum may take to arrive.
+ *
+ * **A round-number default, not a measured threshold.** What was measured, in
+ * Chrome, is the other end of the scale: once a context is running the first
+ * quantum arrives within one render quantum, about 8ms at 16kHz. Three seconds
+ * is therefore several hundred times any healthy start, chosen to sit far above
+ * it while still being shorter than a provider would tolerate staring at a
+ * screen that has not admitted anything is wrong.
+ *
+ * It exists because the failure it catches is silent by construction: a
+ * suspended `AudioContext` reports no error and simply never runs the worklet,
+ * so the only evidence is audio that does not arrive.
+ */
+export const FIRST_AUDIO_TIMEOUT_MS = 3_000;
+
+/**
  * The subprotocol list, and the reason there is one.
  *
  * The native `WebSocket` constructor takes a URL and subprotocols and nothing
@@ -149,11 +165,17 @@ export function useAudioCapture({ sessionId, jwt, baseUrl }: UseAudioCaptureOpti
   const contextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const nodeRef = useRef<AudioWorkletNode | null>(null);
+  const sinkRef = useRef<GainNode | null>(null);
+  const firstAudioTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const validatedRef = useRef(false);
   const openedRef = useRef(false);
   const runningRef = useRef(false);
 
   const teardown = useCallback(() => {
+    if (firstAudioTimerRef.current !== null) {
+      clearTimeout(firstAudioTimerRef.current);
+      firstAudioTimerRef.current = null;
+    }
     runningRef.current = false;
     validatedRef.current = false;
     openedRef.current = false;
@@ -166,6 +188,9 @@ export function useAudioCapture({ sessionId, jwt, baseUrl }: UseAudioCaptureOpti
       node.disconnect();
       nodeRef.current = null;
     }
+
+    sinkRef.current?.disconnect();
+    sinkRef.current = null;
 
     // Every track stopped, not just the stream dropped — an un-stopped track
     // leaves the browser's recording indicator on after the encounter ends.
@@ -255,6 +280,10 @@ export function useAudioCapture({ sessionId, jwt, baseUrl }: UseAudioCaptureOpti
           return;
         }
         validatedRef.current = true;
+        if (firstAudioTimerRef.current !== null) {
+          clearTimeout(firstAudioTimerRef.current);
+          firstAudioTimerRef.current = null;
+        }
         openSocket();
       }
 
@@ -342,6 +371,21 @@ export function useAudioCapture({ sessionId, jwt, baseUrl }: UseAudioCaptureOpti
       return;
     }
 
+    // A context created without sticky user activation starts suspended, and a
+    // suspended context never runs the worklet. `resume()` is *not* awaited:
+    // without activation its promise may never settle at all — observed
+    // directly, a bare `await resume()` on a page with no prior interaction
+    // simply hangs — so awaiting it here would trade a silent hang inside Web
+    // Audio for a silent hang inside `start()`. The request is made, and the
+    // deadline below is what decides whether it worked.
+    if (context.state === 'suspended') {
+      void context.resume().catch(() => {
+        // Rejection is not itself the failure; no audio arriving is, and that
+        // is what the deadline reports. Swallowed so it cannot surface as an
+        // unhandled rejection carrying a device-specific message.
+      });
+    }
+
     try {
       await context.audioWorklet.addModule(processorUrl);
     } catch {
@@ -358,19 +402,42 @@ export function useAudioCapture({ sessionId, jwt, baseUrl }: UseAudioCaptureOpti
 
     const node = new AudioWorkletNode(context, PROCESSOR_NAME, {
       numberOfInputs: 1,
-      // No outputs: this is a sink. Verified in Chrome that a node with no
-      // outputs is still pulled when its input is connected — the alternative,
-      // connecting it to `context.destination`, would play the encounter back
-      // through the room's speakers.
-      numberOfOutputs: 0,
+      numberOfOutputs: 1,
+      outputChannelCount: [CHANNELS],
       channelCount: CHANNELS,
       channelCountMode: 'explicit',
     });
     node.port.onmessage = (event: MessageEvent<CaptureMessage>) => {
       handleMessage(event.data);
     };
+
+    // The graph reaches `destination` through a silent gain stage, and both
+    // halves of that matter. A node has to be reachable from the destination to
+    // be guaranteed a `process()` call: a node with no outputs is *specified* to
+    // keep processing on its inputs alone, and Chrome does, but that is one
+    // engine — and a browser that disagreed would produce no audio, no error and
+    // no way to tell from here. Routing to the destination is what every engine
+    // pulls. The gain of zero is what stops that from playing the encounter back
+    // through the room's speakers; the processor writes nothing to its output
+    // either, so the silence is not resting on the gain value alone.
+    const sink = context.createGain();
+    sink.gain.value = 0;
+    node.connect(sink);
+    sink.connect(context.destination);
     context.createMediaStreamSource(stream).connect(node);
+
+    sinkRef.current = sink;
     nodeRef.current = node;
+
+    // Everything upstream reported success; from here the only evidence that
+    // capture is really running is a quantum arriving. Cleared by the first one.
+    firstAudioTimerRef.current = setTimeout(() => {
+      firstAudioTimerRef.current = null;
+      fail({
+        code: 'CAPTURE_TIMED_OUT',
+        message: 'The microphone started but no audio reached MedAuth AI. Nothing was recorded.',
+      });
+    }, FIRST_AUDIO_TIMEOUT_MS);
   }, [fail, handleMessage]);
 
   const stop = useCallback(() => {
