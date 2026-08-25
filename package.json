@@ -10,7 +10,7 @@
     "packages/fhir-types/typescript"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "scripts": {
     "dev:web": "npm run dev --workspace apps/web",
