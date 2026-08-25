@@ -33,6 +33,18 @@ export type AudioCaptureErrorCode =
   /** The microphone stream itself failed to start. */
   | 'CAPTURE_FAILED'
   /**
+   * Capture started and then no audio ever arrived.
+   *
+   * Distinct from `CAPTURE_FAILED`, which means the microphone refused to start
+   * and said so. This is the quieter failure: everything reported success and
+   * nothing came. In a browser the usual cause is an `AudioContext` that is
+   * suspended because the page never had user activation, and a suspended
+   * context does not error — it simply never runs the worklet. Without a
+   * deadline the hook would sit in `starting` forever, which is the silent hang
+   * this whole vocabulary exists to make impossible.
+   */
+  | 'CAPTURE_TIMED_OUT'
+  /**
    * The WebSocket never opened. TASK-020 refuses a bad session token *before*
    * the handshake completes, so a rejected JWT arrives here as an upgrade that
    * failed rather than as a close with code 4401 — re-mint the session before

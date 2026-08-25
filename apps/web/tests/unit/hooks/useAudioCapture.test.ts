@@ -2,7 +2,7 @@ import { CHUNK_BYTES, MAX_PENDING_BYTES, SAMPLE_RATE_HZ } from '@medauth/audio-w
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { useAudioCapture } from '../../../src/hooks/useAudioCapture';
+import { FIRST_AUDIO_TIMEOUT_MS, useAudioCapture } from '../../../src/hooks/useAudioCapture';
 
 /**
  * `AudioWorklet` does not exist in jsdom and cannot be shimmed meaningfully —
@@ -59,6 +59,20 @@ class FakeMediaStream {
   }
 }
 
+class FakeGainNode {
+  gain = { value: 1 };
+  connectedTo: unknown[] = [];
+  disconnected = false;
+
+  connect(target: unknown): void {
+    this.connectedTo.push(target);
+  }
+
+  disconnect(): void {
+    this.disconnected = true;
+  }
+}
+
 class FakeAudioWorkletNode {
   static instances: FakeAudioWorkletNode[] = [];
   static shouldThrow = false;
@@ -75,6 +89,12 @@ class FakeAudioWorkletNode {
       throw new Error('node construction failed');
     }
     FakeAudioWorkletNode.instances.push(this);
+  }
+
+  connectedTo: unknown[] = [];
+
+  connect(target: unknown): void {
+    this.connectedTo.push(target);
   }
 
   disconnect(): void {
@@ -96,11 +116,35 @@ class FakeAudioContext {
   static addModuleRejects = false;
   /** When set, `addModule` parks on this until a test releases it. */
   static addModuleGate: Promise<void> | null = null;
+  /** What `state` reads as on construction. */
+  static initialState: 'running' | 'suspended' = 'running';
+  /** When true, `resume()` returns a promise that never settles — as it does
+   *  in a real browser with no user activation. */
+  static resumeNeverSettles = false;
 
   readonly sampleRate: number;
+  readonly destination = { id: 'destination' };
+  state: 'running' | 'suspended' = FakeAudioContext.initialState;
+  resumeCalls = 0;
+  gains: FakeGainNode[] = [];
   closed = false;
   connectedSources = 0;
   addedModules: string[] = [];
+
+  resume(): Promise<void> {
+    this.resumeCalls += 1;
+    if (FakeAudioContext.resumeNeverSettles) {
+      return new Promise<void>(() => {});
+    }
+    this.state = 'running';
+    return Promise.resolve();
+  }
+
+  createGain(): FakeGainNode {
+    const gain = new FakeGainNode();
+    this.gains.push(gain);
+    return gain;
+  }
 
   audioWorklet = {
     addModule: async (url: string): Promise<void> => {
@@ -209,6 +253,8 @@ beforeEach(() => {
   FakeAudioContext.deviceSampleRate = 48_000;
   FakeAudioContext.addModuleRejects = false;
   FakeAudioContext.addModuleGate = null;
+  FakeAudioContext.initialState = 'running';
+  FakeAudioContext.resumeNeverSettles = false;
   FakeWebSocket.instances = [];
 
   getUserMedia = vi.fn();
@@ -222,7 +268,16 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
+
+function lastContext(): FakeAudioContext {
+  const context = FakeAudioContext.instances.at(-1);
+  if (!context) {
+    throw new Error('no AudioContext was constructed');
+  }
+  return context;
+}
 
 describe('useAudioCapture — framing', () => {
   it('sends exactly one 8000-byte binary frame per frame of audio', async () => {
@@ -418,21 +473,39 @@ describe('useAudioCapture — permission and startup', () => {
     });
   });
 
-  it('builds a mono sink node with no outputs', async () => {
+  it('routes the worklet to the destination through a silent gain', async () => {
     const { result } = renderHook(() => useAudioCapture(OPTIONS));
 
     await startCapture(result.current.start);
 
-    // Verified against Chrome: a node with no outputs is still pulled when its
-    // input is connected. Connecting to destination instead would play the
-    // encounter back into the room.
+    // Reaching the destination is what guarantees the node is pulled in every
+    // engine, rather than relying on the no-outputs rule that only Chrome was
+    // measured against. The zero gain is what keeps the encounter from playing
+    // back into the room on the way there.
+    const context = lastContext();
+    const gain = context.gains[0];
     expect(lastNode().options).toMatchObject({
       numberOfInputs: 1,
-      numberOfOutputs: 0,
+      numberOfOutputs: 1,
       channelCount: 1,
       channelCountMode: 'explicit',
     });
-    expect(FakeAudioContext.instances[0]?.connectedSources).toBe(1);
+    expect(gain?.gain.value).toBe(0);
+    expect(lastNode().connectedTo).toEqual([gain]);
+    expect(gain?.connectedTo).toEqual([context.destination]);
+    expect(context.connectedSources).toBe(1);
+  });
+
+  it('disconnects the gain stage on teardown', async () => {
+    const { result } = renderHook(() => useAudioCapture(OPTIONS));
+    await startCapture(result.current.start);
+    const gain = lastContext().gains[0];
+
+    act(() => {
+      result.current.stop();
+    });
+
+    expect(gain?.disconnected).toBe(true);
   });
 
   it('builds no graph when stopped while the worklet module is loading', async () => {
@@ -564,6 +637,88 @@ describe('useAudioCapture — the socket', () => {
 
     // The close handler reports it with the right code if it actually drops.
     expect(result.current.state.status).toBe('streaming');
+  });
+});
+
+describe('useAudioCapture — a context that never runs', () => {
+  it('asks a suspended context to resume', async () => {
+    FakeAudioContext.initialState = 'suspended';
+    const { result } = renderHook(() => useAudioCapture(OPTIONS));
+
+    await startCapture(result.current.start);
+
+    expect(lastContext().resumeCalls).toBe(1);
+    expect(lastContext().state).toBe('running');
+  });
+
+  it('does not wait on resume, which may never settle', async () => {
+    // With no user activation a real browser's resume() promise simply never
+    // settles — observed directly. Awaiting it would move the silent hang from
+    // Web Audio into start(), so start() has to finish regardless.
+    FakeAudioContext.initialState = 'suspended';
+    FakeAudioContext.resumeNeverSettles = true;
+    const { result } = renderHook(() => useAudioCapture(OPTIONS));
+
+    await startCapture(result.current.start);
+
+    expect(lastContext().resumeCalls).toBe(1);
+    expect(FakeAudioWorkletNode.instances).toHaveLength(1);
+  });
+
+  it('reports CAPTURE_TIMED_OUT when no audio ever arrives', async () => {
+    vi.useFakeTimers();
+    FakeAudioContext.initialState = 'suspended';
+    FakeAudioContext.resumeNeverSettles = true;
+    const { result } = renderHook(() => useAudioCapture(OPTIONS));
+    await startCapture(result.current.start);
+
+    // Everything reported success and nothing came. Without this deadline the
+    // hook would sit in `starting` forever, which is the silent hang the whole
+    // error vocabulary exists to prevent.
+    expect(result.current.state.status).toBe('starting');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(FIRST_AUDIO_TIMEOUT_MS);
+    });
+
+    expect(result.current.state).toMatchObject({
+      status: 'error',
+      error: { code: 'CAPTURE_TIMED_OUT' },
+    });
+    expect(FakeWebSocket.instances).toHaveLength(0);
+  });
+
+  it('cancels the deadline once a quantum arrives', async () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useAudioCapture(OPTIONS));
+    await startCapture(result.current.start);
+
+    await act(async () => {
+      lastNode().deliver(quantum(SAMPLES_PER_FRAME));
+    });
+    act(() => {
+      lastSocket().open();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(FIRST_AUDIO_TIMEOUT_MS * 3);
+    });
+
+    // A working encounter must not be torn down by its own startup deadline.
+    expect(result.current.state.status).toBe('streaming');
+  });
+
+  it('cancels the deadline on stop, so a stopped hook cannot fail late', async () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useAudioCapture(OPTIONS));
+    await startCapture(result.current.start);
+
+    act(() => {
+      result.current.stop();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(FIRST_AUDIO_TIMEOUT_MS * 3);
+    });
+
+    expect(result.current.state.status).toBe('idle');
   });
 });
 
