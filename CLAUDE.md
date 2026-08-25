@@ -115,7 +115,7 @@ medauth-ai/
 # Required
 docker & docker compose
 uv (pip install uv)
-node 20+ & npm
+node 24+ & npm  # version lives in .nvmrc; CI reads that file
 aws cli (configured with dev credentials)
 ```
 

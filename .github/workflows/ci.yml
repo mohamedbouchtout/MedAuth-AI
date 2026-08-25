@@ -29,7 +29,6 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.12"
-  NODE_VERSION: "20"
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -341,7 +340,13 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          # .nvmrc is the only place the Node version is written. Reading it here
+          # rather than repeating a number means a contributor's nvm/fnm and CI
+          # cannot drift apart — the failure that pattern produces is a build
+          # that passes on a laptop and fails in a pull request for reasons the
+          # diff does not show. The floor in package.json's `engines` is a
+          # separate thing: a minimum that npm enforces, not a second pin.
+          node-version-file: .nvmrc
 
       - run: uv sync --all-packages
 
@@ -364,7 +369,13 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          # .nvmrc is the only place the Node version is written. Reading it here
+          # rather than repeating a number means a contributor's nvm/fnm and CI
+          # cannot drift apart — the failure that pattern produces is a build
+          # that passes on a laptop and fails in a pull request for reasons the
+          # diff does not show. The floor in package.json's `engines` is a
+          # separate thing: a minimum that npm enforces, not a second pin.
+          node-version-file: .nvmrc
 
       - run: npm ci
 
@@ -387,7 +398,13 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          # .nvmrc is the only place the Node version is written. Reading it here
+          # rather than repeating a number means a contributor's nvm/fnm and CI
+          # cannot drift apart — the failure that pattern produces is a build
+          # that passes on a laptop and fails in a pull request for reasons the
+          # diff does not show. The floor in package.json's `engines` is a
+          # separate thing: a minimum that npm enforces, not a second pin.
+          node-version-file: .nvmrc
 
       - name: Install, lint, type-check, test, build
         shell: bash
@@ -413,7 +430,13 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          # .nvmrc is the only place the Node version is written. Reading it here
+          # rather than repeating a number means a contributor's nvm/fnm and CI
+          # cannot drift apart — the failure that pattern produces is a build
+          # that passes on a laptop and fails in a pull request for reasons the
+          # diff does not show. The floor in package.json's `engines` is a
+          # separate thing: a minimum that npm enforces, not a second pin.
+          node-version-file: .nvmrc
 
       - name: Install, lint, type-check, test
         shell: bash

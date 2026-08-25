@@ -353,6 +353,38 @@ Claude Code should read this before starting any task to understand current stat
 
 ---
 
+- [ ] **TASK-007:** Move CI and local dev to Node 24
+  - **Why now.** `ci.yml` pinned `NODE_VERSION: "20"`, and Node 20 reached end of
+    life on 2026-04-30 — verified against the `nodejs/Release` schedule, not from
+    memory. That is a supply-chain position, not a style preference: the runtime
+    every JavaScript job executes on stopped receiving security patches four
+    months ago. Node 24 is the current active LTS (it does not enter maintenance
+    until 2026-10-20 and is supported to 2028-04-30), so it is the target rather
+    than 22, which is already in maintenance.
+  - It was found while building TASK-023 and deliberately left alone there: the
+    bump re-runs every JavaScript job on a new runtime, including Expo's
+    toolchain, and that does not belong inside an audio task.
+  - **The version is written in `.nvmrc` and nowhere else.** `ci.yml` reads it
+    with `setup-node`'s `node-version-file`, so a contributor's nvm/fnm and CI
+    cannot disagree. Repeating the number in the workflow is the arrangement
+    that produces a build passing on a laptop and failing in a pull request for
+    reasons the diff does not show — the same failure mode the backing-service
+    versions were consolidated into `docker-compose.yml` to avoid.
+    `package.json`'s `engines.node` stays as a floor, which is a minimum npm
+    enforces rather than a second pin of the same value.
+  - **Unblocks jsdom 30.** TASK-023 had to hold `apps/web` at jsdom 29 because 30
+    requires Node `^22.22.2 || ^24.15.0 || >=26.0.0`, which Node 20 cannot
+    satisfy. The floor moves to `>=24.15` with the upgrade, because that is
+    jsdom's real requirement rather than a round number.
+  - Toolchain compatibility checked before committing rather than after: React
+    Native 0.86 declares `^24.3.0`, Vite 8, Vitest 4 and ESLint 10 all accept 24,
+    and `expo`/`jest-expo` declare no `engines` constraint at all.
+  - **Test:** the whole CI matrix passes on the new runtime — that is the point
+    of the change, and there is nothing else to assert that the suites do not
+    already cover.
+
+---
+
 ## Phase 1 — RAG Pipeline (Build This First)
 
 The insurance policy RAG is the technical core. Build and validate before other services.

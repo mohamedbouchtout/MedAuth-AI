@@ -60,7 +60,7 @@ cover the two frontends only.
 
 ## Quick start
 
-Requires Docker, [uv](https://docs.astral.sh/uv/), Node 20+, and the AWS CLI
+Requires Docker, [uv](https://docs.astral.sh/uv/), Node 24+, and the AWS CLI
 configured with the `medauth-dev` profile.
 
 ```bash
