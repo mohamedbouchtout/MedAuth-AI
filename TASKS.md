@@ -382,6 +382,38 @@ Claude Code should read this before starting any task to understand current stat
   - **Test:** the whole CI matrix passes on the new runtime — that is the point
     of the change, and there is nothing else to assert that the suites do not
     already cover.
+  - Built. Decisions worth knowing:
+    - `.nvmrc` holds a bare major (`24`), not a patch version, so security
+      patches arrive without a commit. The exact floor that matters — jsdom 30's
+      `^24.15.0` — is expressed in `engines.node` as `>=24.15` instead, where it
+      belongs: `engines` is the constraint npm actually enforces at install time.
+    - The four `setup-node` steps read `node-version-file: .nvmrc`. The
+      `NODE_VERSION` env var is gone rather than left pointing at the file, so
+      there is nothing left to fall out of step with.
+    - jsdom 30 is the only dependency the runtime bump unblocked. Nothing else
+      in the JavaScript toolchain was held back by Node 20.
+    - **The declared jsdom version was not the one running, and bumping it alone
+      would have changed nothing.** `apps/web` declared jsdom 29; the suite
+      executed on **jsdom 20.0.3**. npm hoists a single copy to the workspace
+      root, and jest-expo's `jest-environment-jsdom@29` requires `jsdom@^20`, so
+      20 won the root slot and 29 sat nested under `apps/web`. Vitest lives at
+      the root too and resolves `jsdom` from its own location, so it loaded the
+      hoisted 20 and never saw the nested copy. Verified by reading
+      `navigator.userAgent` inside a real test run — jsdom stamps its version
+      there — not by reading `npm ls`, which showed the declaration rather than
+      the resolution.
+    - **The fix is a root `devDependencies` entry for jsdom, not an `overrides`
+      block.** A direct dependency of the workspace root always takes the root
+      slot, so Vitest now resolves 30 while jest-expo keeps its own 20 nested
+      beside it — each consumer gets a version it supports. An `overrides` entry
+      was tried first and rejected: it forces one version on every consumer,
+      which would have handed `jest-environment-jsdom@29` a major it does not
+      declare support for, to fix a problem that is about placement rather than
+      compatibility.
+    - The lesson generalises past jsdom: in a workspace where two toolchains want
+      the same library, what a `package.json` declares and what the runtime loads
+      are different questions, and only the second one matters. Probe the running
+      process when it matters.
 
 ---
 
@@ -1855,9 +1887,13 @@ The insurance policy RAG is the technical core. Build and validate before other 
       its own samples through `DataView.setInt16(..., true)`, so byte order is an
       argument rather than a property of the host. The code stays in the shared
       vocabulary because mobile can still emit it.
-    - **jsdom is pinned to 29, not 30.** Version 30 requires Node >= 22.22 and
-      `ci.yml` runs Node 20, so 30 resolves on a laptop and fails in CI. Worth
-      revisiting with the Node version itself rather than in isolation.
+    - **jsdom was declared at 29, not 30**, because 30 requires Node >= 22.22 and
+      `ci.yml` ran Node 20 at the time. TASK-007 moved the runtime to 24 and the
+      declaration to 30 — and found while doing so that *neither* number had ever
+      been the one executing: npm hoisted `jsdom@20` to the workspace root to
+      satisfy jest-expo, and Vitest resolves `jsdom` from its own location at the
+      root, so this suite ran on jsdom 20 throughout. See TASK-007 for the fix
+      and for why a declared dependency is not evidence of a resolved one.
     - React 19, not the React 18 CLAUDE.md named before this app existed;
       `apps/mobile` is already on 19.2.x through Expo SDK 57. Zustand is listed
       in CLAUDE.md for this app but is not installed — TASK-070 brings it with

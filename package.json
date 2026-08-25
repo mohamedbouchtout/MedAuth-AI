@@ -10,7 +10,10 @@
     "packages/fhir-types/typescript"
   ],
   "engines": {
-    "node": ">=24"
+    "node": ">=24.15"
+  },
+  "devDependencies": {
+    "jsdom": "^30.0.1"
   },
   "scripts": {
     "dev:web": "npm run dev --workspace apps/web",
