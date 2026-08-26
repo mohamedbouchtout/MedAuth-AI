@@ -1909,7 +1909,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
       from a clean `npm ci`: lint, `tsc --noEmit`, tests and a production build
       pass for `apps/web`, `apps/mobile` and `packages/audio-wire`.
 
-- [ ] **TASK-026:** Mobile capture deadline — fail when no audio arrives
+- [x] **TASK-026:** Mobile capture deadline — fail when no audio arrives
   - Prerequisite: TASK-022 (the hook this adds a deadline to)
   - App: `apps/mobile`
   - **What this closes.** `useAudioCapture` sets `starting`, calls
@@ -1934,9 +1934,48 @@ The insurance policy RAG is the technical core. Build and validate before other 
     handling — nothing was recorded, so a plain retry is the right offer, which
     is different from the not-retryable format failures next to it.
   - **Test:** a stream that starts and never delivers a buffer settles in
-    `error` with `CAPTURE_TIMED_OUT`, and opens no socket
+    `error` with `CAPTURE_TIMED_OUT`, and opens no socket ✓
   - **Test:** a buffer arriving before the deadline cancels it, and a long
-    encounter is never torn down by its own start-up timer
+    encounter is never torn down by its own start-up timer ✓
+  - Built. Notes:
+    - **The timeout is `FIRST_AUDIO_TIMEOUT_MS = 8_000`, in the mobile hook, and
+      it is a round-number default rather than a measured value** — the same
+      standing as `MAX_PENDING_BYTES` and for the same reason: no device
+      start-up latencies exist yet, and TASK-025 is what will produce them.
+      Deliberately *not* the browser's 3s. That number is anchored to something
+      measured — first Web Audio quantum within ~8ms once the context runs —
+      and bounds a path that never leaves the renderer. `stream.start()`
+      resolving only means the OS audio subsystem accepted the request, and on
+      a Bluetooth headset the input route is still being negotiated after it,
+      so reusing 3s would import a justification about a different platform.
+      Eight because the two ways of being wrong cost differently: too short
+      tears down a capture that was about to work and reports nothing was
+      recorded, which on reliably-slow hardware is a product that never records
+      and a retry that never helps; too long only makes the provider wait
+      longer for an error that is still actionable.
+    - **Each platform declares its own deadline; there is no shared constant.**
+      One number could only be right for one of them, since the browser bounds
+      an in-process Web Audio path and the device bounds the OS audio
+      subsystem. `CAPTURE_TIMED_OUT` stays shared in `packages/audio-wire` —
+      its doc comment was widened to carry both platforms' causes, since it had
+      been written entirely in terms of a suspended `AudioContext`.
+    - **The uncovered path was the one with no rate reported.** `start()`
+      checks the format only `if (reported.sampleRate)`, and zero — the native
+      side not having filled it in yet — falls straight through to waiting for
+      a buffer. That is the branch with nothing bounding it, so it has its own
+      test rather than being assumed covered by the general case.
+    - **`fail()` in the reported-format check needed an explicit `return`.** It
+      was the last statement in `start()` and so fell out of the function on
+      its own; with the deadline armed below it, dropping through would arm a
+      timer on an already-torn-down hook and replace an accurate
+      `SAMPLE_RATE_UNSUPPORTED` — not retryable on this hardware — with a
+      `CAPTURE_TIMED_OUT` that invites the retry. Tested directly.
+    - Disarming lives at the top of `teardown()` rather than at each call site,
+      so every failure path, `stop()` and the unmount cleanup all get it.
+    - The mobile suite ran entirely on real timers; these five tests install
+      `jest.useFakeTimers()` and an unconditional `jest.useRealTimers()` in
+      `afterEach` keeps a failure inside one from leaking a frozen clock into
+      the next test. 38 tests pass, coverage 99% statements / 94% branches.
 
 - [x] **TASK-024:** Policy query parameters — encounter state and procedure codes
   - Prerequisite: TASK-021 (defines the seam this task fills in), TASK-005
