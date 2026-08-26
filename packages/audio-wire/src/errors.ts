@@ -37,11 +37,19 @@ export type AudioCaptureErrorCode =
    *
    * Distinct from `CAPTURE_FAILED`, which means the microphone refused to start
    * and said so. This is the quieter failure: everything reported success and
-   * nothing came. In a browser the usual cause is an `AudioContext` that is
-   * suspended because the page never had user activation, and a suspended
-   * context does not error — it simply never runs the worklet. Without a
-   * deadline the hook would sit in `starting` forever, which is the silent hang
-   * this whole vocabulary exists to make impossible.
+   * nothing came. Both platforms emit it, for causes that do not resemble each
+   * other. In a browser the usual one is an `AudioContext` suspended because the
+   * page never had user activation, and a suspended context does not error — it
+   * simply never runs the worklet. On a device the stream starts and the OS
+   * delivers nothing: a microphone seized by another app, or an input route
+   * changing mid-start. What they share is the only thing that matters here —
+   * nothing errored, so the sole evidence is audio that did not arrive. Without
+   * a deadline the hook would sit in `starting` forever, which is the silent
+   * hang this whole vocabulary exists to make impossible.
+   *
+   * Each platform sets its own deadline rather than sharing one: the browser is
+   * bounding an in-process Web Audio path and the device is bounding the OS
+   * audio subsystem, and a single number could only be right for one of them.
    */
   | 'CAPTURE_TIMED_OUT'
   /**
