@@ -82,6 +82,18 @@ class Encounter(Base):
     insurance_plan_type: Mapped[str | None] = mapped_column(sa.String(100), nullable=True)
     insurance_member_id: Mapped[str | None] = mapped_column(sa.String(100), nullable=True)
 
+    #: Where the encounter takes place, as a two-character USPS code, or null
+    #: until a SMART launch supplies it (TASK-052b). This is the patient-facing
+    #: half of the `rag:{payer}:{plan_type}:{state}:{cpt_code}` key, and it is
+    #: matched against `insurance_policies.state` and
+    #: `insurance_policies.jurisdiction_states`, so it has to speak the same
+    #: vocabulary those columns do: `payer_vocab.normalize_state`, which
+    #: collapses CMS's sub-state jurisdiction codes (`DN`/`QN`/`UN`, `NF`/`SF`,
+    #: `EM`/`WM`, `CNMI`) onto their parent state. It is deliberately *not* the
+    #: payer's jurisdiction — a Medicare LCD covers a contractor's whole
+    #: multi-state jurisdiction, and that breadth lives on the policy row.
+    state: Mapped[str | None] = mapped_column(sa.CHAR(2), nullable=True)
+
     deleted_at: Mapped[datetime.datetime | None] = soft_delete_column()
 
     notes: Mapped[list[ClinicalNote]] = relationship(

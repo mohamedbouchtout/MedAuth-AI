@@ -42,6 +42,7 @@ EXPECTED_COLUMNS = {
         "insurance_payer",
         "insurance_plan_type",
         "insurance_member_id",
+        "state",
         "deleted_at",
     ],
     "clinical_notes": [
@@ -170,6 +171,23 @@ def test_child_tables_reference_encounters() -> None:
 def test_insurance_policies_stands_alone() -> None:
     """It holds public payer documents, not encounter data — no foreign keys."""
     assert InsurancePolicy.__table__.foreign_keys == set()
+
+
+def test_encounter_state_is_a_nullable_usps_code() -> None:
+    """CHAR(2) and nullable, matching insurance_policies.state.
+
+    The two columns are compared to each other, so a width or a nullability that
+    disagreed would either truncate a code on one side or force a value nothing
+    can supply on the other. Null means "not known yet" — TASK-052b is what
+    fills it, and until then every encounter has it unset.
+    """
+    column = Encounter.__table__.columns["state"]
+    assert isinstance(column.type, sa.CHAR)
+    assert column.type.length == 2
+    assert column.nullable
+
+    policy_state = InsurancePolicy.__table__.columns["state"]
+    assert column.type.length == policy_state.type.length
 
 
 def test_soft_delete_only_where_rows_may_be_retired() -> None:
