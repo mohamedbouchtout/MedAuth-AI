@@ -191,8 +191,20 @@ async def resolve_query_parameters(
     if not isinstance(outcome, ProcedureCode):
         raise MissingQueryParameters(("cpt_code",), reason=f"{outcome.reason}: {outcome.detail}")
 
-    # Only the four non-patient columns. See the module docstring: this is what
-    # makes reading the encounter a non-PHI access rather than an unaudited one.
+    # Only the four non-patient columns — provider, payer, plan type, state.
+    # This is what makes reading the encounter a non-PHI access rather than an
+    # unaudited one, so there is deliberately no audit_log() call here.
+    #
+    # That omission is correct only because the audit happens one level up: the
+    # /policies/query route (TASK-012) writes one audit row per call, and this
+    # dispatcher reaches it over HTTP precisely so that row cannot be bypassed
+    # (see the module docstring). If you are reading this because an unaudited
+    # PHI-adjacent SELECT looked like a bug — it is not, but the reasoning is
+    # load-bearing in both directions. Adding a patient column here (
+    # patient_fhir_id, insurance_member_id, ehr_encounter_id) turns this into a
+    # real PHI read that TASK-012's row does not cover, and the audit obligation
+    # would then genuinely be missing. Change the columns and you change the
+    # compliance answer.
     statement = sa.select(
         Encounter.provider_id,
         Encounter.insurance_payer,
