@@ -1479,8 +1479,10 @@ The insurance policy RAG is the technical core. Build and validate before other 
     guard is Redis-backed rather than in-process, so it holds across replicas.
   - **This task does not produce real policy queries end to end, by design.**
     `/policies/query` needs `payer`, `plan_type`, `state` and `cpt_code`, and
-    nothing in the system can supply them yet — see **TASK-024**, which is the
-    task that closes it. So this task calls a seam,
+    nothing in the system could supply them — see **TASK-024**, which supplied
+    `cpt_code`, and **TASK-052b**, which supplies the other three at SMART
+    launch and is what finally makes this path run end to end. So this task
+    calls a seam,
     `policy_dispatch.resolve_and_query_policy()`, whose parameter-resolution
     half raises and whose HTTP half is real and tested. Placeholder values were
     considered and rejected: the cache key is
@@ -1505,18 +1507,17 @@ The insurance policy RAG is the technical core. Build and validate before other 
       it is the only one that is not a network dependency. It earns the place
       for the reason above — a stopped consumer silently disables nudges for
       every encounter on that instance, and nothing else in the service notices.
-    - **The dedup key is the canonical keyword today, not the CPT code.** The
-      guard is `SADD procedure_seen:{session_id}`, which reports first-add
-      atomically in one round trip; a read-then-write pair would race, and
-      Transcribe delivers stabilized results in bursts. `claim_procedure()`
-      takes an opaque `procedure_key` so TASK-024 changes the call site and not
-      the guard. Worth knowing: until it does, two keywords that map to one CPT
-      code hold separate claims, because nothing yet knows they are the same
-      procedure.
+    - **The dedup key was the canonical keyword, and TASK-024 moved it to the
+      CPT code.** The guard is `SADD procedure_seen:{session_id}`, which reports
+      first-add atomically in one round trip; a read-then-write pair would race,
+      and Transcribe delivers stabilized results in bursts. `claim_procedure()`
+      takes an opaque `procedure_key`, so that move changed the call site and
+      not the guard — which is what it was left opaque for. Members are now
+      prefixed `cpt:` or `keyword:` depending on whether a code resolved.
     - **A structural failure keeps its claim; a transient one gives it back.**
       `MissingQueryParameters` means every later mention would fail identically,
-      so the claim stands and the TASK-024 warning is logged once per procedure
-      per session rather than once per segment. A timeout or transport error
+      so the claim stands and the warning naming the unresolved fields is logged
+      once per procedure per session rather than once per segment. A timeout or transport error
       releases the claim, so a later mention gets another attempt instead of
       being silently suppressed for the rest of the visit.
     - **`clinical_context` carries the excerpt and nothing else.** Stage 2's
@@ -1937,23 +1938,38 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **Test:** a buffer arriving before the deadline cancels it, and a long
     encounter is never torn down by its own start-up timer
 
-- [ ] **TASK-024:** Policy query parameters — encounter state and procedure codes
+- [x] **TASK-024:** Policy query parameters — encounter state and procedure codes
   - Prerequisite: TASK-021 (defines the seam this task fills in), TASK-005
     (owns the `encounters` migration this task adds a column to)
   - **What this closes.** TASK-021 detects a procedure in a live transcript and
     can name it, but `POST /policies/query` also needs `payer`, `plan_type`,
-    `state` and `cpt_code`, and nothing supplies them. The gap was found while
+    `state` and `cpt_code`, and nothing supplied them. The gap was found while
     building TASK-021 and deliberately left open there rather than papered over:
-    `policy_dispatch.resolve_query_parameters()` raises
-    `MissingQueryParameters` on every call, the consumer logs it once per
-    procedure per session, and this task replaces that function body. Nothing
-    else in the consumer changes — that is what the seam is for.
+    `policy_dispatch.resolve_query_parameters()` raised `MissingQueryParameters`
+    on every call and the consumer logged it once per procedure per session.
+    This task replaces that function body. **It closes `cpt_code` and nothing
+    else of those four** — `payer`, `plan_type` and `state` are TASK-052b's,
+    see the scope note below. It also removes `provider_id` from that list,
+    which was never genuinely missing.
   - **Nothing here may be approximated.** The Redis cache key is
     `rag:{payer}:{plan_type}:{state}:{cpt_code}`. A guessed CPT code does not
     merely return a poor answer for one encounter: it writes a real, cacheable
     policy answer under a key that stands for a different procedure, and the
     next encounter matching that key is served it. The failure is silent and
     crosses patients, which is why this is its own reviewed task.
+  - **Scope: the payer columns are not part of this task.** `payer`,
+    `plan_type` and `state` are populated from a FHIR `Coverage` resource at
+    SMART launch, which needs TASK-051 and TASK-052 — neither of which exists.
+    That population is **TASK-052b**, and this task is deliberately shipped
+    without waiting for it rather than sitting idle: the migration, the code
+    mapping, the dedup-key move and the audit decision are all independent of
+    it, and the same "build behind a seam and be honest about what is stubbed"
+    pattern is what created this task out of TASK-021. No placeholder value was
+    invented in the meantime, for the reason above. So
+    `resolve_query_parameters()` still raises for every real encounter — but it
+    now names the fields genuinely absent for *that* encounter rather than a
+    fixed list, so the warning keeps meaning something as TASK-052b fills them
+    in one at a time.
   - **Add `state` to `encounters`** via a real Alembic migration in
     track-a-clinical (`alembic_version_track_a_clinical`, per CLAUDE.md).
     Two-character USPS code, nullable — it is unknown until an EHR launch
@@ -1961,44 +1977,113 @@ The insurance policy RAG is the technical core. Build and validate before other 
     normalises CMS's sub-state codes (`DN`/`QN`/`UN`, `NF`/`SF`, `EM`/`WM`,
     `CNMI`) to a parent state on the ingestion side, and this column is the
     other half of the comparison, so it must use the same vocabulary.
-  - **Design the keyword-to-CPT mapping.** This is the part with real design
-    content and should not be reduced to a dictionary literal without answering:
-    - Which code, when a keyword covers many? "MRI" alone spans dozens of CPT
-      codes by body part and contrast. The transcript excerpt names the body
-      part often enough to matter, and the excerpt is already extracted.
-    - What happens when the mapping is ambiguous or absent? A wrong code is
-      worse than no query, per the cache reasoning above — so the honest answer
-      is likely to be "do not query, and say so", the same shape TASK-021 uses
-      now.
-    - How does a new specialty extend it? MedAuth targets orthopedics and
-      dermatology first (see the EHR priority order); a hardcoded dict that a
-      dermatologist cannot extend without a deploy is a product problem, not
-      only a code one.
-    - Where does it live? Both track-b-rag and, later, prior-auth need procedure
-      codes. If a second consumer appears, it belongs in `packages/`, on the
-      same reasoning as `packages/payer-vocab`.
-  - **Populate `payer`, `plan_type` and `state` at SMART launch.** The payer
-    columns already exist on `encounters` and are filled from a FHIR `Coverage`
-    resource — that is TASK-051/TASK-052's work, so this task depends on them
-    for a *real* value and should not invent one meanwhile. Resolve the payer
-    through `normalize_payer()` from `packages/payer-vocab`, never a raw
-    display name.
-  - **Move TASK-021's dedup key to the CPT code** once the mapping exists.
-    `claim_procedure()` already takes an opaque `procedure_key`; today the
-    caller passes the canonical keyword, so two keywords naming one code hold
-    separate claims and can raise two nudges for one order.
-  - Consider, and decide deliberately: whether the consumer reading `encounters`
-    to build a query is itself a PHI access needing its own `audit_log()` row,
-    or whether the row `/policies/query` already writes covers it. Reading only
-    the non-patient columns is the reason to say no; Known Constraints #6 says
-    to flag rather than guess, and this is the flag.
-  - **Test:** a transcript naming "MRI of the left knee" produces a query with a
-    knee MRI CPT code, not a generic one
-  - **Test:** a keyword with no confident code mapping produces no query and a
-    log line naming the keyword — never a query with a placeholder code
-  - **Test:** the migration adds `state` and the model round-trips it
-  - **Test:** end to end over Redis, replacing TASK-021's stubbed seam — a
-    published transcript segment produces a real `/policies/query` call
+  - **`provider_id` was never missing.** An earlier draft of this task listed it
+    among the unresolved parameters and it sat in `UNRESOLVED_PARAMETERS`
+    alongside the four real gaps. It has been a non-null column on `encounters`
+    since TASK-005 and needed nothing but a `SELECT`. Corrected here rather than
+    left to look like a design constraint, the same way the Node.js
+    `fhir-integration` and `expo-av` lines were.
+  - **Design the keyword-to-CPT mapping.** Built as
+    `services/track-b-rag/src/track_b_rag/procedure_codes.py`. The four
+    questions this task posed, and the answers taken:
+    - *Which code, when a keyword covers many?* A qualifier drawn from a closed
+      vocabulary per keyword — a body site for imaging, a modality for a stress
+      test — matched against the excerpt and resolved to the qualifier nearest
+      the keyword, so "the shoulder is fine, let's MRI the knee" is a knee MRI.
+      The longer of two overlapping matches wins, so "abdomen and pelvis" is its
+      own code rather than the abdomen one nested inside it.
+    - *What happens when the mapping is ambiguous or absent?* No query, and a
+      log line naming the keyword. An entry exists only where the spoken phrase
+      pins the code down to the level payers publish criteria at; where an
+      unstated axis would change the authorization answer there is no entry.
+      That admits MRI, CT, echocardiography and stress testing — the high-cost
+      studies prior auth actually gates — and excludes X-ray (view count is a
+      technologist's decision), arthroscopy (decided intraoperatively),
+      injection (guidance and joint size) and biopsy (technique). Where an entry
+      does fix an unstated axis it names it in `assumes` rather than leaving it
+      implicit.
+    - *How does a new specialty extend it?* By adding rows to a curated table
+      matched deterministically — the same shape `packages/payer-vocab` uses,
+      so extending never means making the matcher cleverer. It still needs a
+      deploy, which is a product problem and not only a code one; **TASK-024b**
+      tracks putting the table behind a loader so a practice can extend it.
+    - *Where does it live?* A module in track-b-rag, because it has one consumer
+      today. `packages/api-envelope` was extracted when a second consumer
+      appeared and not before, and prior-auth (TASK-060) is that trigger here.
+      Unlike a payer slug, a CPT code is an external identifier this repo does
+      not mint, so nothing stored depends on where the table lives.
+  - **"No code" is four answers, not one**, because they are not equally fixable
+    and an operator reading a log line has to tell them apart: a keyword that
+    names no coded procedure at all (a biologic is a drug; a referral is
+    administrative), one whose code turns on something never spoken, a missing
+    qualifier, and a recognised qualifier with no entry yet. Only the last means
+    *extend the table*.
+  - **The CPT table is not clinically verified, and CPT is AMA-licensed.**
+    Descriptors in the module are short paraphrases rather than the AMA's own.
+    Nothing can query on the table yet, because the payer columns are still
+    empty — so a certified coder's review and a licensing decision are
+    prerequisites on **TASK-052b**, which is the task that makes any of it live.
+    Do not close TASK-052b without them.
+  - **Move TASK-021's dedup key to the CPT code.** Done:
+    `policy_dispatch.procedure_key()` returns `cpt:{code}` where a code resolves
+    and `keyword:{keyword}` where it does not, and the consumer claims that
+    instead of the bare keyword. A knee MRI and a hip MRI are both 73721 and now
+    hold one claim between them, so one order raises one nudge. `claim_procedure()`
+    was left taking an opaque `procedure_key` for exactly this, so the guard
+    itself is unchanged. The prefixes keep a keyword claim from ever colliding
+    with a code claim and make the set self-describing when read out of Redis.
+  - **Decided: reading `encounters` to build a query is not a PHI access**, so
+    it writes no `audit_log()` row and the audit obligation stays where it is —
+    one row per `/policies/query` call, written by the route. The decision is
+    enforced by the query rather than by convention: the `SELECT` names
+    `provider_id`, `insurance_payer`, `insurance_plan_type` and `state` and
+    nothing else, and an integration test asserts the emitted SQL so that a
+    later `select(Encounter)` cannot quietly turn it into a PHI read. Known
+    Constraints #6 says to flag rather than guess; this is the flag, resolved.
+  - **A database failure is not a structural one.** `MissingQueryParameters`
+    keeps the dedup claim, which is right for "this can never work" and wrong
+    for a dropped connection — that would silence the procedure for the rest of
+    the visit. Database exceptions propagate untouched so the consumer releases
+    the claim.
+  - **Test:** a transcript naming "MRI of the left knee" resolves a knee MRI CPT
+    code, not a generic one ✓
+  - **Test:** a keyword with no confident code mapping produces no code and a
+    reason naming which of the four kinds of "no" it is — never a placeholder ✓
+  - **Test:** the migration adds `state` and the model round-trips it, against a
+    real migrated database ✓
+  - **Test:** a fully populated encounter resolves every parameter, and an empty
+    one names exactly the three columns TASK-052b fills ✓
+  - **Test:** the emitted `SELECT` reads no patient column ✓
+  - Built. The end-to-end test over Redis — a published transcript segment
+    producing a real `/policies/query` call — is **TASK-052b's** acceptance
+    criterion, because it cannot pass until the payer columns are populated.
+
+- [ ] **TASK-024b:** Extensible procedure code table
+  - Prerequisite: TASK-024 (builds the table this moves)
+  - Service: `services/track-b-rag`
+  - **Why this exists.** TASK-024 asked how a new specialty extends the
+    keyword-to-CPT mapping, and the answer it shipped is "add rows and deploy".
+    That is fine for adding orthopedic and dermatology coverage ourselves and
+    wrong as a product answer: a dermatology practice whose common procedures we
+    have not coded gets silence, and cannot do anything about it. MedAuth
+    targets exactly those specialties first (see the EHR priority order), so
+    this is a customer-facing gap and not only a code one.
+  - Move `KEYWORD_RULES` behind a loader so the table is data rather than
+    source, and decide deliberately where practice-specific rows live — a
+    config file, a Postgres table keyed by organization, or both. An
+    organization-scoped table is the likely answer, since `encounters` already
+    carries `organization_id`.
+  - **A practice-supplied row is subject to the same rule as ours**: an entry
+    exists only where the spoken phrase determines the code. A tenant able to
+    map "MRI" to one code for everything would reintroduce precisely the cache
+    collision TASK-024 exists to prevent, on their own data and ours — the
+    `rag:` key is not scoped per organization.
+  - Keep the four refusal reasons; a loaded table changes where rows come from,
+    not what "no code" means.
+  - **Test:** a practice-scoped row resolves for that organization and not for
+    another
+  - **Test:** a row that would collapse two procedures onto one code is rejected
+    at load, naming the conflict
 
 - [ ] **TASK-025:** Mobile session screen
   - Prerequisite: TASK-006 (`POST /sessions/start` and `/end`), TASK-022 (the
@@ -2194,6 +2279,66 @@ logic do not change.
   - **Test:** against local HAPI FHIR loaded with Synthea patients — verify all fields populated
   - **Test:** against Athenahealth sandbox with real sandbox credentials
 
+- [ ] **TASK-052b:** Populate encounter payer, plan type and state at SMART launch
+  - Prerequisite: **TASK-051** (the SMART launch that produces a session),
+    **TASK-052** (`get_coverage()`, which is what actually reads the payer off a
+    FHIR `Coverage` resource), TASK-006 (owns `POST /sessions/start`, which is
+    where an encounter row is created), TASK-024 (added the `state` column and
+    the resolution that consumes these three)
+  - Services: `services/fhir-integration`, `services/track-a-clinical`
+  - **Why this exists as its own task.** TASK-024 closed three of the four
+    parameters `POST /policies/query` needs — `cpt_code` from the keyword
+    mapping, `provider_id` from the encounter row — and could not close
+    `payer`, `plan_type` or `state`, because the only honest source for them is
+    a FHIR `Coverage` resource fetched at SMART launch and neither TASK-051 nor
+    TASK-052 exists. TASK-024 shipped without them rather than waiting, and
+    without inventing a placeholder: `rag:{payer}:{plan_type}:{state}:{cpt_code}`
+    is a cache key, so a fabricated payer or plan writes a real policy answer
+    under a key standing for a different plan and serves it to the next
+    encounter. Silent, and it crosses patients — the same bug class TASK-016
+    and TASK-017 already fixed once for the payer slug.
+  - **This is the task that makes Track B run end to end.** Until it lands,
+    `resolve_query_parameters()` raises for every real encounter, the transcript
+    consumer logs "no source yet for payer, plan_type, state" once per procedure
+    per session, and no nudge can ever fire. Nothing else is missing.
+  - Populate the three columns on the `encounters` row:
+    - `insurance_payer` — the payer's own display name from `Coverage.payor`,
+      kept as spelled. It is normalised to a slug by `/policies/query` through
+      `payer_vocab.normalize_payer()`, which is the single normalisation site;
+      do not slug it on the way in as well, and do not store a slug in a column
+      the schema documents as the payer's own spelling.
+    - `insurance_plan_type` — from `Coverage.type` / `Coverage.class`. Decide
+      deliberately what to do when the resource carries neither, and write it
+      down; a plan type guessed from the payer's name is a fabricated cache key
+      segment.
+    - `state` — two-character USPS, through `payer_vocab.normalize_state()`, so
+      it speaks the vocabulary `insurance_policies.state` is matched against.
+      Decide where it comes from: the patient's address, the practice location,
+      or the `Coverage` resource — they disagree for a patient treated out of
+      state, and which one the payer's policy follows is the question to answer.
+  - **A partial `Coverage` is not an error and must not become a guess.**
+    TASK-052 already returns `requires_manual_confirmation: true` rather than
+    failing when payer info is incomplete. A column left NULL here is correct
+    and the resolution seam already handles it: it names exactly the fields
+    still absent. Filling one in with a default would be worse than leaving it.
+  - **Before closing this task, the CPT table must be clinically reviewed.**
+    TASK-024's `procedure_codes.py` was written from general knowledge, not from
+    a licensed AMA CPT distribution, and no code in it can reach a provider
+    until this task populates the payer columns. So this is the gate: a
+    certified coder signs off on the code/qualifier pairings and the `assumes`
+    annotations, and the AMA CPT licensing position is settled, before Track B
+    fires a nudge at anyone. Do not close this without both.
+  - **Test:** a SMART launch against local HAPI FHIR with a Synthea patient
+    populates all three columns, and `resolve_query_parameters()` then returns a
+    complete parameter set
+  - **Test:** a `Coverage` resource with no plan type leaves the column NULL and
+    the resolution names `plan_type` alone — never a default
+  - **Test:** a CMS sub-state jurisdiction code reaching the state field is
+    normalised to its parent state rather than stored raw
+  - **Test:** end to end over Redis, replacing TASK-021's stubbed seam — a
+    published transcript segment produces a real `/policies/query` call. This is
+    TASK-024's deferred acceptance criterion and it belongs here, because it
+    cannot pass until these columns are populated.
 - [ ] **TASK-053:** SOAP note write-back (base.py)
   - Implement `write_clinical_note(encounter_id, note_text, icd10_codes)` in base.py
   - Creates FHIR DocumentReference resource (LOINC 11488-4 — Consult note)

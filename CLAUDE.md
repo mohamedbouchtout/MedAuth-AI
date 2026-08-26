@@ -409,10 +409,15 @@ sessions:started                 pub/sub — the one fixed channel here, carryin
 procedure_seen:{session_id}      set, 4h TTL — the procedure keys already
                                  queried during one encounter, so a procedure
                                  named three times raises one nudge and not
-                                 three (TASK-021). Claimed with SADD, which
-                                 reports first-add atomically; deleted on
-                                 session:ended, with the TTL only bounding a
-                                 visit that never ends.
+                                 three (TASK-021). Members are `cpt:{code}`
+                                 where a CPT code resolves and
+                                 `keyword:{keyword}` where none does
+                                 (TASK-024), so two keywords naming one
+                                 procedure share a claim — a knee MRI and a hip
+                                 MRI are both 73721 and are one order. Claimed
+                                 with SADD, which reports first-add atomically;
+                                 deleted on session:ended, with the TTL only
+                                 bounding a visit that never ends.
 rag:{payer}:{plan_type}:{state}:{cpt_code}
                                   cache, 24h TTL — payer-policy fields ONLY
                                   (requires_auth, auth_criteria,
