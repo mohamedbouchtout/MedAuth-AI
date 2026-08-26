@@ -44,13 +44,27 @@ fixable and an operator reading a log line should be able to tell them apart:
 **What is in the table, and the rule that decides.** An entry exists when the
 spoken phrase pins the code down to the level at which payers publish criteria.
 Where an unstated axis would change the authorization answer, there is no entry.
-That leaves the high-cost imaging and cardiac studies prior authorization
-actually gates — MRI, CT, echocardiography, stress testing — and excludes
-X-ray, arthroscopy, injection and biopsy, each for a reason recorded next to it.
 Where an entry does fix an unstated axis (an MRI order means "without contrast"
 unless someone escalates it), the assumption is named in
 :attr:`ProcedureCode.assumes` rather than left implicit, so a reviewer can see
 what was decided on their behalf.
+
+**The qualifier axis is not always a body site.** MRI and CT turn on anatomy, a
+stress test on modality, an arthroscopy on the intervention the surgeon plans,
+and a joint injection on joint size. Reading "which axis selects this code" as
+"which body part" is what made an earlier draft of this module exclude
+arthroscopy and injection outright — the axis was spoken, it just was not the
+one being looked for. Both are mapped here.
+
+**X-ray and biopsy remain unmapped, and that is a decision rather than a gap.**
+An X-ray's code is selected by the number of views, which the technologist
+chooses at the machine; plain radiography is also essentially never
+prior-authorization gated, so a query would spend a Qdrant search and a Sonnet
+call to retrieve nothing and report a miss that is indistinguishable from a
+corpus we do not hold. "biopsy" spans body systems whose code families have
+nothing in common, and the gated ones (breast) split by imaging guidance while
+the ones our target specialties order most (skin) split by technique — neither
+of which is spoken. See TASK-024 for what would change either.
 
 **The codes in this table are not clinically verified and CPT is AMA-licensed
 material.** The descriptors here are short paraphrases, not the AMA's own long
@@ -192,19 +206,14 @@ NEVER_CODED: Final[dict[str, str]] = {
 #: said out loud in an exam room.
 AXIS_NOT_SPOKEN: Final[dict[str, str]] = {
     "X-ray": (
-        "the number of views selects the code and is a technologist's decision, not a spoken one"
-    ),
-    "arthroscopy": (
-        "the code follows what is done inside the joint — meniscectomy, chondroplasty, repair — "
-        "which is decided intraoperatively, after this conversation"
-    ),
-    "injection": (
-        "joint size and whether imaging guidance is used select the code, and neither is "
-        "reliably spoken"
+        "the number of views selects the code and is a technologist's decision at the machine; "
+        "plain radiography is also not prior-authorization gated, so a query would report a "
+        "retrieval miss rather than an answer"
     ),
     "biopsy": (
-        "technique selects the code — tangential, punch and incisional biopsies differ by "
-        "technique alone — and it is rarely stated when the biopsy is proposed"
+        "the keyword spans body systems with unrelated code families — the gated ones split by "
+        "imaging guidance and the common dermatology ones by technique, and neither is spoken "
+        "when the biopsy is proposed"
     ),
 }
 
@@ -334,6 +343,94 @@ KEYWORD_RULES: Final[dict[str, KeywordRule]] = {
         #: An unqualified "echocardiogram" in an office encounter means a
         #: transthoracic study; a TEE is scheduled deliberately and named.
         default_qualifier="transthoracic",
+    ),
+    "arthroscopy": KeywordRule(
+        # Not the body site: a knee and a shoulder arthroscopy are different code
+        # families, but the intervention names the joint implicitly — a rotator
+        # cuff is a shoulder, a meniscus is a knee — so one axis carries both.
+        axis="planned intervention",
+        qualifiers=(
+            ("rotator cuff repair", r"\brotator\s+cuff\b"),
+            ("meniscus repair", r"\b(?:meniscus\s+repair|repair\s+(?:the\s+|a\s+)?meniscus)\b"),
+            ("meniscectomy", r"\b(?:meniscectomy|trim\s+(?:the\s+)?meniscus)\b"),
+            ("chondroplasty", r"\bchondroplast(?:y|ies)\b"),
+        ),
+        codes={
+            "meniscectomy": ProcedureCode(
+                cpt_code="29881",
+                procedure="knee arthroscopy with meniscectomy",
+                descriptor="Arthroscopy, knee, surgical; with meniscectomy, medial OR lateral",
+                assumes=("a single compartment — 29880 is the medial AND lateral code",),
+            ),
+            "meniscus repair": ProcedureCode(
+                cpt_code="29882",
+                procedure="knee arthroscopy with meniscus repair",
+                descriptor="Arthroscopy, knee, surgical; with meniscus repair, medial OR lateral",
+                assumes=("a single meniscus — 29883 is the medial AND lateral code",),
+            ),
+            "rotator cuff repair": ProcedureCode(
+                cpt_code="29827",
+                procedure="shoulder arthroscopy with rotator cuff repair",
+                descriptor="Arthroscopy, shoulder, surgical; with rotator cuff repair",
+            ),
+            "chondroplasty": ProcedureCode(
+                cpt_code="29877",
+                procedure="knee arthroscopy with chondroplasty",
+                descriptor="Arthroscopy, knee, surgical; with chondroplasty",
+            ),
+        },
+        # No default. "She may need an arthroscopy" names no intervention, and a
+        # torn meniscus can be trimmed or repaired — different codes, and which
+        # one is a decision that has not been made yet at this point in the
+        # visit. A bare "meniscus" therefore selects nothing on purpose.
+    ),
+    "injection": KeywordRule(
+        # Joint size is the axis, and it is spoken far more often than not —
+        # "a cortisone injection in the shoulder" names it. Imaging guidance is
+        # the axis that is not spoken, and it is handled by `assumes` the same
+        # way contrast is on the MRI entries.
+        axis="injection site",
+        qualifiers=(
+            ("major joint", r"\b(?:shoulders?|hips?|knees?|subacromial)\b"),
+            (
+                "intermediate joint",
+                r"\b(?:elbows?|wrists?|ankles?|acromioclavicular|olecranon"
+                r"|temporomandibular|t\.?m\.?j\.?)\b",
+            ),
+            (
+                "small joint",
+                r"\b(?:fingers?|toes?|interphalangeal|metacarpophalangeal)\b",
+            ),
+            # Recognised and deliberately uncoded, so these report "extend the
+            # table" rather than "nothing was stated". An epidural steroid
+            # injection is a spine code selected by level and approach, and a
+            # trigger point injection by how many muscles were injected —
+            # both are real gaps, unlike a joint nobody named.
+            ("epidural", r"\bepidural\b"),
+            ("trigger point", r"\btrigger\s+points?\b"),
+        ),
+        codes={
+            "major joint": ProcedureCode(
+                cpt_code="20610",
+                procedure="major joint injection",
+                descriptor="Arthrocentesis, aspiration or injection; major joint or bursa",
+                assumes=("without ultrasound guidance — 20611 is the guided code",),
+            ),
+            "intermediate joint": ProcedureCode(
+                cpt_code="20605",
+                procedure="intermediate joint injection",
+                descriptor="Arthrocentesis, aspiration or injection; intermediate joint or bursa",
+                assumes=("without ultrasound guidance — 20606 is the guided code",),
+            ),
+            "small joint": ProcedureCode(
+                cpt_code="20600",
+                procedure="small joint injection",
+                descriptor="Arthrocentesis, aspiration or injection; small joint or bursa",
+                assumes=("without ultrasound guidance — 20604 is the guided code",),
+            ),
+        },
+        # No default: "an injection" spans joint, epidural, tendon sheath and
+        # trigger point families, and they are not variants of one another.
     ),
     "stress test": KeywordRule(
         axis="stress modality",
