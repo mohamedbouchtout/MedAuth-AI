@@ -331,6 +331,47 @@ otherwise has no issuer. Fixed here:
   prerequisite for TASK-020, TASK-021, TASK-030, TASK-041, and TASK-060. Do not
   start those without TASK-006 done first.
 
+**A visit outlasting the token re-mints; the encounter never ends because a
+token expired.** `SESSION_TTL_SECONDS` is 15 minutes and a real orthopedic or
+dermatology encounter routinely runs longer, so this is an ordinary case rather
+than an edge one. It is settled here, once, because both session screens hit it
+identically — TASK-025 on mobile and TASK-070 on web — and two apps each
+deciding it alone is how they end up disagreeing. Both cite this section;
+neither re-derives it.
+
+- **The token bounds connection establishment, not stream lifetime.** Every
+  real-time endpoint validates the JWT once, before completing the handshake,
+  and never re-validates a connection that is already open — see
+  `audio_stream()` in `services/audio-ingestion/src/api/websocket.py`, where
+  `_authenticate` runs ahead of `accept()` and nothing in the receive loop
+  revisits it. So an audio socket opened at minute 0 keeps streaming at minute
+  40. Expiry only bites when a *new* socket must be opened: a reconnect after a
+  drop, or the nudge socket (TASK-041) opening later than the audio socket.
+- **Re-mint for the same `session_id`. Never by calling `POST /sessions/start`
+  again.** A second start creates a second `encounters` row with a new
+  server-generated `session_id`, which forks one visit into two encounters:
+  the transcript splits across two `transcription:{session_id}` channels,
+  TASK-030 generates two partial SOAP notes from two partial buffers, TASK-060
+  assembles a bundle from whichever half it saw, and the `procedure_seen:` set
+  no longer dedups across the visit, so one procedure raises a nudge twice.
+  Nothing errors anywhere along that path — it is the failure this bullet
+  exists to prevent, and it is exactly the shortcut a client reaches for when
+  the only endpoint it has is `/sessions/start`.
+- **The endpoint that re-mints without starting a session is TASK-006b**, and it
+  does not exist yet. Until it lands, a client that needs a socket after `exp`
+  has no correct move: it must surface `AUTH_REJECTED` and let the provider end
+  the visit and begin a new one. That is a poor experience and an honest one —
+  strictly better than silently forking the encounter. Do not work around the
+  gap by re-calling `/sessions/start`.
+- **Once TASK-006b exists, refresh proactively and reactively**: before opening
+  any new socket when the held token is close to `exp`, and on `AUTH_REJECTED`
+  from a socket that failed to open. Clients already hold `exp` — a claim in
+  the token they were given — so the proactive check costs nothing.
+- **A refreshed token does not extend the encounter.** The encounter ends when
+  the provider ends it, via `POST /sessions/{session_id}/end`. Token lifetime
+  and visit lifetime are independent, and conflating them is what produced the
+  question in the first place.
+
 **How the JWT reaches a WebSocket endpoint — either carrier, never both
 required.** A WebSocket endpoint accepts the session token in *either* of two
 places, and one is enough:
