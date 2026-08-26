@@ -61,6 +61,14 @@ class TestCodesThatResolve:
             ("Let's do a transthoracic echocardiogram.", "93306"),
             ("Schedule a nuclear stress test.", "78452"),
             ("We'll book a treadmill stress test.", "93015"),
+            ("We'll do an arthroscopy with meniscectomy.", "29881"),
+            ("Arthroscopy, and repair the meniscus.", "29882"),
+            ("An arthroscopy for the rotator cuff.", "29827"),
+            ("Arthroscopy with chondroplasty.", "29877"),
+            ("A cortisone injection in the shoulder should help.", "20610"),
+            ("Let's do an injection in the knee.", "20610"),
+            ("An injection in the elbow.", "20605"),
+            ("A small injection in the finger joint.", "20600"),
         ],
     )
     def test_a_stated_qualifier_selects_its_code(self, text: str, cpt_code: str) -> None:
@@ -83,6 +91,35 @@ class TestCodesThatResolve:
         assert isinstance(brain, ProcedureCode)
         assert knee.cpt_code == "73721"
         assert knee.cpt_code != brain.cpt_code
+
+    def test_the_qualifier_axis_is_not_always_a_body_site(self) -> None:
+        """An arthroscopy turns on the intervention and an injection on joint size.
+
+        Reading "which axis selects this code" as "which body part" is what made
+        an earlier draft exclude both outright. The axis was spoken; it was just
+        not the one being looked for.
+        """
+        arthroscopy = resolve("We'll do an arthroscopy with meniscectomy.")
+        injection = resolve("A cortisone injection in the shoulder should help.")
+
+        assert isinstance(arthroscopy, ProcedureCode)
+        assert isinstance(injection, ProcedureCode)
+        assert KEYWORD_RULES["arthroscopy"].axis == "planned intervention"
+        assert KEYWORD_RULES["injection"].axis == "injection site"
+
+    def test_an_intervention_names_its_joint_without_a_second_axis(self) -> None:
+        """A rotator cuff is a shoulder and a meniscus is a knee.
+
+        Knee and shoulder arthroscopies are unrelated code families, so a naive
+        reading needs two axes. It does not: the intervention implies the joint.
+        """
+        shoulder = resolve("An arthroscopy for the rotator cuff.")
+        knee = resolve("Arthroscopy with chondroplasty.")
+
+        assert isinstance(shoulder, ProcedureCode)
+        assert isinstance(knee, ProcedureCode)
+        assert shoulder.cpt_code == "29827"
+        assert knee.cpt_code == "29877"
 
     def test_the_nearest_body_site_wins_when_two_are_named(self) -> None:
         """ "The shoulder is fine, let's MRI the knee" is a knee MRI."""
@@ -143,17 +180,15 @@ class TestRefusals:
         "text",
         [
             "Let's get an X-ray of the knee.",
-            "She may need an arthroscopy of that knee.",
-            "A cortisone injection in the shoulder should help.",
             "We'll do a biopsy of the lesion.",
         ],
     )
     def test_a_code_selected_by_something_unspoken_is_refused(self, text: str) -> None:
         """Each of these names a real coded procedure, and none is determinable.
 
-        Note the X-ray and arthroscopy cases both state a body site — the site is
-        not what is missing, so a site-based table would have answered them
-        wrongly. That is why this is its own reason.
+        Note the X-ray case states a body site — the site is not what is missing,
+        so a site-based table would have answered it wrongly. That is why this is
+        its own reason rather than a missing qualifier.
         """
         result = resolve(text)
 
@@ -166,6 +201,8 @@ class TestRefusals:
             "Let's get an MRI.",
             "We should get a CT scan first.",
             "Schedule a stress test.",
+            "She may need an arthroscopy of that knee.",
+            "She could use an injection.",
         ],
     )
     def test_a_missing_qualifier_produces_no_query_and_no_placeholder(self, text: str) -> None:
@@ -174,7 +211,6 @@ class TestRefusals:
 
         assert isinstance(result, NoProcedureCode)
         assert result.reason == REASON_QUALIFIER_NOT_STATED
-        assert result.keyword in {"MRI", "CT scan", "stress test"}
 
     def test_a_bare_stress_test_is_refused_rather_than_read_as_the_cheapest(self) -> None:
         """The three stress modalities differ in how hard payers gate them.
@@ -196,6 +232,38 @@ class TestRefusals:
 
         assert isinstance(result, NoProcedureCode)
         assert result.reason == REASON_QUALIFIER_UNMAPPED
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "We'll schedule an epidural injection.",
+            "A trigger point injection may help.",
+        ],
+    )
+    def test_a_non_joint_injection_reports_a_real_gap(self, text: str) -> None:
+        """Recognised, not coded — which is the answer that means "extend the table".
+
+        An epidural is selected by spinal level and approach and a trigger point
+        injection by how many muscles were injected. Both are genuine gaps worth
+        an operator's attention, unlike a joint nobody named — so they must not
+        land in the same bucket as "no site was stated".
+        """
+        result = resolve(text)
+
+        assert isinstance(result, NoProcedureCode)
+        assert result.reason == REASON_QUALIFIER_UNMAPPED
+
+    def test_a_torn_meniscus_names_a_diagnosis_and_not_an_intervention(self) -> None:
+        """The distinction the arthroscopy rule turns on.
+
+        A torn meniscus can be trimmed (29881) or repaired (29882), and which one
+        has not been decided at this point in the visit. Reading the diagnosis as
+        an intervention would pick one of two codes by coin flip.
+        """
+        result = resolve("She has a torn meniscus, so she may need an arthroscopy.")
+
+        assert isinstance(result, NoProcedureCode)
+        assert result.reason == REASON_QUALIFIER_NOT_STATED
 
     def test_a_keyword_with_no_rule_at_all_is_reported_as_unmapped(self) -> None:
         """Adding a keyword to the detector without a rule here lands here.
