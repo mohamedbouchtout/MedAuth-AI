@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react-native';
 
 import { CHUNK_BYTES, MAX_PENDING_BYTES } from '@medauth/audio-wire';
 
-import { useAudioCapture } from '../../../src/hooks/useAudioCapture';
+import { FIRST_AUDIO_TIMEOUT_MS, useAudioCapture } from '../../../src/hooks/useAudioCapture';
 
 /**
  * Host byte order, as the hook sees it.
@@ -138,6 +138,12 @@ beforeEach(() => {
   mockReportedFormat.channels = 1;
   mockRequestPermission.mockResolvedValue({ granted: true });
   (globalThis as { WebSocket?: unknown }).WebSocket = FakeWebSocket;
+});
+
+afterEach(() => {
+  // Only the deadline tests install fake timers; restoring unconditionally keeps
+  // a failure inside one of them from leaking a frozen clock into the next test.
+  jest.useRealTimers();
 });
 
 describe('useAudioCapture — requested format', () => {
@@ -654,5 +660,109 @@ describe('useAudioCapture — stopping', () => {
     });
 
     expect(mockStreamStart).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** Run the fake clock forward, letting React settle whatever the timer caused. */
+async function advance(ms: number): Promise<void> {
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(ms);
+  });
+}
+
+describe('useAudioCapture — the wait for the first buffer is bounded', () => {
+  it('reports CAPTURE_TIMED_OUT when no buffer ever arrives', async () => {
+    jest.useFakeTimers();
+    const { result } = await renderHook(() => useAudioCapture(OPTIONS));
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    // Permission granted, the stream started, the rate it reported matched —
+    // every upstream step said success and no audio came.
+    expect(result.current.state.status).toBe('starting');
+
+    await advance(FIRST_AUDIO_TIMEOUT_MS);
+
+    expect(result.current.state).toMatchObject({
+      status: 'error',
+      error: { code: 'CAPTURE_TIMED_OUT' },
+    });
+    // Nothing was captured, so nothing may have been transmitted.
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(mockStreamStop).toHaveBeenCalled();
+  });
+
+  it('times out even when the stream never reports a rate at all', async () => {
+    // Zero means the native side has not filled the rate in. `start()` skips the
+    // reported-format check entirely in that case, which is exactly the path
+    // that had nothing bounding it: no mismatch to catch, and no buffer coming.
+    mockReportedFormat.sampleRate = 0;
+    jest.useFakeTimers();
+    const { result } = await renderHook(() => useAudioCapture(OPTIONS));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await advance(FIRST_AUDIO_TIMEOUT_MS);
+
+    expect(result.current.state).toMatchObject({
+      status: 'error',
+      error: { code: 'CAPTURE_TIMED_OUT' },
+    });
+  });
+
+  it('cancels the deadline once a buffer arrives', async () => {
+    jest.useFakeTimers();
+    const { result } = await renderHook(() => useAudioCapture(OPTIONS));
+    await act(async () => {
+      await result.current.start();
+    });
+
+    await deliver(buffer());
+    await act(async () => {
+      socket()?.open();
+    });
+    await advance(FIRST_AUDIO_TIMEOUT_MS * 3);
+
+    // An encounter longer than the start-up deadline must not be torn down by it.
+    expect(result.current.state.status).toBe('streaming');
+    expect(socket()?.closed).toBe(false);
+  });
+
+  it('cancels the deadline on stop, so a stopped hook cannot fail late', async () => {
+    jest.useFakeTimers();
+    const { result } = await renderHook(() => useAudioCapture(OPTIONS));
+    await act(async () => {
+      await result.current.start();
+    });
+
+    await act(async () => {
+      result.current.stop();
+    });
+    await advance(FIRST_AUDIO_TIMEOUT_MS * 3);
+
+    expect(result.current.state.status).toBe('idle');
+  });
+
+  it('does not overwrite a format failure with a late timeout', async () => {
+    // The reported-rate check fails inside `start()`, before the deadline is
+    // armed. A timeout landing on top of it would replace an accurate message —
+    // this hardware cannot capture what Transcribe needs, do not retry — with
+    // one inviting the retry that will fail the same way.
+    mockReportedFormat.sampleRate = 44_100;
+    jest.useFakeTimers();
+    const { result } = await renderHook(() => useAudioCapture(OPTIONS));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await advance(FIRST_AUDIO_TIMEOUT_MS * 3);
+
+    expect(result.current.state).toMatchObject({
+      status: 'error',
+      error: { code: 'SAMPLE_RATE_UNSUPPORTED' },
+    });
   });
 });
