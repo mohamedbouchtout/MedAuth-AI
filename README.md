@@ -49,9 +49,11 @@ produces the prior-auth intelligence. They share the transcript and nothing else
 apps/web              React + TypeScript, SMART on FHIR launch
 apps/mobile           React Native (Expo)
 services/*            Seven Python services — see the diagram above
-packages/*            hipaa-logger, crypto-utils, fhir-types (imported by services)
+packages/*            hipaa-logger, api-envelope, crypto-utils, payer-vocab,
+                      fhir-types, audio-wire (imported by services and apps)
 infrastructure/       Terraform (AWS) and Kubernetes manifests
 scripts/              Dev environment setup and seed data
+docs/                 Architecture, design docs, ADRs, runbooks
 docs/api/             OpenAPI spec per service
 ```
 
@@ -93,7 +95,7 @@ uv run uvicorn src.main:app --reload --port 8002
 Python 3.12 · FastAPI · asyncio · PostgreSQL (asyncpg + SQLAlchemy 2.0 async) ·
 Redis pub/sub · Qdrant · sentence-transformers (`BAAI/bge-large-en-v1.5`) ·
 Claude via **AWS Bedrock** (Haiku for extraction, Sonnet for reasoning) ·
-LangChain · React 18 + Vite + Tailwind + Zustand · React Native (Expo) ·
+LangChain · React 19 + Vite + Tailwind · React Native (Expo SDK 57) ·
 AWS us-east-1 on EKS, Terraform, GitHub Actions.
 
 A few constraints are deliberate and non-negotiable: Bedrock rather than the direct
@@ -139,6 +141,17 @@ checklist that has to be filled in honestly. Open a task issue from the
 
 ## Status
 
-Phase 0 scaffolding. TASK-001 (monorepo structure) is complete; nothing else is
-implemented yet. See [TASKS.md](./TASKS.md) for the full breakdown across seven phases,
-from the RAG pipeline through the provider dashboard.
+Phases 0-2 are substantially complete: the shared packages, the database schema,
+session lifecycle and JWT issuance, the full RAG pipeline including the Da Vinci
+CRD tier, the audio WebSocket with Transcribe Medical, the transcript fan-out,
+and both clients' capture layers.
+
+Phases 3-10 — SOAP generation, the nudge relay, FHIR integration, prior auth
+bundle assembly and the provider dashboard — are designed and unbuilt. The
+current blocker on the live nudge path is **TASK-052b**: `encounters` carries
+nullable payer, plan type and state columns that nothing populates until the
+SMART on FHIR launch exists.
+
+See [TASKS.md](./TASKS.md) for the authoritative task breakdown and
+[docs/](./docs/README.md) for the architecture, the design documents and the
+architecture decision records.
