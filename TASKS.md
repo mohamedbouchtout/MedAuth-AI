@@ -351,6 +351,57 @@ Claude Code should read this before starting any task to understand current stat
       and cannot. The known gap noted above — a broker failure after the commit,
       with no durable outbox — now applies to both ends of the lifecycle.
 
+- [ ] **TASK-006b:** Re-mint a session token without starting a session
+  - Prerequisite: TASK-006 (owns session lifecycle and the `encounters` table)
+  - Service: `services/track-a-clinical`
+  - **Why this exists.** `SESSION_TTL_SECONDS` is 15 minutes and a real
+    orthopedic or dermatology visit routinely runs longer. TASK-006 shipped
+    `/sessions/start` and `/sessions/{id}/end` and nothing in between, so a
+    client whose token expires mid-visit has no way to obtain a fresh one for
+    the session it is already in. It was found while specifying TASK-025 and
+    opened rather than folded into it, because the fix is a service endpoint
+    and TASK-025 is a screen.
+  - **The failure this prevents.** The only move available to a client today is
+    to call `POST /sessions/start` again. That creates a second `encounters`
+    row with a new server-generated `session_id`, forking one visit into two
+    encounters: the transcript splits across two `transcription:{session_id}`
+    channels, TASK-030 writes two partial SOAP notes, TASK-060 assembles a
+    bundle from whichever half it saw, and `procedure_seen:{session_id}` stops
+    deduping across the visit so one procedure nudges twice. Nothing errors on
+    that path, which is what makes it worth an endpoint rather than a warning.
+  - `POST /sessions/{session_id}/token` — mints a new JWT with the **same**
+    `session_id`, the encounter's existing `provider_id`, and a fresh `exp` from
+    `SESSION_TTL_SECONDS`. Creates no row and mutates none. Response
+    `{"data": {"session_id": ..., "jwt": ...}, "error": null}` per the envelope,
+    **200 not 201** — nothing is created, which is the distinction from
+    `/sessions/start`.
+  - Semantics, mirroring `/sessions/{id}/end`: unknown or soft-deleted
+    `session_id` → 404. An encounter whose `status` is already `completed` → 409,
+    not a fresh token; a finished visit must not be able to reopen an audio
+    socket. Publishes nothing — no consumer learns anything from a re-mint, and
+    a second `sessions:started` would make TASK-021 re-subscribe to a channel it
+    already holds.
+  - **Authorisation is the open question this task must settle**, and it is not
+    incidental: an endpoint that hands out a session token must not accept an
+    expired token as its own credential, or the 15-minute lifetime means
+    nothing — anyone holding one expired token could refresh forever. Decide
+    deliberately between accepting the expired JWT with a bounded grace period
+    past `exp`, and requiring a separate provider credential, and write down
+    which and why. Note that no provider-authentication mechanism exists in the
+    repo yet, which is a real constraint on the answer rather than an argument
+    for skipping the question.
+  - Reads and re-mints against an encounter, so it touches PHI: `audit_log()`
+    per the route-level rule, with a distinct action from `START_SESSION`.
+  - Update CLAUDE.md's "A visit outlasting the token re-mints" bullets when this
+    lands — they currently say the endpoint does not exist and tell clients to
+    surface `AUTH_REJECTED` in the meantime.
+  - **Test:** a re-mint returns a token with the same `session_id`, the same
+    `provider_id`, and an `exp` later than the original's
+  - **Test:** the `encounters` row count is unchanged across a re-mint
+  - **Test:** re-minting a completed session returns 409 and no token
+  - **Test:** re-minting an unknown or soft-deleted `session_id` returns 404
+  - **Test:** the minted token is accepted by TASK-020's WebSocket validator
+
 ---
 
 - [ ] **TASK-007:** Move CI and local dev to Node 24
@@ -2169,18 +2220,26 @@ The insurance policy RAG is the technical core. Build and validate before other 
       (`POST /sessions/start`) before retrying rather than reusing the old one.
     - `CAPTURE_TIMED_OUT` — the microphone started and then delivered nothing.
       Nothing was recorded, so a plain retry is the right offer, unlike the
-      format failures above which are not retryable on this hardware. Added by
-      TASK-023 on the browser side; TASK-026 is what makes this hook emit it.
+      format failures above which are not retryable on this hardware. The code
+      was added to the shared vocabulary by TASK-023 (the browser hook hit the
+      gap first); TASK-026 is what makes the *mobile* hook emit it.
     - `SEND_BACKLOG_EXCEEDED` — the socket never opened and buffered audio hit
       its cap. Nothing was recorded and the encounter never started, so a plain
       retry is the right offer. Distinct from `STREAM_FAILED`, which means a
       working connection dropped partway through and part of the encounter did
       reach the server.
   - End visit: `POST /sessions/{session_id}/end`, stop capture, clear buffers.
-  - The JWT lives `SESSION_TTL_SECONDS` (15 min) and a visit can outlast it;
-    decide deliberately whether this screen re-mints or the encounter ends, and
-    write down which. TASK-070 faces the identical question on web — solve it
-    the same way in both or say why not.
+  - **A visit outlasting the 15-minute JWT is settled in CLAUDE.md**, under
+    "A visit outlasting the token re-mints" in the Session Lifecycle & JWT
+    Issuance section. It is no longer an open question for this task to decide:
+    the encounter never ends because a token expired, an already-open socket is
+    unaffected because validation is handshake-only, and re-minting happens for
+    the *same* `session_id` — never by calling `POST /sessions/start` again,
+    which forks the encounter in two. TASK-070 cites the same section, which is
+    why it was decided there rather than in either app.
+  - Until **TASK-006b** ships the re-mint endpoint, this screen surfaces
+    `AUTH_REJECTED` and asks the provider to start a new visit rather than
+    re-calling `/sessions/start`. Do not implement a workaround here.
   - **Test:** capture reports `SAMPLE_RATE_UNSUPPORTED`, verify the visit does
     not start and the error is rendered
   - **Test:** permission denied, verify the same
@@ -2616,6 +2675,13 @@ logic do not change.
     (TASK-042), and a simple checklist of flagged procedures pending documentation
   - End session: calls `POST /sessions/{session_id}/end` (TASK-006), stops
     audio capture, navigates to the note review screen (TASK-071)
+  - **A visit outlasting the 15-minute JWT is settled in CLAUDE.md**, under
+    "A visit outlasting the token re-mints" in the Session Lifecycle & JWT
+    Issuance section — the same text TASK-025 cites on mobile. Do not re-derive
+    it here, and in particular do not re-call `POST /sessions/start` to get a
+    fresh token: that forks one visit into two encounters, silently. Until
+    **TASK-006b** ships the re-mint endpoint, surface the auth failure and ask
+    the provider to start a new visit.
   - **Test:** component tests for start/active/end state transitions with mocked APIs
 
 - [ ] **TASK-071:** Note review + edit UI
