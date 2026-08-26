@@ -335,8 +335,8 @@ class TestDedup:
     async def test_a_structural_failure_keeps_the_claim(
         self, redis: FakeRedis, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """TASK-024's gap is logged once per procedure, not once per segment."""
-        blocked = RecordedDispatch(raises=MissingQueryParameters(("state", "cpt_code")))
+        """The remaining gap is logged once per procedure, not once per segment."""
+        blocked = RecordedDispatch(raises=MissingQueryParameters(("state", "payer")))
         consumer = TranscriptConsumer(redis, dispatch=blocked)  # type: ignore[arg-type]
         await watch(consumer, redis.subscription)
 
@@ -344,8 +344,70 @@ class TestDedup:
         await consumer.handle_message(redis.subscription, segment())
 
         assert len(blocked.calls) == 1
-        assert "TASK-024" in caplog.text
-        assert "state, cpt_code" in caplog.text
+        assert "state, payer" in caplog.text
+
+    async def test_the_reason_reaches_the_log_when_there_is_one(
+        self, redis: FakeRedis, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A missing cpt_code has four causes and only one means "fix the table"."""
+        blocked = RecordedDispatch(
+            raises=MissingQueryParameters(("cpt_code",), reason="axis_not_spoken: view count")
+        )
+        consumer = TranscriptConsumer(redis, dispatch=blocked)  # type: ignore[arg-type]
+        await watch(consumer, redis.subscription)
+
+        await consumer.handle_message(redis.subscription, segment())
+
+        assert "axis_not_spoken" in caplog.text
+
+    async def test_the_claim_is_held_on_the_code_so_one_order_raises_one_nudge(
+        self, redis: FakeRedis, dispatch: RecordedDispatch
+    ) -> None:
+        """TASK-024 moves the guard from the keyword to the CPT code.
+
+        A knee MRI and a hip MRI are both 73721 — one authorization question, so
+        one nudge. Under TASK-021's keyword claim these were indistinguishable
+        and the question could not even be asked; now they share a claim.
+        """
+        consumer = TranscriptConsumer(redis, dispatch=dispatch)  # type: ignore[arg-type]
+        await watch(consumer, redis.subscription)
+
+        await consumer.handle_message(
+            redis.subscription, segment(text="Let's get an MRI of the knee.")
+        )
+        await consumer.handle_message(
+            redis.subscription, segment(text="And an MRI of the hip as well.")
+        )
+
+        assert len(dispatch.calls) == 1
+        assert redis.sets[procedure_seen_key(SESSION_ID)] == {"cpt:73721"}
+
+    async def test_two_distinct_codes_each_get_their_own_claim(
+        self, redis: FakeRedis, dispatch: RecordedDispatch
+    ) -> None:
+        """Sharing a claim is a property of sharing a code, not of sharing a keyword."""
+        consumer = TranscriptConsumer(redis, dispatch=dispatch)  # type: ignore[arg-type]
+        await watch(consumer, redis.subscription)
+
+        await consumer.handle_message(
+            redis.subscription, segment(text="Let's get an MRI of the knee.")
+        )
+        await consumer.handle_message(redis.subscription, segment(text="Also an MRI of the brain."))
+
+        assert len(dispatch.calls) == 2
+
+    async def test_a_procedure_with_no_code_is_still_claimed_on_its_keyword(
+        self, redis: FakeRedis, dispatch: RecordedDispatch
+    ) -> None:
+        """Otherwise an unmappable procedure would warn on every segment naming it."""
+        consumer = TranscriptConsumer(redis, dispatch=dispatch)  # type: ignore[arg-type]
+        await watch(consumer, redis.subscription)
+
+        await consumer.handle_message(
+            redis.subscription, segment(text="We'll do a biopsy of the lesion.")
+        )
+
+        assert redis.sets[procedure_seen_key(SESSION_ID)] == {"keyword:biopsy"}
 
 
 class TestRunLoop:

@@ -49,7 +49,7 @@ from typing import Any, Final
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
-from track_b_rag import dedup, keywords
+from track_b_rag import dedup, keywords, policy_dispatch
 from track_b_rag.api.schemas import PolicyQueryData
 from track_b_rag.keywords import ProcedureMention
 from track_b_rag.policy_dispatch import MissingQueryParameters, resolve_and_query_policy
@@ -274,8 +274,15 @@ class TranscriptConsumer:
             await self._query_for(session_id, mention)
 
     async def _query_for(self, session_id: uuid.UUID, mention: ProcedureMention) -> None:
-        """Run the policy query for one mention, honouring the once-per-session guard."""
-        if not await dedup.claim_procedure(self._redis, session_id, mention.keyword):
+        """Run the policy query for one mention, honouring the once-per-session guard.
+
+        The guard is claimed on the CPT code where one resolves and on the
+        keyword where it does not (:func:`policy_dispatch.procedure_key`), so
+        that two keywords naming one procedure hold one claim between them and
+        raise one nudge rather than two.
+        """
+        key = policy_dispatch.procedure_key(mention)
+        if not await dedup.claim_procedure(self._redis, session_id, key):
             logger.debug(
                 "Suppressed a repeat mention of %r in session %s", mention.keyword, session_id
             )
@@ -290,18 +297,19 @@ class TranscriptConsumer:
         except MissingQueryParameters as missing:
             # Structural, not transient: the claim is kept deliberately, so this
             # is logged once per procedure per session instead of once per
-            # segment that names it. See TASK-024.
+            # segment that names it.
             logger.warning(
-                "No policy query for %r in session %s — no source yet for %s (TASK-024)",
+                "No policy query for %r in session %s — no source yet for %s%s",
                 mention.keyword,
                 session_id,
                 ", ".join(missing.fields),
+                f" ({missing.reason})" if missing.reason else "",
             )
         except Exception:
             # Something that might work next time. Give the claim back so a
             # later mention of the same procedure gets another attempt rather
             # than being silently suppressed for the rest of the encounter.
-            await dedup.release_procedure(self._redis, session_id, mention.keyword)
+            await dedup.release_procedure(self._redis, session_id, key)
             logger.error(
                 "Policy query dispatch failed for %r in session %s",
                 mention.keyword,

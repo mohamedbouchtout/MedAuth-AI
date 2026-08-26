@@ -8,25 +8,34 @@ the first list becomes the second, and it is deliberately split so that the part
 which cannot be built yet is one named function rather than a hole spread
 through the consumer.
 
-**What is not built yet, and why it is not stubbed with placeholder values.**
-Four of those fields have no source in the system today:
+**What resolves, and what still has no source.** TASK-024 filled in most of
+this. ``cpt_code`` comes from :mod:`track_b_rag.procedure_codes`, which maps a
+spoken keyword and its qualifier onto a code and refuses rather than guesses.
+``provider_id`` is read from the encounter, where it has always been non-null.
+``payer``, ``plan_type`` and ``state`` are columns on ``encounters`` that
+nothing populates yet: they are filled from a FHIR ``Coverage`` resource at
+SMART launch, which is **TASK-052b**, gated on TASK-051 and TASK-052. So
+:func:`resolve_query_parameters` still raises on every real encounter — but it
+now raises naming the three fields that are genuinely absent for *that*
+encounter, rather than a fixed list of five.
 
-* ``state`` — the ``encounters`` table has no state column at all. Adding one is
-  a migration against schema owned by track-a-clinical (TASK-005), which is a
-  reviewed change and not a side effect of this task.
-* ``cpt_code`` — nothing maps a spoken keyword such as "MRI" onto a procedure
-  code. That mapping is a piece of clinical data modelling with its own design
-  questions (which of the dozens of MRI codes; how a new specialty extends it).
-* ``payer`` and ``plan_type`` — the columns exist on ``encounters`` but are
-  populated from a FHIR ``Coverage`` resource at SMART launch, which is Phase 5.
+A placeholder for any of them would be worse than no answer at all. The Redis
+cache key is ``rag:{payer}:{plan_type}:{state}:{cpt_code}``, so a made-up value
+writes a real policy answer under a key that stands for a different procedure or
+a different plan, and unrelated encounters then collide on it. That is a wrong
+answer served confidently to the next patient, which is strictly worse than the
+silence of not querying.
 
-A placeholder for ``cpt_code`` would be worse than no answer at all. The Redis
-cache key is ``rag:{payer}:{plan_type}:{state}:{cpt_code}``, so a made-up code
-writes a real policy answer under a key that stands for a different procedure,
-and two unrelated procedures then collide on it. That is a wrong answer served
-confidently to the next encounter, which is strictly worse than the silence of
-not querying. TASK-024 closes this; :func:`resolve_query_parameters` raises
-until it does.
+**Reading the encounter is not a PHI access, and the query says so.** The SELECT
+names ``provider_id``, ``insurance_payer``, ``insurance_plan_type`` and
+``state`` and nothing else — no ``patient_fhir_id``, no ``insurance_member_id``,
+no ``ehr_encounter_id``. Those four describe who is asking and which payer
+policy applies, not the patient, so no ``audit_log()`` row is written here and
+the audit obligation stays where it already is: one row per ``/policies/query``
+call, written by the route. Known Constraints #6 asks for this to be decided
+rather than guessed, and naming the columns explicitly is what makes the
+decision hold — a later ``select(Encounter)`` would quietly turn this into a
+PHI read, and it would not be quiet in review.
 
 **The query goes over HTTP even though the route is in this same process.** The
 ``audit_log()`` write for ``/policies/query`` lives in the route layer, because
@@ -47,10 +56,14 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 import httpx
+import sqlalchemy as sa
 
+from track_a_clinical.models import Encounter
 from track_b_rag.api.schemas import PolicyQueryData
 from track_b_rag.config import get_settings
+from track_b_rag.db import get_sessionmaker
 from track_b_rag.keywords import ProcedureMention
+from track_b_rag.procedure_codes import ProcedureCode, resolve_procedure_code
 
 logger = logging.getLogger(__name__)
 
@@ -91,23 +104,62 @@ class MissingQueryParameters(Exception):
     Attributes:
         fields: The parameters that could not be supplied, so the log line says
             what is actually missing instead of "could not build a query".
+        reason: Why, in a sentence, when there is more to say than a field name.
+            A missing ``cpt_code`` has four quite different causes and only one
+            of them is worth acting on, so the field name alone would hide the
+            distinction :mod:`track_b_rag.procedure_codes` exists to draw. Fixed
+            text from this repo, never anything derived from the transcript.
     """
 
-    def __init__(self, fields: tuple[str, ...]) -> None:
+    def __init__(self, fields: tuple[str, ...], reason: str | None = None) -> None:
         self.fields = fields
-        super().__init__(f"No source yet for: {', '.join(fields)}")
+        self.reason = reason
+        message = f"No source yet for: {', '.join(fields)}"
+        super().__init__(f"{message} — {reason}" if reason else message)
 
 
-#: What :func:`resolve_query_parameters` cannot supply. Named as data rather
-#: than buried in the raise so the consumer's tests, and anyone reading the
-#: warning in a log, can see the list without reading the function.
+#: What :func:`resolve_query_parameters` still cannot supply for any encounter,
+#: because nothing populates these three columns until **TASK-052b** fills them
+#: from a FHIR ``Coverage`` resource at SMART launch. Named as data rather than
+#: buried in the raise so the consumer's tests, and anyone reading the warning
+#: in a log, can see the list without reading the function.
+#:
+#: The raise itself reports the subset actually missing for the encounter at
+#: hand, which is a smaller list once TASK-052b starts filling some of them in.
 UNRESOLVED_PARAMETERS: Final[tuple[str, ...]] = (
     "payer",
     "plan_type",
     "state",
-    "cpt_code",
-    "provider_id",
 )
+
+
+def procedure_key(mention: ProcedureMention) -> str:
+    """Return what counts as "the same procedure" for one mention.
+
+    This is the dedup identity :func:`track_b_rag.dedup.claim_procedure` claims,
+    and it is the CPT code wherever one resolves, so that two keywords naming one
+    code share a claim and raise one nudge between them. Before TASK-024 the
+    caller passed the canonical keyword and they did not.
+
+    Args:
+        mention: The detected procedure.
+
+    Returns:
+        ``"cpt:73721"`` when the code resolves, and ``"keyword:MRI"`` when it
+        does not. Prefixed so that the set's contents say which kind of claim
+        each member is when someone reads it out of Redis, and so a keyword can
+        never collide with a code.
+
+    Resolving here and again inside :func:`resolve_query_parameters` is
+    deliberate: the lookup is pure and runs over one sentence, and the
+    alternative is threading a resolved code through the consumer's dispatch
+    signature so that the guard and the query cannot disagree. They cannot
+    disagree anyway — same function, same input.
+    """
+    outcome = resolve_procedure_code(mention)
+    if isinstance(outcome, ProcedureCode):
+        return f"cpt:{outcome.cpt_code}"
+    return f"keyword:{mention.keyword}"
 
 
 async def resolve_query_parameters(
@@ -125,15 +177,70 @@ async def resolve_query_parameters(
         The parameters for ``POST /policies/query``.
 
     Raises:
-        MissingQueryParameters: Always, for now. See the module docstring: the
-            ``state`` column does not exist, no keyword-to-CPT mapping exists,
-            and the payer columns are not populated until Phase 5. **TASK-024**
-            replaces this body; nothing else in this module or in the consumer
-            has to change when it does, which is the reason the seam is a
-            function rather than an inline lookup.
+        MissingQueryParameters: When the procedure has no confident code, when
+            the encounter is unknown, or when the encounter's payer columns are
+            still empty — which is every real encounter until TASK-052b. All
+            three are structural: the same mention a second later fails
+            identically, so the consumer keeps its dedup claim and logs once.
+        Exception: Anything the database raises propagates, and is deliberately
+            *not* turned into ``MissingQueryParameters``. A connection that
+            failed once may work on the next mention, and the consumer releases
+            the claim for exactly that case.
     """
-    del session_id, mention  # Named for the signature TASK-024 implements.
-    raise MissingQueryParameters(UNRESOLVED_PARAMETERS)
+    outcome = resolve_procedure_code(mention)
+    if not isinstance(outcome, ProcedureCode):
+        raise MissingQueryParameters(("cpt_code",), reason=f"{outcome.reason}: {outcome.detail}")
+
+    # Only the four non-patient columns. See the module docstring: this is what
+    # makes reading the encounter a non-PHI access rather than an unaudited one.
+    statement = sa.select(
+        Encounter.provider_id,
+        Encounter.insurance_payer,
+        Encounter.insurance_plan_type,
+        Encounter.state,
+    ).where(
+        Encounter.session_id == session_id,
+        Encounter.deleted_at.is_(None),
+    )
+    async with get_sessionmaker()() as session:
+        row = (await session.execute(statement)).one_or_none()
+
+    if row is None:
+        # Structural rather than transient. TASK-006 creates the row and only
+        # then publishes to sessions:started, so a subscriber cannot see a
+        # segment for a session whose row has yet to be written; absent here
+        # means soft-deleted or never real, and neither improves by waiting.
+        raise MissingQueryParameters(
+            UNRESOLVED_PARAMETERS,
+            reason="no active encounter for this session",
+        )
+
+    missing = tuple(
+        name
+        for name, value in (
+            ("payer", row.insurance_payer),
+            ("plan_type", row.insurance_plan_type),
+            ("state", row.state),
+        )
+        if not value
+    )
+    if missing:
+        raise MissingQueryParameters(
+            missing, reason="not populated until a SMART launch supplies it"
+        )
+
+    return PolicyQueryParameters(
+        procedure=outcome.procedure,
+        cpt_code=outcome.cpt_code,
+        # The payer's own spelling, deliberately. `/policies/query` resolves it
+        # through payer_vocab.normalize_payer and warns on an unknown slug
+        # (api/query.py), and that is the single normalisation site; doing it
+        # here as well would put one rule in two places for no gain.
+        payer=row.insurance_payer,
+        plan_type=row.insurance_plan_type,
+        state=row.state,
+        provider_id=row.provider_id,
+    )
 
 
 async def post_policy_query(
@@ -216,10 +323,12 @@ async def resolve_and_query_policy(
         The answer, or None when the query could not be completed.
 
     Raises:
-        MissingQueryParameters: When the query cannot be built at all, which is
-            every call until TASK-024. Deliberately not swallowed here: the
-            consumer distinguishes "this can never work" from "this did not work
-            this time" and handles the dedup claim differently for each.
+        MissingQueryParameters: When the query cannot be built at all — an
+            unmappable procedure, an unknown encounter, or the payer columns
+            TASK-052b fills, which is still every real encounter. Deliberately
+            not swallowed here: the consumer distinguishes "this can never work"
+            from "this did not work this time" and handles the dedup claim
+            differently for each.
     """
     parameters = await resolve_query_parameters(session_id=session_id, mention=mention)
     return await post_policy_query(
