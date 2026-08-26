@@ -19,6 +19,13 @@
  * that would really reach Transcribe, and the two disagreeing is itself a
  * reason not to stream.
  *
+ * A deadline bounds the wait for that first buffer. Everything upstream of it
+ * can report success and still deliver nothing — a microphone seized by another
+ * app, an input route changing mid-start — and without a bound the hook would
+ * sit in `starting` forever, telling the provider nothing while the encounter
+ * goes unrecorded. That silent hang is the failure this module exists to make
+ * impossible, so the quiet version of it is not allowed either.
+ *
  * Nothing here throws. State is a discriminated union carrying a typed error,
  * per CLAUDE.md's "errors bubble up as typed Result objects, not thrown
  * exceptions" — load-bearing rather than stylistic, because a thrown error is
@@ -47,6 +54,33 @@ import {
 
 /** WebSocket readyState OPEN. Spelled out so the check reads without the DOM enum. */
 const SOCKET_OPEN = 1;
+
+/**
+ * How long after `stream.start()` resolves the first buffer may take to arrive.
+ *
+ * **A round-number default, not a measured value**, in the same sense as
+ * `MAX_PENDING_BYTES`: no device start-up latencies have been observed yet,
+ * because there is no session screen on this platform to produce them until
+ * TASK-025. Treat it as a placeholder for that measurement.
+ *
+ * It is deliberately not the browser's 3s. That figure is anchored to something
+ * measured — once an `AudioContext` is running the first quantum arrives within
+ * about one render quantum, ~8ms — and the whole path it bounds sits inside the
+ * renderer. Nothing here is comparable: `stream.start()` resolving means the OS
+ * audio subsystem has accepted the request, not that an input route is live, and
+ * where the provider is wearing a Bluetooth headset that route still has to be
+ * negotiated. Reusing 3s would import a justification that is not about this
+ * platform.
+ *
+ * Eight seconds because the two ways of being wrong do not cost the same. Too
+ * short tears down a capture that was about to work and tells the provider
+ * nothing was recorded — on hardware that is reliably slow to start, that is a
+ * product which never records at all, and a retry does not help. Too long only
+ * makes the provider wait longer for an error that is still actionable. So err
+ * long, bounded by the thing that actually matters: a provider must not be left
+ * watching a screen that has not admitted anything is wrong.
+ */
+export const FIRST_AUDIO_TIMEOUT_MS = 8_000;
 
 /**
  * The one message for a connection that never opened.
@@ -111,8 +145,15 @@ export function useAudioCapture({
   const openedRef = useRef(false);
   const runningRef = useRef(false);
   const streamRef = useRef<AudioStream | null>(null);
+  const firstAudioTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const teardown = useCallback(() => {
+    // First, so every failure path and the unmount cleanup all disarm the
+    // deadline — a hook that has already stopped must not fail seconds later.
+    if (firstAudioTimerRef.current !== null) {
+      clearTimeout(firstAudioTimerRef.current);
+      firstAudioTimerRef.current = null;
+    }
     runningRef.current = false;
     validatedRef.current = false;
     openedRef.current = false;
@@ -202,6 +243,10 @@ export function useAudioCapture({
           return;
         }
         validatedRef.current = true;
+        if (firstAudioTimerRef.current !== null) {
+          clearTimeout(firstAudioTimerRef.current);
+          firstAudioTimerRef.current = null;
+        }
         openSocket();
       }
 
@@ -286,8 +331,19 @@ export function useAudioCapture({
       const mismatch = formatMismatch(reported);
       if (mismatch) {
         fail(mismatch);
+        return;
       }
     }
+
+    // Everything upstream reported success; from here the only evidence that
+    // capture is really running is a buffer arriving. Cleared by the first one.
+    firstAudioTimerRef.current = setTimeout(() => {
+      firstAudioTimerRef.current = null;
+      fail({
+        code: 'CAPTURE_TIMED_OUT',
+        message: 'The microphone started but no audio reached MedAuth AI. Nothing was recorded.',
+      });
+    }, FIRST_AUDIO_TIMEOUT_MS);
   }, [fail, stream]);
 
   const stop = useCallback(() => {
