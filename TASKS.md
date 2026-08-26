@@ -1996,12 +1996,28 @@ The insurance policy RAG is the technical core. Build and validate before other 
       log line naming the keyword. An entry exists only where the spoken phrase
       pins the code down to the level payers publish criteria at; where an
       unstated axis would change the authorization answer there is no entry.
-      That admits MRI, CT, echocardiography and stress testing — the high-cost
-      studies prior auth actually gates — and excludes X-ray (view count is a
-      technologist's decision), arthroscopy (decided intraoperatively),
-      injection (guidance and joint size) and biopsy (technique). Where an entry
-      does fix an unstated axis it names it in `assumes` rather than leaving it
-      implicit.
+      Where an entry does fix an unstated axis it names it in `assumes` rather
+      than leaving it implicit. Eight of the ten detector keywords resolve.
+    - **The qualifier axis is not always a body site**, and reading it that way
+      is what made a first pass at this task exclude arthroscopy and injection
+      outright. MRI and CT turn on anatomy, a stress test on modality, an
+      arthroscopy on the intervention the surgeon plans, and a joint injection
+      on joint size — and in both of the excluded cases the axis *was* spoken,
+      it just was not the one being looked for. Both are mapped. Worth knowing:
+      an arthroscopy needs no second axis for the joint, because the
+      intervention implies it — a rotator cuff is a shoulder, a meniscus is a
+      knee. A bare "torn meniscus" still resolves nothing, because trimming and
+      repairing it are different codes and which one has not been decided yet.
+    - **X-ray and biopsy remain unmapped, as a decision rather than a gap.** An
+      X-ray's code is chosen by view count at the machine, and plain radiography
+      is essentially never prior-auth gated — so a query would spend a Qdrant
+      search and a Sonnet call to return a retrieval miss indistinguishable from
+      a corpus we do not hold, which is the exact ambiguity `packages/payer-vocab`
+      exists to prevent elsewhere. "biopsy" spans body systems with unrelated
+      code families: the gated ones (breast) split by imaging guidance, and the
+      ones our target specialties order most (skin) by technique. Neither is
+      spoken. **TASK-044** is the alternative for these two — a nudge driven by
+      the keyword alone — and it is a product question, not a mapping one.
     - *How does a new specialty extend it?* By adding rows to a curated table
       matched deterministically — the same shape `packages/payer-vocab` uses,
       so extending never means making the matcher cleverer. It still needs a
@@ -2225,6 +2241,52 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - On nudge received with `haptic: true`: call `Haptics.notificationAsync()`
   - Same visual alert as web, same dismiss-calls-acknowledge behavior (TASK-041b)
   - **Test:** mock WebSocket message, verify Haptics mock called
+
+- [ ] **TASK-044:** Keyword-only nudge for procedures that resolve no CPT code
+  - Prerequisite: TASK-024 (the resolver and its four refusal reasons),
+    TASK-040 (the nudge emitter), TASK-052b (nothing nudges anyone before it)
+  - Service: `services/track-b-rag`
+  - **The gap.** TASK-024 maps eight of the ten detector keywords to CPT codes.
+    X-ray and biopsy resolve nothing and, as of that task, produce complete
+    silence: the keyword is detected, one WARNING is logged, no policy query is
+    made and the provider sees nothing at all. The same silence covers an
+    arthroscopy or injection whose qualifier was never spoken — "she may need an
+    arthroscopy" — and an epidural or trigger point injection, which are
+    recognised and deliberately uncoded.
+  - **What this would add.** A nudge driven by the keyword alone: "an
+    arthroscopy usually requires prior authorization with this payer — check
+    before ordering." It could not name missing criteria, because those come out
+    of the RAG path and the RAG path needs a code to filter on. It would not be
+    empty either.
+  - **Decide first whether this clears the dismiss-fatigue bar, because the
+    repository has already argued the other way once.** CLAUDE.md rejects a
+    CRD-only answer on the grounds that it "would hand Stage 2 an empty criteria
+    list and a nudge that cannot say what is missing, which is most of the
+    product". A banner that cannot say what to do trains providers to dismiss
+    banners without reading them, and that cost lands on the nudges that *do*
+    have something to say. This task is worth doing only if the answer is that a
+    bare "check this" beats silence for a procedure we cannot code — and that is
+    a question for a clinician, not an engineer.
+  - **If it goes ahead, the four refusal reasons are the routing table**, and
+    they are not all equal:
+    - `REASON_AXIS_NOT_SPOKEN` (X-ray, biopsy) — permanent, and the two differ
+      in value: an X-ray is rarely gated at all, so nudging on one is close to
+      pure noise, while a breast biopsy genuinely is gated.
+    - `REASON_QUALIFIER_NOT_STATED` (a bare arthroscopy or injection) — the
+      likeliest candidate, since these are gated procedures and the only thing
+      missing is a word.
+    - `REASON_QUALIFIER_UNMAPPED` (an epidural, a TEE) — should raise a
+      table-extension signal for us rather than a nudge for the provider.
+    - `REASON_NO_CPT_EXISTS` (a biologic, a referral) — never nudge. A referral
+      has no procedure authorization to check.
+  - **Whatever it emits is not a policy answer and must not read like one.** No
+    `requires_auth`, no `denial_risk`, no cached entry — there is no CPT code, so
+    there is no `rag:` key to write under and nothing that could be cached
+    without inventing one. That is the same constraint TASK-024 was built around.
+  - **Test:** a bare "she may need an arthroscopy" produces the keyword-only
+    nudge and no policy query
+  - **Test:** a biologic or a referral produces no nudge of any kind
+  - **Test:** nothing on this path writes a `rag:` cache entry
 
 ---
 
