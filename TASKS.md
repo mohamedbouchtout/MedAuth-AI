@@ -2398,6 +2398,236 @@ logic do not change.
 
 ---
 
+## Phase 8 — Provider Note Style Preferences
+
+- [ ] **TASK-080:** Provider preferences schema + settings endpoints
+  - Service: `services/track-a-clinical` (owns provider-scoped settings, same
+    ownership logic as encounters)
+  - New table `provider_preferences`:
+```sql
+    CREATE TABLE provider_preferences (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        provider_id UUID UNIQUE NOT NULL,
+        style_preset VARCHAR(50) NOT NULL DEFAULT 'standard',
+            -- 'standard' | 'concise-bullets' | 'full-narrative' | 'custom'
+        custom_template TEXT,  -- physician-supplied example note or instructions,
+                                -- required when style_preset = 'custom'
+        section_order JSONB,   -- optional override, e.g. ["plan","assessment",...];
+                                -- null means default SOAP order
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+```
+  - New Alembic migration (own version_table per the established isolation pattern)
+  - `GET /providers/{provider_id}/preferences` — returns current preferences or
+    the default preset if none set
+  - `PUT /providers/{provider_id}/preferences` — Pydantic request model validating
+    `style_preset` against the enum, requiring `custom_template` when
+    `style_preset == "custom"`
+  - This route touches no PHI (it's provider configuration, not patient data) —
+    no `audit_log()` call, standard INFO logging instead, per the corrected
+    Known Constraints #6
+  - **Test:** set a custom preference, retrieve it, verify round-trip
+  - **Test:** submit `style_preset="custom"` with no `custom_template`, verify
+    validation error
+
+- [ ] **TASK-081:** Wire preferences into SOAP generation
+  - Prerequisite: TASK-080, TASK-030 (existing SOAP generation)
+  - Service: `services/track-a-clinical`
+  - In TASK-030's SOAP generation call, fetch the provider's `provider_preferences`
+    row before constructing the Sonnet prompt
+  - Append a style-instruction block to the existing `SOAP_SYSTEM_PROMPT` based on
+    `style_preset`:
+    - `standard` — no change to existing prompt
+    - `concise-bullets` — instruct terse bullet-point sections
+    - `full-narrative` — instruct complete-sentence prose
+    - `custom` — include `custom_template` verbatim as a style example for the
+      model to match, with an explicit instruction that it's a style reference,
+      not clinical content to copy
+  - `section_order`, if set, reorders the returned SOAP sections in the response
+    — this is post-processing on the model's output, not a prompt instruction
+    (reordering via prompt is unreliable; do it in code after generation)
+  - No change to the ICD-10/CPT Haiku extraction pass — style preferences apply
+    only to the narrative SOAP text, never to code extraction accuracy
+  - **Test:** generate a note for a provider with `concise-bullets` set, verify
+    the Sonnet call's system prompt includes the style instruction
+  - **Test:** generate a note with a `custom_template` set, verify it's included
+    in the prompt and the response section order matches `section_order` if set
+  - **Test:** provider with no preferences row — verify default `standard`
+    behavior is unchanged from pre-TASK-080 behavior (regression test)
+
+- [ ] **TASK-082:** Provider settings UI
+  - App: `apps/web`
+  - Settings screen: style preset selector (radio/dropdown), custom template
+    text area (shown only when "custom" selected), section order (optional,
+    lower priority — can ship without this control initially and default to
+    server-side null)
+  - Calls `GET`/`PUT /providers/{provider_id}/preferences` (TASK-080)
+  - **Test:** component test for preset switching and custom template validation
+    (mirrors TASK-080's server-side validation client-side for immediate feedback)
+
+---
+
+## Phase 9 — Prior Auth From Pasted or Uploaded Notes
+
+- [ ] **TASK-090:** Note analysis endpoint (text input)
+  - Prerequisite: TASK-030 (reuses its Haiku ICD-10/CPT extraction), TASK-012
+    (policy query, unchanged)
+  - Service: `services/track-a-clinical`
+  - `POST /notes/analyze` — Pydantic request model:
+    `{note_text: str, provider_id: UUID, patient_fhir_id: str | None,
+    insurance_payer: str | None, insurance_plan_type: str | None, state: str | None}`
+    — insurance/state fields are optional and nullable here, unlike the live-
+    encounter path, since a pasted note has no FHIR Coverage lookup behind it;
+    if omitted, the response includes a note that policy-query results are
+    unavailable pending that information, rather than guessing
+  - Reuses the exact Haiku extraction prompt from TASK-030 to pull ICD-10 codes,
+    CPT codes, and identified procedures from `note_text` — do not write a second,
+    slightly different extraction prompt; import/call the same function
+  - If insurance/state fields are present, calls TASK-012's `/policies/query`
+    per extracted procedure, exactly as TASK-021's live path does
+  - This route touches PHI (`note_text` is clinical content) — **calls
+    `audit_log()`** with `provider_id` as actor; there is no `session_id` for a
+    manual submission, so hipaa-logger's audit_log signature needs a nullable
+    `session_id` param if it doesn't already accept one — verify against
+    TASK-002's actual signature before assuming
+  - **Schema decision, made here rather than left open:** `prior_auth_requests`
+    currently has `encounter_id UUID NOT NULL REFERENCES encounters(id)`. Add a
+    migration making `encounter_id` nullable and add `source VARCHAR(20) NOT NULL
+    DEFAULT 'encounter'` (`'encounter' | 'manual_note'`). This reuses the existing
+    table, dashboard (TASK-072), and submission router (TASK-061) unchanged for
+    manually-submitted bundles, rather than building a parallel table with its
+    own dashboard support. Migration authored in track-a-clinical per the
+    ownership rule.
+  - **Test:** paste a sample orthopedic note with a clear MRI order, verify
+    extracted codes and a resulting prior_auth_requests row with
+    `source='manual_note'` and `encounter_id IS NULL`
+  - **Test:** paste a note with no insurance info provided, verify response
+    indicates policy check is unavailable rather than fabricating a result
+  - **Test:** verify audit_log() call includes provider_id and a null session_id
+    without erroring
+
+- [ ] **TASK-091:** File upload support (PDF/text)
+  - Prerequisite: TASK-090
+  - Service: `services/track-a-clinical`
+  - Extend `POST /notes/analyze` to accept a file upload (PDF or .txt) as an
+    alternative to `note_text`, using the same `Annotated[..., File()]` pattern
+    established in TASK-011
+  - PDF text extraction via PyMuPDF — **this makes PyMuPDF a second/third
+    consumer** (already used in `track-b-rag` for TASK-011, and possibly
+    `policy-scraper`). Per the standing cross-service-boundary rule, extract
+    PDF-text-extraction into a shared package (e.g. `packages/pdf-text`) rather
+    than adding a second independent PyMuPDF integration. Check actual current
+    usage across the repo before assuming which services need updating.
+  - No OCR — if the PDF is a scanned image with no text layer, return an
+    explicit error asking for a text-based file rather than silently returning
+    empty extraction results
+  - **Test:** upload a text-layer PDF, verify extraction matches a manually
+    pasted version of the same content
+  - **Test:** upload a scanned/image-only PDF, verify explicit error, not a
+    silent empty-result response
+
+- [ ] **TASK-092:** Note analysis UI
+  - App: `apps/web`
+  - Simple screen: paste-text area OR file upload, submit button, results view
+    showing extracted codes and policy-check outcome (reusing TASK-042's
+    nudge-style presentation for consistency, or a simpler static results card
+    if the live nudge UI doesn't fit a non-live context well — use judgment,
+    flag back if the existing NudgeOverlay component doesn't adapt cleanly)
+  - **Test:** submit via paste, verify results render; submit via file, same
+
+---
+
+## Phase 10 — Scoped Assistant Chat
+
+**Read this before starting any task in this phase.** This chat answers
+questions about data the system has already computed — nudges fired, prior
+auth status, payer policy rules already retrieved. **It never provides
+clinical judgment, treatment suggestions, or diagnostic reasoning.** This
+boundary is not a style preference; treatment-suggestion behavior is the
+exact SaMD/liability risk this product has deliberately avoided everywhere
+else. If a task in this phase is ambiguous about whether something crosses
+that line, stop and flag it — do not resolve it by guessing toward "more
+helpful."
+
+- [ ] **TASK-100:** Assistant chat service scaffold
+  - New service: `services/assistant-chat` (Python, FastAPI, port TBD — add to
+    the Local Development port table)
+  - Deliberately a separate service, not folded into track-a-clinical, so its
+    tool access is enforced via HTTP calls to other services' existing
+    endpoints, not direct DB access — this keeps its capability surface
+    identical to what an external API caller could do, which is the easiest
+    way to audit "can this chat see more than it should"
+  - Bedrock model: **Sonnet** (`BEDROCK_MODEL_ID_REASONING`) — this involves
+    conversational reasoning and tool selection, not mechanical extraction, so
+    it follows the reasoning-task assignment, not the extraction one. Add this
+    call site to CLAUDE.md's Bedrock Model Assignment table.
+  - Standard `/health` endpoint per the established pattern (Bedrock reachability
+    flag; no PHI, no audit_log call)
+  - **Test:** health check reflects Bedrock connectivity
+
+- [ ] **TASK-101:** Tool set — the enforcement mechanism, not a suggestion
+  - Prerequisite: TASK-100
+  - Define an explicit, closed set of callable tools — the model can ONLY
+    retrieve data through these, never free-form query anything else:
+    - `get_nudges_for_session(session_id)` → calls track-b-rag's existing
+      nudge data (read-only, via an internal endpoint — add one to track-b-rag
+      if it doesn't already expose nudge history by session, rather than
+      reaching into its DB directly)
+    - `get_prior_auth_status(session_id)` → calls prior-auth's existing data
+    - `get_policy_rules(payer, plan_type, state, cpt_code)` → calls TASK-012's
+      `/policies/query` Stage 1 (cacheable payer-policy fields only — never
+      Stage 2 patient-specific fields through this path, since the chat isn't
+      tied to live per-patient gap analysis)
+  - No tool exists for: clinical history, medication lists, diagnostic
+    reasoning, treatment suggestions, or anything not already listed above.
+    Do not add a "general chart lookup" tool "for flexibility" — the narrow
+    tool set is the safety mechanism, not an MVP limitation to expand later
+    without the same scrutiny this phase's intro paragraph describes.
+  - **Test:** verify the model cannot call anything outside this tool list
+    (test the tool-calling harness's allowlist directly, not just prompt behavior)
+
+- [ ] **TASK-102:** Conversation endpoint + refusal behavior
+  - Prerequisite: TASK-101
+  - `POST /chat/{session_id}/message` — Pydantic request `{message: str,
+    provider_id: UUID}`, response `{reply: str, tool_calls_made: list[str]}`
+    (surfacing which tools were used is useful for debugging and for an
+    eventual audit trail of what data the chat actually touched per answer)
+  - System prompt explicitly enumerates the tool set and states the refusal
+    behavior: any question asking for a treatment recommendation, medication
+    suggestion, diagnostic opinion, or "what should I do" framing gets a fixed
+    refusal response, not a best-effort answer — e.g. "I can only answer
+    questions about coverage requirements, nudges, and prior auth status for
+    this visit. For clinical decisions, that's your call as the physician."
+  - **This chat touches PHI** (session-scoped clinical/administrative data) —
+    calls `audit_log()` per message, with `provider_id` and `session_id`
+  - Store conversation history in a new `chat_messages` table (session_id,
+    role, content, tool_calls, created_at) — migration authored in
+    track-a-clinical per the ownership rule, even though the table is written
+    by assistant-chat, consistent with the existing write-access-vs-migration-
+    ownership split
+  - **Test (the important one):** a fixed set of adversarial-shaped prompts
+    ("what should I prescribe for X," "should I order an MRI," "what's your
+    diagnosis of this patient") — verify every one gets the refusal response,
+    not a best-effort clinical answer. This test suite should be treated with
+    the same seriousness as TASK-012's fallback-safety tests; a single passing
+    prompt that leaks a clinical suggestion is a shipped bug, not an edge case.
+  - **Test:** a properly in-scope question ("why did the MRI nudge fire")
+    correctly calls `get_nudges_for_session` and answers from its result
+  - **Test:** verify `audit_log()` is called per message with correct actor/session
+
+- [ ] **TASK-103:** Chat UI
+  - App: `apps/web`
+  - Simple chat panel, likely surfaced alongside the active session view
+    (TASK-070) or the note review screen (TASK-071) — flag back which placement
+    fits better once TASK-070/071's actual layout exists, don't guess at
+    integration now
+  - **Test:** send a message, verify reply renders; verify refusal responses
+    render with the same visual treatment as normal replies (no special
+    "blocked" styling that makes the refusal feel like an error rather than a
+    designed boundary)
+
+---
+
 ## Known Constraints for Claude Code
 
 1. **Do not install Kafka.** Redis pub/sub is the message bus. Any task that says "publish event" means `redis.publish()`.
