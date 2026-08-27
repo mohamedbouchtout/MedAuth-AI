@@ -2308,16 +2308,37 @@ The insurance policy RAG is the technical core. Build and validate before other 
     at load, naming the conflict
 
 - [ ] **TASK-025:** Mobile session screen
-  - Prerequisite: TASK-006 (`POST /sessions/start` and `/end`), TASK-022 (the
-    capture hook this screen drives)
+  - Prerequisite: TASK-006 (`POST /sessions/start` and `/end`), TASK-006b
+    (`POST /sessions/{session_id}/token`), TASK-022 and TASK-026 (the capture
+    hook this screen drives, and the deadline that makes it fail rather than
+    hang)
   - App: `apps/mobile`
   - **Why this exists.** TASK-022 builds `useAudioCapture` and nothing calls
     it. `apps/mobile` has no session UI at all — only the capture hook and
-    TASK-043's haptic nudge — so the mobile equivalent of TASK-070's "start
-    visit" flow is missing. It was found while specifying TASK-022's
-    sample-rate failure and opened rather than folded into that task.
+    TASK-043's haptic nudge — so the mobile half of the "start visit" flow is
+    missing. It was found while specifying TASK-022's sample-rate failure and
+    opened rather than folded into that task.
   - Start visit: `POST /sessions/start` (TASK-006, returns **201** with
-    `{session_id, jwt}`), then hand both to `useAudioCapture`.
+    `{session_id, jwt}` in the standard envelope), then hand both to
+    `useAudioCapture`.
+  - **This screen does not source the patient, and must not invent one.**
+    `POST /sessions/start` requires `patient_id` and a `provider_id` UUID and
+    nothing on mobile can supply either today: fhir-integration exposes no
+    patient search — TASK-052 defines `GET /fhir/patient/{patient_id}/context`
+    and `GET /fhir/encounter/{encounter_id}` only — and no provider
+    authentication exists anywhere in this repo before Phase 5. Build against a
+    seam: one injected function returning the two identifiers, with test
+    doubles behind it. Filling that seam is **TASK-025b**. Do not add a picker
+    over an endpoint that does not exist, and do not hardcode a Synthea patient
+    id as a default — a hardcoded id is indistinguishable from a real one at
+    runtime and would file an encounter against the wrong patient.
+  - **The HTTP base URL is `EXPO_PUBLIC_API_BASE_URL`**, which already exists
+    in `.env.example` and is unused so far, so this task adds no new variable —
+    it adds the export to `apps/mobile/src/config.ts` beside the audio origin.
+    It is **not** `EXPO_PUBLIC_AUDIO_WS_URL`, which is a `ws://`/`wss://` origin
+    that `useAudioCapture` appends `/ws/audio/{session_id}` to; reusing it would
+    put a WebSocket scheme in front of a REST path. The same TLS rule applies —
+    the start-visit body carries a patient identifier.
   - **The screen must not reach an "in progress" state while the capture hook
     is in `error`.** This is the visible half of TASK-022's contract: any error
     state blocks the visit from starting and is shown to the provider as an
@@ -2325,34 +2346,54 @@ The insurance policy RAG is the technical core. Build and validate before other 
     when it is not is the worst outcome this screen can produce — worse than
     refusing to start — because the transcript, the SOAP note and every nudge
     that should have fired are all silently absent.
-  - **Three of the error codes need distinct handling, not one shared message.**
-    The full set is in `packages/audio-wire`; these are the ones where the
+  - **That rule covers the whole error vocabulary, not only the codes broken
+    out below.** `AudioCaptureErrorCode` in `packages/audio-wire` is the full
+    set, and every member of it blocks the visit. A code with no branch of its
+    own still renders its own `message` and a retry offer — never a silent
+    fallthrough, and never an in-progress screen. These are the ones where the
     right response to the provider differs:
     - `PERMISSION_DENIED` — a settings problem. Offer the route to fix it.
     - `SAMPLE_RATE_UNSUPPORTED` / `CHANNELS_UNSUPPORTED` — the device cannot
       capture what Transcribe needs. Not retryable on this hardware; say so
       rather than inviting a retry loop.
-    - `AUTH_REJECTED` — the session token was refused, so re-mint the session
-      (`POST /sessions/start`) before retrying rather than reusing the old one.
+    - `ENDIANNESS_UNSUPPORTED` — the same class of failure and mobile-only: the
+      platform is big-endian, so the PCM would reach Transcribe byte-swapped.
+      Not retryable on this hardware either, and it is a property of the device
+      rather than of this visit.
+    - `CAPTURE_FAILED` — the microphone refused to start and said so. Retryable,
+      and worth distinguishing from `CAPTURE_TIMED_OUT` in what the provider is
+      told: something failed, rather than everything reporting success and no
+      audio arriving.
     - `CAPTURE_TIMED_OUT` — the microphone started and then delivered nothing.
       Nothing was recorded, so a plain retry is the right offer, unlike the
       format failures above which are not retryable on this hardware. The code
       was added to the shared vocabulary by TASK-023 (the browser hook hit the
       gap first); TASK-026 is what makes the *mobile* hook emit it.
+    - `AUTH_REJECTED` — the session token was refused before the handshake
+      completed. Re-mint for the **same** `session_id` through
+      `POST /sessions/{session_id}/token` (TASK-006b) and retry, rather than
+      reusing the rejected token. Never `POST /sessions/start`, which forks the
+      encounter in two; a 409 from the re-mint means the encounter is already
+      completed and is the one case where the provider is asked to start a new
+      visit. The CLAUDE.md citation below is where this is decided — this
+      bullet restates it, and must not diverge from it.
     - `SEND_BACKLOG_EXCEEDED` — the socket never opened and buffered audio hit
       its cap. Nothing was recorded and the encounter never started, so a plain
-      retry is the right offer. Distinct from `STREAM_FAILED`, which means a
-      working connection dropped partway through and part of the encounter did
-      reach the server.
+      retry is the right offer.
+    - `STREAM_FAILED` — a socket that had opened and was carrying audio failed
+      or closed. Part of the encounter did reach the server and part did not, so
+      the provider is told the recording is incomplete rather than that nothing
+      was captured. It is the one code here where retrying does not restore a
+      whole encounter.
   - End visit: `POST /sessions/{session_id}/end`, stop capture, clear buffers.
   - **A visit outlasting the 15-minute JWT is settled in CLAUDE.md**, under
     "A visit outlasting the token re-mints" in the Session Lifecycle & JWT
-    Issuance section. It is no longer an open question for this task to decide:
-    the encounter never ends because a token expired, an already-open socket is
-    unaffected because validation is handshake-only, and re-minting happens for
-    the *same* `session_id` — never by calling `POST /sessions/start` again,
-    which forks the encounter in two. TASK-070 cites the same section, which is
-    why it was decided there rather than in either app.
+    Issuance section. That section is the shared source for both session
+    screens; this task cites it and does not re-derive it. It is no longer an
+    open question: the encounter never ends because a token expired, an
+    already-open socket is unaffected because validation is handshake-only, and
+    re-minting happens for the *same* `session_id` — never by calling
+    `POST /sessions/start` again, which forks the encounter in two.
   - **TASK-006b has shipped** `POST /sessions/{session_id}/token`, so this
     screen refreshes rather than surrendering: call it before opening any new
     socket when the held token is near `exp`, and again on `AUTH_REJECTED` from a
@@ -2363,7 +2404,39 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **Test:** capture reports `SAMPLE_RATE_UNSUPPORTED`, verify the visit does
     not start and the error is rendered
   - **Test:** permission denied, verify the same
-  - **Test:** start/active/end transitions with mocked APIs, mirroring TASK-070
+  - **Test:** an error code with no dedicated branch — `STREAM_FAILED` — still
+    blocks the in-progress state and renders its own message
+  - **Test:** `AUTH_REJECTED` re-mints via `POST /sessions/{session_id}/token`
+    and never calls `/sessions/start`; a 409 from that re-mint asks the provider
+    to start a new visit
+  - **Test:** start/active/end transitions with mocked APIs. `apps/web`'s
+    equivalent (TASK-070) is not built, so there is nothing to mirror — the
+    shared behaviour comes from the CLAUDE.md section cited above, and this
+    screen is the first of the two to implement it.
+
+- [ ] **TASK-025b:** Real patient and provider selection on mobile
+  - Prerequisite: TASK-025 (the seam this fills), TASK-052 (base FHIR resource
+    fetching)
+  - App: `apps/mobile`; also `services/fhir-integration` for the search route
+  - **The gap.** TASK-025 starts a visit through an injected function returning
+    `{patient_id, provider_id}`, because neither identifier has a real source
+    yet. The seam let that screen ship with its refusal behaviour intact; this
+    task gives it something real to call.
+  - `GET /fhir/patient/search?query=` **does not exist.** TASK-052 defines the
+    context and encounter reads only. Add the route in fhir-integration — it is
+    the same route TASK-070 needs, which flags it as possibly missing rather
+    than assuming it, so it is built once in the service and not per app.
+  - It reads patient demographics, so it audits through hipaa-logger like every
+    other route in that service.
+  - Provider identity still arrives with SMART on FHIR in Phase 5. If that has
+    not landed, fill the patient half and say so rather than inventing a
+    provider.
+  - Until this lands, no build of `apps/mobile` can start a real encounter, and
+    that is deliberate — see the hardcoded-id argument in TASK-025.
+  - **Test:** a search returns matches and the selection populates the
+    start-visit call
+  - **Test:** TASK-025's session screen tests still pass with the real
+    implementation substituted for the seam
 
 ---
 
