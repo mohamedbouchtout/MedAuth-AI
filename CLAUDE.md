@@ -946,6 +946,21 @@ test job — a change under packages/ correctly re-runs every service that depen
 on it, but that is not a substitute for running the package's own test suite.
 The 80% coverage gate applies to packages/ the same as services/.
 
+**A service's OpenAPI spec selects that service's job**, by the filename
+convention in API Design above: `docs/api/<service-name>.yaml` selects
+`services/<service-name>`. This exists because
+`tests/unit/api/test_openapi_contract.py` compares the committed spec against the
+app's generated schema, so the spec is half of a contract and editing it alone is
+a way to break that test. Without this rule the drift test ran on changes to the
+half that cannot drift by itself and not on the half that can, and a spec-only
+edit could land red on `main`. Keep the filename convention when adding a
+service; the rule is derived from it and needs no lookup table.
+
+Corollary worth remembering when adding any future coupling: **a test that
+guards two things must be re-run when either of them moves.** The same reasoning
+puts `services/audio-ingestion` in the selection whenever
+`services/track-a-clinical` changes, for the session-JWT contract test.
+
 ### .github/workflows/deploy-dev.yml
 Stub file only during Phases 0-5. Content:
 ```yaml
