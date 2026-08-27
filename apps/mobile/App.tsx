@@ -1,38 +1,31 @@
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+import { View, StyleSheet } from 'react-native';
+
+import { SessionScreen } from './src/screens/SessionScreen';
+import { patientSelectionUnavailable } from './src/session/patientSource';
 
 /**
- * Placeholder root.
+ * Root.
  *
- * TASK-022 builds the capture hook only. The session screen that starts a
- * visit, drives `useAudioCapture`, and — critically — refuses to reach an
- * in-progress state while capture reports an error is TASK-025. Wiring a
- * half-built version of it here would be the exact failure that task exists to
- * prevent: a screen that looks like it is recording when it is not.
+ * The session screen (TASK-025) is wired to `patientSelectionUnavailable`, which
+ * is the seam described in `src/session/patientSource.ts`: nothing on this
+ * platform can identify a patient or a provider until TASK-025b adds the FHIR
+ * patient search route and SMART on FHIR supplies the provider. So this build
+ * shows a provider that a visit cannot be started, rather than starting one
+ * against an invented patient id — an encounter, a SOAP note and a prior-auth
+ * bundle filed against the wrong patient is silent at every layer below this.
  */
 export default function App() {
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>MedAuth AI</Text>
-      <Text style={styles.body}>Session UI arrives in TASK-025.</Text>
+    <View style={styles.root}>
+      <SessionScreen patientSource={patientSelectionUnavailable} />
       <StatusBar style="auto" />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  root: {
     flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 24,
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: '600',
-  },
-  body: {
-    marginTop: 8,
-    textAlign: 'center',
   },
 });

@@ -5,8 +5,8 @@
  *
  * The coverage gate is the same 80% CI applies to services/ and packages/.
  * `App.tsx` and `index.ts` are excluded because they are the Expo entry point
- * and a placeholder screen — TASK-025 builds the real session UI and brings its
- * own tests. Everything that carries logic is inside src/.
+ * and the wiring that hands the session screen its patient source — TASK-025
+ * put every decision that wiring depends on inside src/, where it is covered.
  *
  * `@medauth/audio-wire` is mapped to its TypeScript source rather than resolved
  * through node_modules. The package publishes no build output on purpose (see
