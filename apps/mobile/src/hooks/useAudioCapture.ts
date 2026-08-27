@@ -88,12 +88,18 @@ export const FIRST_AUDIO_TIMEOUT_MS = 8_000;
  * TASK-020 validates the session token *before* completing the handshake, so a
  * rejected JWT arrives as a failed upgrade rather than a close with code 4401.
  * There is nothing to distinguish it from an unreachable host at this layer, and
- * of the two the actionable one is the token — so say so, and say what to do.
+ * of the two the actionable one is the token — so say so.
+ *
+ * It says what happened and not what to do about it. The original wording told
+ * the provider to start a new session, which was written before TASK-006b
+ * existed and is now the one response that must not be taken: a second
+ * /sessions/start forks the visit into two encounters. What to do belongs to the
+ * screen (TASK-025), which re-mints for the same session and only asks for a new
+ * visit when the re-mint returns 409.
  */
 const REFUSED: AudioCaptureError = {
   code: 'AUTH_REJECTED',
-  message:
-    'The audio connection was refused. The session token is expired or invalid; start a new session.',
+  message: 'The audio connection was refused: the session token was not accepted.',
 };
 
 export type AudioCaptureState =
