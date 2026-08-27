@@ -95,7 +95,23 @@ jobs:
                   selected+=("services/$s")
                 fi
               done
+
+              # audio-ingestion validates the session JWT that track-a-clinical
+              # mints, and tests/unit/test_remint_token_contract.py proves the two
+              # agree by calling the real issuer. That test is decorative unless a
+              # change to the issuer re-runs it, so select the validator's job too.
+              # This is the only service-to-service test coupling so far; add a
+              # line here if another one appears rather than widening the loop.
+              if echo "$changed" | grep -q '^services/track-a-clinical/'; then
+                selected+=("services/audio-ingestion")
+              fi
             fi
+          fi
+
+          # The two rules above can both select audio-ingestion; the matrix must
+          # not then run it twice.
+          if [ ${#selected[@]} -gt 0 ]; then
+            mapfile -t selected < <(printf '%s\n' "${selected[@]}" | sort -u)
           fi
 
           if [ ${#selected[@]} -eq 0 ]; then
