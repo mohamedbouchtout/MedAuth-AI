@@ -351,7 +351,7 @@ Claude Code should read this before starting any task to understand current stat
       and cannot. The known gap noted above — a broker failure after the commit,
       with no durable outbox — now applies to both ends of the lifecycle.
 
-- [ ] **TASK-006b:** Re-mint a session token without starting a session
+- [x] **TASK-006b:** Re-mint a session token without starting a session
   - Prerequisite: TASK-006 (owns session lifecycle and the `encounters` table)
   - Service: `services/track-a-clinical`
   - **Why this exists.** `SESSION_TTL_SECONDS` is 15 minutes and a real
@@ -381,15 +381,12 @@ Claude Code should read this before starting any task to understand current stat
     socket. Publishes nothing — no consumer learns anything from a re-mint, and
     a second `sessions:started` would make TASK-021 re-subscribe to a channel it
     already holds.
-  - **Authorisation is the open question this task must settle**, and it is not
-    incidental: an endpoint that hands out a session token must not accept an
-    expired token as its own credential, or the 15-minute lifetime means
-    nothing — anyone holding one expired token could refresh forever. Decide
-    deliberately between accepting the expired JWT with a bounded grace period
-    past `exp`, and requiring a separate provider credential, and write down
-    which and why. Note that no provider-authentication mechanism exists in the
-    repo yet, which is a real constraint on the answer rather than an argument
-    for skipping the question.
+  - **Authorisation was the open question this task had to settle. Settled:**
+    the expired JWT is the credential, presented as `Authorization: Bearer` and
+    accepted while it is no more than `SESSION_REMINT_GRACE_SECONDS` (default
+    3600) past `exp`. Not a separate provider credential. The reasoning is in
+    CLAUDE.md's "A visit outlasting the token re-mints" bullets and in
+    `validate_remint_credential`'s docstring; do not re-derive it per client.
   - Reads and re-mints against an encounter, so it touches PHI: `audit_log()`
     per the route-level rule, with a distinct action from `START_SESSION`.
   - Update CLAUDE.md's "A visit outlasting the token re-mints" bullets when this
@@ -401,6 +398,54 @@ Claude Code should read this before starting any task to understand current stat
   - **Test:** re-minting a completed session returns 409 and no token
   - **Test:** re-minting an unknown or soft-deleted `session_id` returns 404
   - **Test:** the minted token is accepted by TASK-020's WebSocket validator
+  - Built (track-a-clinical 115 tests, 100% coverage; audio-ingestion 116).
+    Decisions worth knowing before touching this:
+    - **The credential decision, in one line:** a re-mint endpoint should be
+      exactly as strong as the sockets its tokens open, and no stronger.
+      `validate_token()` in audio-ingestion proves only possession, no provider
+      authentication exists in the repo, and `/sessions/start` takes
+      `provider_id` as an unauthenticated body field — so requiring more to
+      refresh a token than to use one would be ceremony blocking on Phase 5
+      infrastructure. The grace window bounds how long one *captured* token
+      stays useful, which matters because nothing auto-completes an abandoned
+      encounter.
+    - **`SESSION_REMINT_GRACE_SECONDS=3600` is an assumption, not a
+      measurement.** It was accepted deliberately as a starting value and has
+      not been validated against a real visit. It is bracketed rather than
+      derived: above a backgrounded mobile app's realistic gap, well under the
+      4h `procedure_seen:{session_id}` TTL. Revisit it once there is real
+      client behaviour to look at; changing it is a config edit, and the unit
+      tests assert the behaviour tracks the setting rather than the literal.
+    - **Re-minting revokes nothing — tracked as issue #51.** No `jti`, no
+      `iat`, no server-side token store, so every token issued for the session
+      inside the window remains acceptable, including superseded ones. Recorded
+      in the route docstring and the OpenAPI description rather than implied
+      away. The issue carries the options for narrowing it; ending the encounter
+      is the only revocation available today, and it is all-or-nothing.
+    - The provider is read from the `encounters` row, never from the presented
+      token's claim, so a re-mint cannot alter the identity the original token
+      was issued for. There is a test for exactly that.
+    - A bad credential is rejected **before** the encounter is looked up, so the
+      endpoint returns 401 rather than 404 for an unknown session and is not a
+      probe for which session ids exist.
+    - Only the `Authorization: Bearer` carrier is accepted. The
+      `Sec-WebSocket-Protocol` carrier exists because the native `WebSocket`
+      constructor cannot set headers; a plain POST can.
+    - **The fifth test lives in audio-ingestion, not here**, as
+      `tests/unit/test_remint_token_contract.py`. `import src.auth` from
+      track-a-clinical's suite resolves to whichever of the four services that
+      still install a top-level `src` sorts first — the shadowing hazard
+      CLAUDE.md names — so the test sits where that import is unambiguous. It
+      calls the real issuer and the real validator with nothing in between.
+      This required a **dev-only** dependency on `medauth-track-a-clinical` in
+      `services/audio-ingestion/pyproject.toml`; nothing in its `src/` imports
+      it and nothing should.
+    - **`ci.yml` now selects the audio-ingestion job when track-a-clinical
+      changes.** Without that the contract test would never run when the issuer
+      moves, which is the one failure it exists to catch. The selection list is
+      de-duplicated because two rules can now pick the same member.
+    - `tests/unit/test_main.py`'s route-set assertion was widened to three
+      routes; it is the test that would otherwise silently accept a fourth.
 
 ---
 
@@ -2237,9 +2282,13 @@ The insurance policy RAG is the technical core. Build and validate before other 
     the *same* `session_id` — never by calling `POST /sessions/start` again,
     which forks the encounter in two. TASK-070 cites the same section, which is
     why it was decided there rather than in either app.
-  - Until **TASK-006b** ships the re-mint endpoint, this screen surfaces
-    `AUTH_REJECTED` and asks the provider to start a new visit rather than
-    re-calling `/sessions/start`. Do not implement a workaround here.
+  - **TASK-006b has shipped** `POST /sessions/{session_id}/token`, so this
+    screen refreshes rather than surrendering: call it before opening any new
+    socket when the held token is near `exp`, and again on `AUTH_REJECTED` from a
+    socket that failed to open. A 409 means the encounter is already completed
+    and the visit really is over — that is the only case where the provider is
+    asked to start a new one. Still never re-call `/sessions/start` to get a
+    token; that forks the encounter.
   - **Test:** capture reports `SAMPLE_RATE_UNSUPPORTED`, verify the visit does
     not start and the error is rendered
   - **Test:** permission denied, verify the same
@@ -2679,9 +2728,10 @@ logic do not change.
     "A visit outlasting the token re-mints" in the Session Lifecycle & JWT
     Issuance section — the same text TASK-025 cites on mobile. Do not re-derive
     it here, and in particular do not re-call `POST /sessions/start` to get a
-    fresh token: that forks one visit into two encounters, silently. Until
-    **TASK-006b** ships the re-mint endpoint, surface the auth failure and ask
-    the provider to start a new visit.
+    fresh token: that forks one visit into two encounters, silently.
+    **TASK-006b has shipped** `POST /sessions/{session_id}/token` — refresh
+    through it, proactively before opening a socket with a token near `exp` and
+    reactively on `AUTH_REJECTED`. Only a 409 from it means the visit is over.
   - **Test:** component tests for start/active/end state transitions with mocked APIs
 
 - [ ] **TASK-071:** Note review + edit UI
