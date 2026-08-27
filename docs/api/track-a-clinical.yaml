@@ -21,7 +21,7 @@ servers:
 
 tags:
   - name: sessions
-    description: Start and end a clinical encounter.
+    description: Start a clinical encounter, refresh its token, and end it.
 
 paths:
   /sessions/start:
@@ -118,6 +118,81 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /sessions/{session_id}/token:
+    post:
+      tags: [sessions]
+      operationId: remintSessionToken
+      summary: Re-mint a session token
+      description: >-
+        Mints a fresh JWT for a session already under way, carrying the **same**
+        `session_id`, the encounter's existing `provider_id`, and a new `exp`.
+        Creates no row, mutates none, and publishes nothing. Returns 200 rather
+        than 201 — nothing is created, which is the distinction from
+        `/sessions/start`.
+
+
+        A visit routinely outlasts the 15-minute `SESSION_TTL_SECONDS`. Because
+        every real-time endpoint validates the token only during the handshake,
+        an already-open socket is unaffected; this endpoint exists for the case
+        where a *new* socket has to be opened after `exp` — a reconnect, or the
+        nudge socket opening later than the audio socket. Calling
+        `POST /sessions/start` again instead would fork one visit into two
+        encounters, silently.
+
+
+        Authorisation is the session's own token in an `Authorization: Bearer`
+        header, expired or not, accepted while it is no more than
+        `SESSION_REMINT_GRACE_SECONDS` past its `exp`. The token must carry the
+        same `session_id` as the path. Note that re-minting revokes nothing: with
+        no `jti` and no server-side token store, every token issued for this
+        session inside that window remains equally acceptable, including one a
+        later re-mint superseded. Ending the encounter is the only revocation
+        available today. Tracked as issue #51.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          description: The `session_id` whose token is being refreshed.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The same session's id and a freshly minted JWT.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemintTokenResponse'
+        '401':
+          description: >-
+            No session token was presented, or the one presented is invalid, is
+            for a different session, or expired longer ago than the grace window
+            allows.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: The session is unknown or its encounter is soft-deleted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: >-
+            The encounter is already completed. A finished visit cannot obtain a
+            token, because that token could reopen its audio socket.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: The request body or path parameter is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   schemas:
     StartSessionRequest:
@@ -176,13 +251,40 @@ components:
           type: boolean
           description: True when this call was a no-op repeat and published no signal.
 
+    RemintTokenData:
+      type: object
+      required: [session_id, jwt]
+      description: >-
+        Structurally identical to `StartSessionData`, and named separately on
+        purpose: a re-mint response should not be described by a schema whose
+        name says a session was started, when starting nothing is the point.
+      properties:
+        session_id:
+          type: string
+          format: uuid
+          description: >-
+            Echoed back, and always the session that was asked for — never a new
+            one. A client can assert on it to catch a fork.
+        jwt:
+          type: string
+          description: >-
+            Same claim set and signing as `/sessions/start` issues — exactly
+            `{session_id, provider_id, exp}`, HS256 under `JWT_SIGNING_KEY`. Only
+            `exp` differs from the token it replaces.
+
     Error:
       type: object
       required: [code, message]
       properties:
         code:
           type: string
-          enum: [session_not_found, signal_not_published, validation_error, http_error]
+          enum:
+            - session_not_found
+            - signal_not_published
+            - auth_rejected
+            - session_completed
+            - validation_error
+            - http_error
         message:
           type: string
           description: >-
@@ -205,6 +307,15 @@ components:
       properties:
         data:
           $ref: '#/components/schemas/EndSessionData'
+        error:
+          type: 'null'
+
+    RemintTokenResponse:
+      type: object
+      required: [data, error]
+      properties:
+        data:
+          $ref: '#/components/schemas/RemintTokenData'
         error:
           type: 'null'
 

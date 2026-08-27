@@ -25,6 +25,10 @@ from track_a_clinical.db import raw_asyncpg_connection
 ACTION_START_SESSION = "START_SESSION"
 ACTION_END_SESSION = "END_SESSION"
 ACTION_READ_ENCOUNTER = "READ_ENCOUNTER"
+#: A re-mint (TASK-006b) reads an encounter and issues a credential for it. Kept
+#: distinct from START_SESSION so an audit can tell "a visit was opened" from "a
+#: visit's token was refreshed" — they are different events with the same actor.
+ACTION_REMINT_SESSION_TOKEN = "REMINT_SESSION_TOKEN"
 
 SERVICE_NAME = "track-a-clinical"
 RESOURCE_TYPE_ENCOUNTER = "Encounter"

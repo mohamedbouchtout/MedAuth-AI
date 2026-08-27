@@ -9,10 +9,14 @@ from track_a_clinical.api import dependencies
 from track_a_clinical.main import create_app
 
 
-def test_app_exposes_both_session_routes() -> None:
+def test_app_exposes_the_session_routes() -> None:
     paths = create_app().openapi()["paths"]
 
-    assert set(paths) == {"/sessions/start", "/sessions/{session_id}/end"}
+    assert set(paths) == {
+        "/sessions/start",
+        "/sessions/{session_id}/end",
+        "/sessions/{session_id}/token",
+    }
     assert set(paths["/sessions/start"]) == {"post"}
 
 

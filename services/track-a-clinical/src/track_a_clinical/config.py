@@ -24,6 +24,25 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 #: hardcoded at the call site.
 DEFAULT_SESSION_TTL_SECONDS: Final = 900
 
+#: How far past ``exp`` a token may still be presented as the credential for a
+#: re-mint (TASK-006b).
+#:
+#: **This number is an assumption, not a measurement.** It was chosen when
+#: TASK-006b was built, accepted deliberately as a starting value rather than
+#: derived from any observed client behaviour, and it has not been validated
+#: against a real visit since. Treat it as provisional: if it turns out to be
+#: wrong it is wrong in a direction that matters, since it is what bounds how
+#: long a captured token stays useful.
+#:
+#: What brackets it, as opposed to justifying it: it has to comfortably exceed
+#: the gap between a client noticing expiry and acting on it (a backgrounded
+#: mobile app, a provider stepping out mid-visit), and stay well under the 4h
+#: ``procedure_seen:{session_id}`` TTL that already bounds a visit's other
+#: server-side state. Overridable through ``SESSION_REMINT_GRACE_SECONDS``, and
+#: ``tests/unit/test_remint_credential.py`` proves the behaviour follows the
+#: setting rather than this literal, so changing it is a config edit.
+DEFAULT_REMINT_GRACE_SECONDS: Final = 3600
+
 #: HS256 keys shorter than the hash output weaken the MAC, and PyJWT warns about
 #: them. Enforced here so a placeholder secret cannot reach a running service.
 MIN_SIGNING_KEY_BYTES: Final = 32
@@ -46,6 +65,7 @@ class Settings(BaseSettings):
 
     jwt_signing_key: str = Field(min_length=MIN_SIGNING_KEY_BYTES)
     session_ttl_seconds: int = Field(default=DEFAULT_SESSION_TTL_SECONDS, gt=0)
+    session_remint_grace_seconds: int = Field(default=DEFAULT_REMINT_GRACE_SECONDS, gt=0)
     redis_url: str = Field(default="redis://localhost:6379/0", min_length=1)
 
 

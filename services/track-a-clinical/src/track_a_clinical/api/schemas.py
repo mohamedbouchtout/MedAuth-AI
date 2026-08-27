@@ -44,3 +44,17 @@ class EndSessionData(BaseModel):
     status: str
     ended_at: datetime.datetime
     already_ended: bool
+
+
+class RemintTokenData(BaseModel):
+    """``data`` payload returned by ``POST /sessions/{session_id}/token``.
+
+    Structurally identical to :class:`StartSessionData` and deliberately a
+    separate model: the published spec should not describe a re-mint response as
+    "StartSessionData", when the entire point of the endpoint is that it starts
+    nothing. ``session_id`` is echoed back so a client can assert it got a token
+    for the session it asked about rather than a new one.
+    """
+
+    session_id: uuid.UUID
+    jwt: str

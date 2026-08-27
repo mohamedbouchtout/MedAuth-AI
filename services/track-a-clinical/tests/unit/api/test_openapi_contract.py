@@ -16,6 +16,8 @@ import pytest
 import yaml
 
 from track_a_clinical.api.sessions import (
+    ERROR_CODE_AUTH_REJECTED,
+    ERROR_CODE_SESSION_COMPLETED,
     ERROR_CODE_SESSION_NOT_FOUND,
     ERROR_CODE_SIGNAL_NOT_PUBLISHED,
 )
@@ -79,7 +81,12 @@ def test_published_request_forbids_unknown_fields(published: dict[str, Any]) -> 
 def test_documented_error_codes_match_the_handlers(published: dict[str, Any]) -> None:
     documented = set(published["components"]["schemas"]["Error"]["properties"]["code"]["enum"])
 
-    assert {ERROR_CODE_SESSION_NOT_FOUND, ERROR_CODE_SIGNAL_NOT_PUBLISHED} <= documented
+    assert {
+        ERROR_CODE_SESSION_NOT_FOUND,
+        ERROR_CODE_SIGNAL_NOT_PUBLISHED,
+        ERROR_CODE_AUTH_REJECTED,
+        ERROR_CODE_SESSION_COMPLETED,
+    } <= documented
 
 
 def test_documented_port_matches_the_local_dev_table(published: dict[str, Any]) -> None:
