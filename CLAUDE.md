@@ -357,16 +357,52 @@ neither re-derives it.
   Nothing errors anywhere along that path — it is the failure this bullet
   exists to prevent, and it is exactly the shortcut a client reaches for when
   the only endpoint it has is `/sessions/start`.
-- **The endpoint that re-mints without starting a session is TASK-006b**, and it
-  does not exist yet. Until it lands, a client that needs a socket after `exp`
-  has no correct move: it must surface `AUTH_REJECTED` and let the provider end
-  the visit and begin a new one. That is a poor experience and an honest one —
-  strictly better than silently forking the encounter. Do not work around the
-  gap by re-calling `/sessions/start`.
-- **Once TASK-006b exists, refresh proactively and reactively**: before opening
-  any new socket when the held token is close to `exp`, and on `AUTH_REJECTED`
-  from a socket that failed to open. Clients already hold `exp` — a claim in
-  the token they were given — so the proactive check costs nothing.
+- **The endpoint that re-mints without starting a session is
+  `POST /sessions/{session_id}/token`** (TASK-006b), and it exists. It returns
+  `{session_id, jwt}` in the standard envelope with **200, not 201** — nothing is
+  created, which is the whole distinction from `/sessions/start`. It writes no
+  row beyond its audit trail and publishes nothing, because no consumer learns
+  anything from a re-mint and a second `sessions:started` would make TASK-021
+  re-subscribe to a channel it already holds. An unknown or soft-deleted
+  `session_id` is a 404; an encounter already `completed` is a **409**, because a
+  finished visit must not be able to reopen an audio socket.
+- **Refresh proactively and reactively**: before opening any new socket when the
+  held token is close to `exp`, and on `AUTH_REJECTED` from a socket that failed
+  to open. Clients already hold `exp` — a claim in the token they were given —
+  so the proactive check costs nothing.
+- **The credential is the session's own token, in an `Authorization: Bearer`
+  header, expired or not.** Only the header carrier is accepted here; the
+  `Sec-WebSocket-Protocol` carrier below exists because the native `WebSocket`
+  constructor cannot set headers, and a plain POST can. Validation is everything
+  `audio-ingestion`'s validator does — signature under `JWT_SIGNING_KEY`,
+  required claims, and the token's `session_id` claim equal to the path's —
+  except that expiry is not fatal within `SESSION_REMINT_GRACE_SECONDS` past
+  `exp`. **That default of 3600 is an assumption, not a measurement** — accepted
+  as a starting value when TASK-006b was built and not since validated against a
+  real visit. Treat it as provisional rather than as a settled constant.
+  Why that strength and no more: **a re-mint endpoint should be exactly as strong
+  as the sockets its tokens open.** `validate_token()` in audio-ingestion also
+  proves only possession, no provider-authentication mechanism exists anywhere in
+  this repo yet, and `POST /sessions/start` itself takes `provider_id` as an
+  unauthenticated body field. Demanding a stronger credential to refresh a token
+  than to use one would be ceremony, and would block the endpoint on
+  infrastructure that does not arrive before SMART on FHIR in Phase 5.
+  What the grace window actually bounds is **how long one captured token stays
+  useful** — not how long a live client may keep refreshing, which is expected
+  and is no stronger than holding one socket open. It matters because nothing
+  auto-completes an abandoned encounter: `/sessions/{id}/end` is the only writer
+  of `status='completed'`, so without the window a token leaked from a visit
+  nobody remembered to end would authorise a re-mint indefinitely.
+  **Re-minting revokes nothing** — tracked as issue #51. With no `jti` and no
+  server-side token store, every token issued for a session inside the window
+  stays equally acceptable, including one a later re-mint superseded. That is
+  inherent in accepting a bearer token as its own refresh credential; revisit it
+  when real provider authentication lands, and do not assume otherwise in the
+  meantime. Ending the encounter is the only revocation available today, and it
+  is all-or-nothing.
+- **The provider comes from the `encounters` row, never from the presented
+  token's claim.** The row is what `/sessions/start` recorded, so a re-mint
+  cannot alter or widen the identity the original token was issued for.
 - **A refreshed token does not extend the encounter.** The encounter ends when
   the provider ends it, via `POST /sessions/{session_id}/end`. Token lifetime
   and visit lifetime are independent, and conflating them is what produced the
@@ -446,7 +482,12 @@ sessions:started                 pub/sub — the one fixed channel here, carryin
                                  speech. Published before /sessions/start
                                  returns the JWT, so a consumer is always
                                  listening before the client can open its
-                                 audio socket.
+                                 audio socket. Note that re-minting a session's
+                                 token (TASK-006b) publishes to no channel at
+                                 all — a re-mint tells no consumer anything it
+                                 does not already know, and a second
+                                 sessions:started would make TASK-021
+                                 re-subscribe to a channel it already holds.
 procedure_seen:{session_id}      set, 4h TTL — the procedure keys already
                                  queried during one encounter, so a procedure
                                  named three times raises one nudge and not
