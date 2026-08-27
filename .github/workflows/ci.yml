@@ -68,116 +68,35 @@ jobs:
           echo "Changed files:"
           echo "$changed"
 
-          all_services=(audio-ingestion track-a-clinical track-b-rag fhir-integration prior-auth nudge-service policy-scraper)
-          all_packages=(api-envelope hipaa-logger crypto-utils fhir-types payer-vocab)
+          # The selection rules live in a script so they can be tested against
+          # an arbitrary file list — see detect-changed-members.test.sh, and the
+          # `detect-logic` job below that runs it. Only the base-SHA resolution
+          # above stays inline, because it needs the GitHub event context and a
+          # real repository; everything past this point is a pure function of
+          # the path list. `tee` puts the decisions in the job log as well as in
+          # $GITHUB_OUTPUT, so a surprising matrix can be read off the run.
+          printf '%s\n' "$changed" \
+            | bash .github/scripts/detect-changed-members.sh \
+            | tee -a "$GITHUB_OUTPUT"
 
-          selected=()
 
-          if echo "$changed" | grep -qE '^(pyproject\.toml|uv\.lock|\.github/workflows/ci\.yml)'; then
-            # Workspace root or the CI definition itself — test everything.
-            for p in "${all_packages[@]}"; do selected+=("packages/$p"); done
-            for s in "${all_services[@]}"; do selected+=("services/$s"); done
-          else
-            # A changed package gets its own job, so its unit and integration tests
-            # actually run — they never did while the matrix held services only.
-            for p in "${all_packages[@]}"; do
-              if echo "$changed" | grep -q "^packages/$p/"; then
-                selected+=("packages/$p")
-              fi
-            done
+  # ---------------------------------------------------------------------------
+  # Test the job-selection logic itself.
+  #
+  # Deliberately unconditional, with no `needs: changes`. Every other job runs
+  # only when the detector selects it, so gating this one on the detector would
+  # mean a bug that makes it select nothing also skips the test that would have
+  # caught it. A self-test must not depend on the thing it tests. It needs only
+  # checkout and bash, so running it always costs seconds.
+  # ---------------------------------------------------------------------------
+  detect-logic:
+    name: Test change detection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
 
-            if echo "$changed" | grep -q '^packages/'; then
-              # Every service imports the shared packages, so re-test them all too.
-              for s in "${all_services[@]}"; do selected+=("services/$s"); done
-            else
-              for s in "${all_services[@]}"; do
-                if echo "$changed" | grep -q "^services/$s/"; then
-                  selected+=("services/$s")
-                fi
-              done
-
-              # audio-ingestion validates the session JWT that track-a-clinical
-              # mints, and tests/unit/test_remint_token_contract.py proves the two
-              # agree by calling the real issuer. That test is decorative unless a
-              # change to the issuer re-runs it, so select the validator's job too.
-              # This is the only service-to-service test coupling so far; add a
-              # line here if another one appears rather than widening the loop.
-              if echo "$changed" | grep -q '^services/track-a-clinical/'; then
-                selected+=("services/audio-ingestion")
-              fi
-            fi
-
-            # A service's OpenAPI spec is half of a contract its own test checks:
-            # tests/unit/api/test_openapi_contract.py compares docs/api/<name>.yaml
-            # against the app's generated schema on routes, methods, status codes
-            # and required request fields. Editing only the spec is therefore a way
-            # to break that test, and until now it selected no job at all — the
-            # drift test ran on changes to the half that cannot drift alone, and
-            # not on the half that can. A spec-only edit could land red on main.
-            #
-            # The mapping is the filename convention from CLAUDE.md's API Design
-            # section, docs/api/<service-name>.yaml, so no lookup table is needed
-            # and a spec added for a service that has no job yet correctly selects
-            # nothing. This sits outside the packages/services if-else above
-            # because it holds either way: a spec edit selects its service whether
-            # or not anything under packages/ moved.
-            for s in "${all_services[@]}"; do
-              if echo "$changed" | grep -q "^docs/api/$s\.yaml$"; then
-                selected+=("services/$s")
-              fi
-            done
-          fi
-
-          # Several rules above can select the same member — a service whose own
-          # directory, its OpenAPI spec, and the track-a-clinical pairing all
-          # moved in one change picks it three times. The matrix must still run
-          # it once.
-          if [ ${#selected[@]} -gt 0 ]; then
-            mapfile -t selected < <(printf '%s\n' "${selected[@]}" | sort -u)
-          fi
-
-          if [ ${#selected[@]} -eq 0 ]; then
-            echo "members=[]" >> "$GITHUB_OUTPUT"
-            echo "any_python=false" >> "$GITHUB_OUTPUT"
-          else
-            printf -v joined '"%s",' "${selected[@]}"
-            echo "members=[${joined%,}]" >> "$GITHUB_OUTPUT"
-            echo "any_python=true" >> "$GITHUB_OUTPUT"
-          fi
-
-          # Both apps import @medauth/audio-wire, and it ships as TypeScript
-          # source rather than a build, so a change there is a change to code
-          # that runs inside them — test them when it moves.
-          if echo "$changed" | grep -qE '^(apps/web/|packages/audio-wire/)'; then
-            echo "web=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "web=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          if echo "$changed" | grep -qE '^(apps/mobile/|packages/audio-wire/)'; then
-            echo "mobile=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "mobile=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          # fhir-types spans both toolchains, so it also reacts to the npm root:
-          # the TypeScript mirrors are an npm workspace, and a lockfile change can
-          # break `npm ci` without touching the package itself.
-          if echo "$changed" | grep -qE '^(pyproject\.toml|uv\.lock|package\.json|package-lock\.json|\.github/workflows/ci\.yml|packages/fhir-types/)'; then
-            echo "fhir_types=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "fhir_types=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          # audio-wire is TypeScript only, so it gets an npm job rather than a
-          # place in all_packages. It reacts to the npm root for the same reason
-          # fhir-types does: a lockfile change can break `npm ci` without
-          # touching the package.
-          if echo "$changed" | grep -qE '^(package\.json|package-lock\.json|\.github/workflows/ci\.yml|packages/audio-wire/)'; then
-            echo "audio_wire=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "audio_wire=false" >> "$GITHUB_OUTPUT"
-          fi
+      - name: detect-changed-members.test.sh
+        run: bash .github/scripts/detect-changed-members.test.sh
 
   # ---------------------------------------------------------------------------
   # Lint — ruff over the whole workspace. Cheap enough not to bother scoping.
@@ -494,7 +413,11 @@ jobs:
   # ---------------------------------------------------------------------------
   ci-passed:
     name: CI passed
-    needs: [lint, typecheck, test, fhir-types, web, mobile]
+    # audio-wire and detect-logic were both missing here. A job absent from this
+    # list can fail without blocking a merge, which is the same silent-hole
+    # failure the detector rules guard against, one layer up: the job runs, goes
+    # red, and nothing stops the pull request.
+    needs: [lint, typecheck, test, fhir-types, audio-wire, web, mobile, detect-logic]
     if: always()
     runs-on: ubuntu-latest
     steps:
