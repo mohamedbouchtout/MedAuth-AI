@@ -404,7 +404,7 @@ Claude Code should read this before starting any task to understand current stat
 
 ---
 
-- [ ] **TASK-007:** Move CI and local dev to Node 24
+- [x] **TASK-007:** Move CI and local dev to Node 24
   - **Why now.** `ci.yml` pinned `NODE_VERSION: "20"`, and Node 20 reached end of
     life on 2026-04-30 — verified against the `nodejs/Release` schedule, not from
     memory. That is a supply-chain position, not a style preference: the runtime
