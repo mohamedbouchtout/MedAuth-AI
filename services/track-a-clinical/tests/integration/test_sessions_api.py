@@ -34,6 +34,7 @@ from track_a_clinical.models import (
     ENCOUNTER_STATUS_COMPLETED,
     Encounter,
 )
+from track_a_clinical.session_tokens import mint_session_jwt
 
 pytestmark = [
     pytest.mark.integration,
@@ -102,6 +103,12 @@ async def load_encounter(
     """Read an encounter back through a fresh session, not the app's."""
     async with sessions() as session:
         return await session.scalar(sa.select(Encounter).where(Encounter.session_id == session_id))
+
+
+async def count_encounters(sessions: async_sessionmaker[AsyncSession]) -> int:
+    """Count every encounter row, so a re-mint can be shown to add none."""
+    async with sessions() as session:
+        return int(await session.scalar(sa.select(sa.func.count()).select_from(Encounter)) or 0)
 
 
 async def count_audit_rows(
@@ -214,6 +221,79 @@ async def test_end_is_idempotent_and_signals_only_once(
     assert second_signal is None, "the repeat call published a second signal"
     assert await count_audit_rows(sessions, session_id, "END_SESSION") == 1
     assert await count_audit_rows(sessions, session_id, "READ_ENCOUNTER") == 1
+
+
+async def test_remint_issues_a_token_without_creating_an_encounter(
+    client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """The row count is the assertion: a second row is the fork TASK-006b prevents."""
+    session_id, original = await start_session(client)
+    before = await count_encounters(sessions)
+
+    response = await client.post(
+        f"/sessions/{session_id}/token", headers={"Authorization": f"Bearer {original}"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["session_id"] == str(session_id)
+    assert await count_encounters(sessions) == before
+
+    encounter = await load_encounter(sessions, session_id)
+    assert encounter is not None
+    # Still active, still the same visit — a re-mint changes no state but the audit.
+    assert encounter.status == ENCOUNTER_STATUS_ACTIVE
+    assert encounter.ended_at is None
+    assert await count_audit_rows(sessions, session_id, "REMINT_SESSION_TOKEN") == 1
+
+
+async def test_remint_of_a_completed_session_is_409(
+    client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """A finished visit must not be able to reopen its audio socket."""
+    session_id, original = await start_session(client)
+    assert (await client.post(f"/sessions/{session_id}/end")).status_code == 200
+
+    response = await client.post(
+        f"/sessions/{session_id}/token", headers={"Authorization": f"Bearer {original}"}
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "session_completed"
+    assert response.json()["data"] is None
+
+
+async def test_remint_returns_404_for_a_soft_deleted_encounter(
+    client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """Soft-deleted rows are retired; a valid token must not resurrect one."""
+    session_id, original = await start_session(client)
+    async with sessions() as session:
+        await session.execute(
+            sa.update(Encounter)
+            .where(Encounter.session_id == session_id)
+            .values(deleted_at=sa.func.now())
+        )
+        await session.commit()
+
+    response = await client.post(
+        f"/sessions/{session_id}/token", headers={"Authorization": f"Bearer {original}"}
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "session_not_found"
+
+
+async def test_remint_returns_404_for_an_unknown_session(client: AsyncClient) -> None:
+    """A well-formed token for a session that was never started."""
+    unknown = uuid.uuid4()
+    token = mint_session_jwt(session_id=unknown, provider_id=uuid.uuid4(), settings=get_settings())
+
+    response = await client.post(
+        f"/sessions/{unknown}/token", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "session_not_found"
 
 
 async def test_end_returns_404_for_an_unknown_session(client: AsyncClient) -> None:

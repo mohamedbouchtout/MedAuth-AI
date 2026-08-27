@@ -6,6 +6,9 @@ and announces the new session on ``sessions:started``.
 ``POST /sessions/{session_id}/end`` closes the encounter and publishes the
 ``session:ended:{session_id}`` signal that SOAP generation (TASK-030) and prior
 auth bundle assembly (TASK-060) both subscribe to.
+``POST /sessions/{session_id}/token`` (TASK-006b) re-mints the JWT for a visit
+already under way, so a session outliving its 15-minute token does not have to
+be started again — which would fork one encounter into two.
 
 **Why start is announced at all** (added in TASK-021): a service that consumes
 ``transcription:{session_id}`` has to learn the session id from somewhere before
@@ -30,7 +33,7 @@ import uuid
 from typing import Annotated, Final
 
 import sqlalchemy as sa
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Header, Request, status
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,6 +43,7 @@ from track_a_clinical import audit
 from track_a_clinical.api.dependencies import get_db_session, get_redis
 from track_a_clinical.api.schemas import (
     EndSessionData,
+    RemintTokenData,
     StartSessionData,
     StartSessionRequest,
 )
@@ -49,7 +53,11 @@ from track_a_clinical.models import (
     ENCOUNTER_STATUS_COMPLETED,
     Encounter,
 )
-from track_a_clinical.session_tokens import mint_session_jwt
+from track_a_clinical.session_tokens import (
+    RemintCredentialError,
+    mint_session_jwt,
+    validate_remint_credential,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +65,10 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 ERROR_CODE_SESSION_NOT_FOUND = "session_not_found"
 ERROR_CODE_SIGNAL_NOT_PUBLISHED = "signal_not_published"
+ERROR_CODE_AUTH_REJECTED = "auth_rejected"
+ERROR_CODE_SESSION_COMPLETED = "session_completed"
+
+_BEARER_PREFIX = "bearer "
 
 #: What these statuses mean on *these* routes. api_envelope carries generic
 #: wording for each; a 404 here is more specific than "the resource does not
@@ -65,6 +77,21 @@ SESSION_ERROR_DESCRIPTIONS = {
     status.HTTP_404_NOT_FOUND: "The session is unknown or its encounter is soft-deleted.",
     status.HTTP_503_SERVICE_UNAVAILABLE: (
         "The session ended but its signal could not be published."
+    ),
+}
+
+#: The re-mint route's 401 and 409 both mean something a caller acts on
+#: differently — retrying is pointless for either, but only one of them means the
+#: visit is over — so neither is left on api_envelope's generic wording.
+REMINT_ERROR_DESCRIPTIONS = {
+    status.HTTP_401_UNAUTHORIZED: (
+        "No session token was presented, or the one presented is invalid, is for "
+        "a different session, or expired longer ago than the grace window allows."
+    ),
+    status.HTTP_404_NOT_FOUND: SESSION_ERROR_DESCRIPTIONS[status.HTTP_404_NOT_FOUND],
+    status.HTTP_409_CONFLICT: (
+        "The encounter is already completed. A finished visit cannot obtain a "
+        "token, because that token could reopen its audio socket."
     ),
 }
 
@@ -92,6 +119,17 @@ def session_ended_channel(session_id: uuid.UUID) -> str:
 def _client_ip(request: Request) -> str | None:
     """Return the requesting client's IP, or None when the transport has no peer."""
     return request.client.host if request.client else None
+
+
+def _bearer_token(authorization: str | None) -> str:
+    """Return the token from an ``Authorization: Bearer`` header, or empty string.
+
+    An absent header and a malformed one are not distinguished: both end in the
+    same 401, and telling a caller which it was changes nothing it can do.
+    """
+    if authorization and authorization.lower().startswith(_BEARER_PREFIX):
+        return authorization[len(_BEARER_PREFIX) :].strip()
+    return ""
 
 
 @router.post(
@@ -238,6 +276,117 @@ async def end_session(
             already_ended=already_ended,
         )
     )
+
+
+@router.post(
+    "/{session_id}/token",
+    response_model=ApiResponse[RemintTokenData],
+    summary="Re-mint a session token",
+    response_description="The same session's id and a freshly minted JWT.",
+    responses=error_responses(
+        status.HTTP_401_UNAUTHORIZED,
+        status.HTTP_404_NOT_FOUND,
+        status.HTTP_409_CONFLICT,
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        descriptions=REMINT_ERROR_DESCRIPTIONS,
+    ),
+)
+async def remint_session_token(
+    session_id: uuid.UUID,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    authorization: Annotated[str | None, Header()] = None,
+) -> ApiResponse[RemintTokenData]:
+    """Issue a fresh JWT for a session that is already under way.
+
+    ``SESSION_TTL_SECONDS`` is 15 minutes and real orthopedic and dermatology
+    visits routinely run longer. Validation is handshake-only, so a socket opened
+    at minute 0 keeps streaming at minute 40 — expiry bites only when a *new*
+    socket must be opened, on a reconnect or when the nudge socket opens later
+    than the audio one. This endpoint is what a client calls then.
+
+    **It is not a second ``/sessions/start``, and that distinction is the whole
+    point.** Starting again would create a second ``encounters`` row with a new
+    ``session_id``, forking one visit into two: the transcript splits across two
+    ``transcription:{session_id}`` channels, TASK-030 writes two partial SOAP
+    notes, TASK-060 assembles a bundle from whichever half it saw, and
+    ``procedure_seen:{session_id}`` stops deduping so one procedure nudges twice.
+    Nothing errors anywhere on that path, which is why this is an endpoint rather
+    than a warning in a document.
+
+    Returns 200 — nothing is created, unlike ``/sessions/start``'s 201. Writes no
+    row beyond the audit trail, and publishes nothing: no consumer learns anything
+    from a re-mint, and a second ``sessions:started`` would make TASK-021
+    re-subscribe to a channel it already holds. A refreshed token does not extend
+    the encounter; only ``POST /sessions/{session_id}/end`` ends it.
+
+    Authorisation is the session's own token, presented as ``Authorization:
+    Bearer``, expired or not — see
+    :func:`~track_a_clinical.session_tokens.validate_remint_credential` for why
+    that is the right strength here and what bounds it. Only the header carrier is
+    accepted: the ``Sec-WebSocket-Protocol`` carrier exists because the native
+    ``WebSocket`` constructor cannot set headers, and a plain POST can.
+
+    Returns 401 when the presented token does not authorise this session, 404
+    when the session is unknown or soft-deleted, and 409 when its encounter is
+    already completed.
+    """
+    settings = get_settings()
+    try:
+        validate_remint_credential(
+            _bearer_token(authorization), session_id=session_id, settings=settings
+        )
+    except RemintCredentialError as exc:
+        # exc.reason names the kind of failure and never the token or a claim.
+        logger.warning("Rejected re-mint for session %s: %s", session_id, exc.reason)
+        raise ApiHTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            ERROR_CODE_AUTH_REJECTED,
+            "The presented session token does not authorise a re-mint",
+        ) from None
+
+    encounter = await session.scalar(
+        sa.select(Encounter).where(
+            Encounter.session_id == session_id,
+            Encounter.deleted_at.is_(None),
+        )
+    )
+    if encounter is None:
+        raise ApiHTTPException(
+            status.HTTP_404_NOT_FOUND,
+            ERROR_CODE_SESSION_NOT_FOUND,
+            f"No encounter for session {session_id}",
+        )
+    if encounter.status == ENCOUNTER_STATUS_COMPLETED:
+        raise ApiHTTPException(
+            status.HTTP_409_CONFLICT,
+            ERROR_CODE_SESSION_COMPLETED,
+            f"Session {session_id} is already completed and cannot be re-minted",
+        )
+
+    # The provider comes from the row, never from the presented token's claim: the
+    # row is what /sessions/start recorded, so a re-mint cannot alter the identity
+    # the original token was issued for even if the token itself is odd.
+    token = mint_session_jwt(
+        session_id=session_id,
+        provider_id=encounter.provider_id,
+        settings=settings,
+    )
+
+    await audit.audit_encounter_access(
+        session,
+        action=audit.ACTION_REMINT_SESSION_TOKEN,
+        encounter_id=encounter.id,
+        session_id=session_id,
+        provider_id=encounter.provider_id,
+        ip_address=_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    # Nothing above changed a row, so this commits the audit write alone — which
+    # is the point: the encounter read is what has to be recorded.
+    await session.commit()
+
+    return ApiResponse[RemintTokenData](data=RemintTokenData(session_id=session_id, jwt=token))
 
 
 async def _publish_session_started(redis: Redis, session_id: uuid.UUID) -> None:
