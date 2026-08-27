@@ -1645,6 +1645,11 @@ dependencies = [
     { name = "websockets" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "medauth-track-a-clinical" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "amazon-transcribe", specifier = "==0.6.4" },
@@ -1660,6 +1665,9 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.4" },
     { name = "websockets", specifier = ">=13.1" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "medauth-track-a-clinical", editable = "services/track-a-clinical" }]
 
 [[package]]
 name = "medauth-crypto-utils"
