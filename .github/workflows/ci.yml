@@ -106,10 +106,32 @@ jobs:
                 selected+=("services/audio-ingestion")
               fi
             fi
+
+            # A service's OpenAPI spec is half of a contract its own test checks:
+            # tests/unit/api/test_openapi_contract.py compares docs/api/<name>.yaml
+            # against the app's generated schema on routes, methods, status codes
+            # and required request fields. Editing only the spec is therefore a way
+            # to break that test, and until now it selected no job at all — the
+            # drift test ran on changes to the half that cannot drift alone, and
+            # not on the half that can. A spec-only edit could land red on main.
+            #
+            # The mapping is the filename convention from CLAUDE.md's API Design
+            # section, docs/api/<service-name>.yaml, so no lookup table is needed
+            # and a spec added for a service that has no job yet correctly selects
+            # nothing. This sits outside the packages/services if-else above
+            # because it holds either way: a spec edit selects its service whether
+            # or not anything under packages/ moved.
+            for s in "${all_services[@]}"; do
+              if echo "$changed" | grep -q "^docs/api/$s\.yaml$"; then
+                selected+=("services/$s")
+              fi
+            done
           fi
 
-          # The two rules above can both select audio-ingestion; the matrix must
-          # not then run it twice.
+          # Several rules above can select the same member — a service whose own
+          # directory, its OpenAPI spec, and the track-a-clinical pairing all
+          # moved in one change picks it three times. The matrix must still run
+          # it once.
           if [ ${#selected[@]} -gt 0 ]; then
             mapfile -t selected < <(printf '%s\n' "${selected[@]}" | sort -u)
           fi
