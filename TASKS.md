@@ -511,6 +511,50 @@ Claude Code should read this before starting any task to understand current stat
       are different questions, and only the second one matters. Probe the running
       process when it matters.
 
+- [x] **TASK-007b:** Run the OpenAPI drift test on spec-only changes
+  - File: `.github/workflows/ci.yml` (the `detect` step)
+  - **The gap.** Each of the three services with an HTTP surface ships
+    `tests/unit/api/test_openapi_contract.py`, which compares the committed
+    `docs/api/<service>.yaml` against the app's generated schema on routes,
+    methods, status codes, required request fields and error codes. The
+    change-detection step selected jobs from `services/**`, `packages/**` and the
+    workspace root only — **nothing under `docs/` selected anything.** So the
+    drift test ran whenever the application half moved and never when the spec
+    half did, which is backwards: the spec is the half a human edits by hand and
+    therefore the half that drifts.
+  - **It was reachable, not theoretical.** Verified before fixing, by editing
+    only `docs/api/track-a-clinical.yaml` — changing the documented port from
+    8003 to 8009 — and watching
+    `test_documented_port_matches_the_local_dev_table` fail while no CI job
+    would have selected it. A spec-only pull request could land red on `main`.
+  - **The fix is the filename convention, not a lookup table.** CLAUDE.md's API
+    Design section already fixes specs at `docs/api/<service-name>.yaml`, so a
+    loop over the existing `all_services` array maps spec to job with no second
+    list to keep in step. A spec added for a service that has no job yet
+    correctly selects nothing.
+  - It sits outside the packages/services if-else rather than inside it, because
+    it holds either way — a spec edit selects its service whether or not
+    anything under `packages/` moved.
+  - Found while building TASK-006b and deliberately left alone there: it is a
+    pre-existing gap in CI, unrelated to the re-mint endpoint, and folding it in
+    would have mixed two unrelated changes in one pull request.
+  - **Test:** the detect logic was simulated over 15 cases before committing —
+    each spec selecting its own service, two specs at once, and the
+    over-selection cases that matter (an unrelated `docs/adr/` file, a spec for a
+    service with no job, `…yaml.bak`, and a nested path that merely looks
+    similar, all selecting nothing), plus every pre-existing behaviour asserted
+    unchanged. The anchors `^` and `$` on the pattern are what make the last two
+    pass.
+  - Built. Decisions worth knowing:
+    - The de-duplication guard added in TASK-006b now covers a third overlapping
+      rule; its comment was rewritten, since a change touching a service, its
+      spec and its paired service selects the same member three times.
+    - **The detect step has no automated test of its own**, here or before this
+      task — the 14 cases above were run by hand against logic copied out of the
+      workflow. That is a real gap and this task deliberately did not close it:
+      extracting the step into a tested script is a larger change than the one
+      the bug called for. Worth doing if this logic grows a fourth special case.
+
 ---
 
 ## Phase 1 — RAG Pipeline (Build This First)
