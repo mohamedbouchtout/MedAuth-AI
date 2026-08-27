@@ -538,22 +538,49 @@ Claude Code should read this before starting any task to understand current stat
   - Found while building TASK-006b and deliberately left alone there: it is a
     pre-existing gap in CI, unrelated to the re-mint endpoint, and folding it in
     would have mixed two unrelated changes in one pull request.
-  - **Test:** the detect logic was simulated over 15 cases before committing —
-    each spec selecting its own service, two specs at once, and the
-    over-selection cases that matter (an unrelated `docs/adr/` file, a spec for a
-    service with no job, `…yaml.bak`, and a nested path that merely looks
-    similar, all selecting nothing), plus every pre-existing behaviour asserted
-    unchanged. The anchors `^` and `$` on the pattern are what make the last two
-    pass.
+  - **The selection rules were extracted to a tested script in the same task.**
+    They had no automated test at all — not for the new rule and not for any
+    rule that preceded it — and the first draft of this task left it that way,
+    verifying by hand instead. That was the wrong call for logic whose failure
+    mode is a green run that tested nothing, so it is closed here rather than
+    deferred: `.github/scripts/detect-changed-members.sh` holds the rules and
+    `detect-changed-members.test.sh` exercises them.
+  - **Test:** `bash .github/scripts/detect-changed-members.test.sh` — 38 cases,
+    covering each spec selecting its own service, the over-selection cases that
+    matter (an unrelated `docs/adr/` file, a spec for a service with no job,
+    `…yaml.bak`, a nested lookalike path, all selecting nothing), every
+    pre-existing selection behaviour, and the four boolean outputs (`web`,
+    `mobile`, `fhir_types`, `audio_wire`), which had no coverage before.
   - Built. Decisions worth knowing:
     - The de-duplication guard added in TASK-006b now covers a third overlapping
       rule; its comment was rewritten, since a change touching a service, its
       spec and its paired service selects the same member three times.
-    - **The detect step has no automated test of its own**, here or before this
-      task — the 14 cases above were run by hand against logic copied out of the
-      workflow. That is a real gap and this task deliberately did not close it:
-      extracting the step into a tested script is a larger change than the one
-      the bug called for. Worth doing if this logic grows a fourth special case.
+    - **The script is a pure function of the changed-path list.** Base-SHA
+      resolution and `git diff` stay inline in the workflow, because they need
+      the GitHub event context and a real repository. That leaves a deliberate
+      coverage boundary: the all-zero-SHA fallback for a first push to a new
+      branch is still untested, and covering it would need a fixture git
+      repository.
+    - **The extraction changed exactly one rule, on purpose.** A change under
+      `.github/scripts/` now selects every member, because the selection logic
+      cannot be trusted to select its own blast radius. Verified by diffing
+      every grep pattern before against after — that addition is the only
+      difference between them.
+    - **The `detect-logic` job is unconditional and declares no `needs`.**
+      Gating the detector's own test on the detector would mean a bug that makes
+      it select nothing also skips the test that would have caught it.
+    - The suite was mutation-tested rather than merely run: dropping the `$`
+      anchor, removing the whole `docs/api` rule, and removing the
+      track-a-clinical/audio-ingestion pairing each produce failures, so the
+      cases genuinely bite.
+    - Two checks assert the repo against the rules rather than the reverse:
+      every `docs/api/*.yaml` must name a real service directory, and
+      `ALL_SERVICES` must match `services/`. Both catch the silent-gap shape one
+      level up — a spec or a service that quietly gets no CI at all.
+    - **`ci-passed` was missing `audio-wire`**, found while adding
+      `detect-logic` to its `needs`. A job absent from that list can fail
+      without blocking a merge. Both are in the list now. Strictly outside this
+      task's scope, kept because it is the same silent-hole defect one layer up.
 
 ---
 

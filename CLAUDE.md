@@ -961,6 +961,27 @@ guards two things must be re-run when either of them moves.** The same reasoning
 puts `services/audio-ingestion` in the selection whenever
 `services/track-a-clinical` changes, for the session-JWT contract test.
 
+**The selection rules live in `.github/scripts/detect-changed-members.sh`, not
+inline in the workflow, and they have their own test.** The script is a pure
+function: changed paths on stdin, the six job-gating outputs on stdout. Only
+base-SHA resolution and `git diff` stay in `ci.yml`, because those need the
+GitHub event context. Adding or changing a rule means adding a case to
+`.github/scripts/detect-changed-members.test.sh` in the same change — a rule
+without a case is precisely the situation the extraction exists to prevent.
+
+Two properties of that arrangement are load-bearing and easy to undo by
+accident:
+- **A change under `.github/scripts/` selects every member.** Selection logic
+  cannot be trusted to scope its own blast radius.
+- **The `detect-logic` job is unconditional and declares no `needs`.** A
+  self-test gated on the thing it tests would be skipped by exactly the bug it
+  exists to catch.
+
+**Every job must appear in `ci-passed`'s `needs`.** That job is the merge gate,
+and one missing from its list can go red without blocking the pull request —
+`audio-wire` was missing for a while. This is the same silent-hole failure as an
+untested member, one layer up: the work runs, fails, and nothing stops the merge.
+
 ### .github/workflows/deploy-dev.yml
 Stub file only during Phases 0-5. Content:
 ```yaml
