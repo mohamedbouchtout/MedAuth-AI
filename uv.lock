@@ -12,6 +12,7 @@ resolution-markers = [
 members = [
     "medauth-api-envelope",
     "medauth-audio-ingestion",
+    "medauth-bedrock-client",
     "medauth-crypto-utils",
     "medauth-fhir-integration",
     "medauth-fhir-types",
@@ -1668,6 +1669,23 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [{ name = "medauth-track-a-clinical", editable = "services/track-a-clinical" }]
+
+[[package]]
+name = "medauth-bedrock-client"
+version = "0.1.0"
+source = { editable = "packages/bedrock-client" }
+dependencies = [
+    { name = "boto3" },
+    { name = "langchain-aws" },
+    { name = "langchain-core" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "boto3", specifier = ">=1.43.77" },
+    { name = "langchain-aws", specifier = ">=0.2" },
+    { name = "langchain-core", specifier = ">=0.3" },
+]
 
 [[package]]
 name = "medauth-crypto-utils"
