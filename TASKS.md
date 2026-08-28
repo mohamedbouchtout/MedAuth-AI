@@ -2527,9 +2527,9 @@ The insurance policy RAG is the technical core. Build and validate before other 
       LLM's own entries so a suggestion never displaces or reorders what the
       extraction pass proposed.
     - **The product question this was gated on is settled in CLAUDE.md**, in the
-      shape contract, because it binds TASK-060 and TASK-072 rather than this
+      shape contract, because it binds TASK-060 and TASK-071 rather than this
       task alone: such an entry is a *suggestion*, not a stated diagnosis.
-      TASK-072 renders it as one, and TASK-060 does not claim it in a
+      TASK-071 renders it as one, and TASK-060 does not claim it in a
       prior-auth bundle — a bundle asserts to a payer what the provider
       documented, and a code nobody stated is not that. It becomes claimable
       the ordinary way, by a provider accepting it through TASK-032's edit.
@@ -2816,9 +2816,79 @@ The insurance policy RAG is the technical core. Build and validate before other 
 
 
 - [ ] **TASK-032:** SOAP note review endpoint
-  - `GET /notes/{encounter_id}` — return generated SOAP note for provider review
-  - `PATCH /notes/{encounter_id}` — provider edits, sets `provider_edited = true`
-  - All accesses logged via hipaa-logger
+  - Prerequisite: TASK-030 (writes the `clinical_notes` row these routes read)
+  - Service: `services/track-a-clinical`
+  - **Keyed on `session_id`, not `encounter_id`.** Earlier drafts of this task
+    and of TASK-071 said `/notes/{encounter_id}`, which named an identifier no
+    client has ever been given: `POST /sessions/start` returns
+    `{session_id, jwt}` and nothing in the service exposes `encounters.id`. See
+    CLAUDE.md, "Session-scoped routes are keyed on `session_id`" — resolve the
+    session to its encounter server-side, the way every other route here does.
+  - `GET /notes/{session_id}` — return the generated note for provider review:
+    the four SOAP sections, both code lists in the shape fixed in CLAUDE.md
+    "Extracted clinical codes — one JSON shape", `generated_at`,
+    `reviewed_by_provider`, `provider_edited`, and `ehr_document_ref_id`.
+  - `PATCH /notes/{session_id}` — a partial update. Editable: the four SOAP
+    sections, `icd10_codes`, `cpt_codes`, and `reviewed_by_provider`. Everything
+    else is server-owned and rejected (`extra="forbid"`, as elsewhere).
+  - **`provider_edited` is set by the server, `reviewed_by_provider` by the
+    client, and neither is ever set by a read.** A `PATCH` that changes any
+    content field sets `provider_edited = true`; a `PATCH` that only marks the
+    note reviewed does not, because nothing was edited. `reviewed_by_provider`
+    is an explicit body field: it records a provider's attestation, and inferring
+    it from a `GET` would make it record that a screen was loaded instead — a
+    distinction an auditor cannot recover after the fact. Nothing wrote this
+    column before this task; it has no other writer.
+  - **Three states on the code lists, not two.** A field the client did not send,
+    a field explicitly set to `null`, and a field carrying a list are three
+    different requests. Use `exclude_unset` (or an equivalent sentinel) — a
+    `None` default cannot tell the first two apart, and reading an omitted field
+    as `[]` would let a provider fixing a typo in the plan section silently
+    declare the encounter has no diagnoses. See CLAUDE.md, "So an editing
+    endpoint needs three states, not two".
+  - **Accepting a Comprehend suggestion writes `source: "provider-accepted"`**,
+    the third source value added to the shape contract in CLAUDE.md for this
+    task. It carries no `confidence` and no `validation`, and TASK-060 may claim
+    it in a bundle exactly as it claims an `llm-extraction` entry — that promotion
+    is the mechanism by which a machine suggestion becomes documentation. The
+    client sends the entry with the new source; the server validates the shape
+    rather than inferring the transition.
+  - **Two distinct not-found answers.** An unknown or soft-deleted `session_id`
+    is a 404 (`session_not_found`, matching `/sessions/{id}/end`). An encounter
+    that exists but has no note yet — TASK-030 still running, or its generation
+    failed — is its own error code (`note_not_generated`), because a review
+    screen has to say "the note isn't ready" rather than "this visit does not
+    exist". Same status, different code and different wording in the spec.
+  - **Both routes touch PHI and both audit**, per Known Constraints #6, with
+    `READ_NOTE` and `UPDATE_NOTE` from CLAUDE.md's action vocabulary — neither
+    constant exists in `audit.py` yet. `resource_type` is `ClinicalNote` and
+    `resource_id` the note's id. Unlike TASK-030's consumer write, these are
+    request-driven, so they carry `ip_address` and `user_agent`. The audit row
+    joins the request transaction, as everywhere in this service.
+  - No credential in v1, `actor_id` from `encounters.provider_id` — and
+    specifically **not** `validate_remint_credential`, which 409s on completed
+    encounters while note review only ever happens on one. Reasoning and the
+    Phase 5 successor are in CLAUDE.md's session section; do not re-derive it.
+  - No migration: every column already exists from TASK-005. Add both routes to
+    `docs/api/track-a-clinical.yaml` in the same change —
+    `tests/unit/api/test_openapi_contract.py` compares routes, methods, status
+    codes, required fields and error codes against the running app.
+  - **Test:** `GET` returns a stored note with both code lists intact
+  - **Test:** `PATCH` of one SOAP section sets `provider_edited = true` and
+    leaves `icd10_codes` and `cpt_codes` exactly as they were — specifically
+    including a note whose `icd10_codes` is `null`, which must stay `null` and
+    not become `[]`
+  - **Test:** `PATCH` with `icd10_codes: null` explicitly clears the column, and
+    is distinguishable from the omitted case above
+  - **Test:** `PATCH` setting only `reviewed_by_provider` leaves
+    `provider_edited` false
+  - **Test:** `GET` never sets `reviewed_by_provider`
+  - **Test:** a `comprehend-medical` entry re-sent as `provider-accepted` is
+    stored as such, and one re-sent as `provider-accepted` with a `confidence`
+    is rejected
+  - **Test:** unknown `session_id` → 404 `session_not_found`; encounter with no
+    note → 404 `note_not_generated`
+  - **Test:** both routes write their audit row on the request's transaction
 
 ---
 
@@ -3229,14 +3299,23 @@ logic do not change.
 
 - [ ] **TASK-071:** Note review + edit UI
   - App: `apps/web`
-  - `GET /notes/{encounter_id}` (TASK-032) — display generated SOAP note in an
-    editable form, one text area per SOAP section
-  - Provider can edit any section; "Save" calls `PATCH /notes/{encounter_id}`
-    (TASK-032), which sets `provider_edited = true`
+  - `GET /notes/{session_id}` (TASK-032) — display generated SOAP note in an
+    editable form, one text area per SOAP section. Keyed on the `session_id` the
+    app already holds from `POST /sessions/start`; an earlier draft said
+    `{encounter_id}`, an identifier no client is ever given.
+  - Provider can edit any section; "Save" calls `PATCH /notes/{session_id}`
+    (TASK-032), which sets `provider_edited = true` server-side. Send only the
+    fields the provider changed — an omitted field is left alone, and the code
+    lists specifically must not be sent as `[]` when they were untouched.
+  - "Mark reviewed" sends `reviewed_by_provider: true` explicitly; loading the
+    screen does not set it.
   - "Write to EHR" button calls fhir-integration's `POST /fhir/notes` (TASK-053)
   - Show ICD-10 and CPT codes extracted (from clinical_notes.icd10_codes /
     cpt_codes), editable as a tag-style list — allow add/remove, save via the
-    same PATCH endpoint
+    same PATCH endpoint. Render `comprehend-medical` entries as machine
+    suggestions, visibly distinct from the codes the provider is signing;
+    accepting one re-sends it with `source: "provider-accepted"`, which is what
+    makes it claimable by TASK-060. See CLAUDE.md's shape contract.
   - **Test:** load a note, edit a section, save, verify PATCH called with correct diff
 
 - [ ] **TASK-072:** Prior auth status dashboard

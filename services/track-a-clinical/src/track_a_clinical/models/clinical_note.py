@@ -1,8 +1,9 @@
 """The ``clinical_notes`` table — one generated SOAP note per encounter.
 
 Written by track-a-clinical (TASK-030) after the ``session:ended`` signal, then
-read by prior-auth (TASK-060) when assembling a bundle and by apps/web (TASK-090)
-for provider review.
+read by prior-auth (TASK-060) when assembling a bundle, served for provider
+review by TASK-032's ``/notes/{session_id}`` routes, and rendered by apps/web
+(TASK-071).
 
 Every column here is PHI. Reads must be recorded with ``hipaa_logger.audit_log``.
 """
