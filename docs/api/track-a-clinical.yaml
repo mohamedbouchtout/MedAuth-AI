@@ -24,6 +24,8 @@ tags:
     description: Readiness for the Kubernetes probe.
   - name: sessions
     description: Start a clinical encounter, refresh its token, and end it.
+  - name: notes
+    description: Read and edit the SOAP note generated for a finished encounter.
 
 paths:
   /health:
@@ -224,6 +226,144 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /notes/{session_id}:
+    get:
+      tags: [notes]
+      operationId: readNote
+      summary: Read a session's SOAP note
+      description: >-
+        Returns the note TASK-030's consumer generated from the encounter's
+        transcript: the four SOAP sections, the extracted ICD-10 and CPT codes,
+        and the review flags. This is what TASK-071's review screen loads.
+
+
+        Keyed on `session_id`, the only identifier a client is given —
+        `POST /sessions/start` returns `{session_id, jwt}` and nothing here
+        exposes the encounter's primary key.
+
+
+        `icd10_codes` and `cpt_codes` are `null` when the extraction pass never
+        answered and `[]` when it ran and found nothing. Those are different
+        facts and the distinction reaches the client intact; do not render the
+        first as "no diagnoses".
+
+
+        **This read never sets `reviewed_by_provider`.** That column records a
+        provider's attestation, and flipping it on a page load would make it
+        indistinguishable from one afterwards. Send the field to `PATCH` to mark
+        a note reviewed.
+
+
+        Unauthenticated in v1, matching the strength of `POST /sessions/start`,
+        which takes `provider_id` as an unauthenticated body field. The audit
+        actor is the provider on the `encounters` row. Every field returned is
+        PHI, and the access is recorded as `READ_NOTE`.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          description: The session whose note is being read.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The generated note, its extracted codes and its review flags.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NoteResponse'
+        '404':
+          description: >-
+            Either the session is unknown or soft-deleted (`session_not_found`),
+            or it exists but no note has been generated for it yet
+            (`note_not_generated`). The second is the ordinary state for a few
+            seconds after a visit ends, while the Sonnet call is still running,
+            and a review screen has to be able to tell a provider which of the
+            two happened.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: The path parameter is not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    patch:
+      tags: [notes]
+      operationId: updateNote
+      summary: Edit a session's SOAP note
+      description: >-
+        Applies a provider's edits. A partial update — send only the fields being
+        changed.
+
+
+        **An omitted field is left alone; a field explicitly set to `null` is
+        cleared.** Those are two different requests and the handler keeps them
+        apart, which matters most on the code lists: a client that sends
+        `icd10_codes: []` because it did not think to omit the field has declared
+        that the encounter has no diagnoses.
+
+
+        `provider_edited` is set by the server when a content field actually
+        changes, and is not a field a client may send. `reviewed_by_provider` is
+        the opposite — a provider's attestation, set only by being sent
+        explicitly. Marking a note reviewed without changing anything leaves
+        `provider_edited` false.
+
+
+        A `comprehend-medical` code re-sent with `source: "provider-accepted"`
+        becomes documentation, which is how a machine suggestion turns into a
+        diagnosis a prior-auth bundle may claim. Such an entry carries no
+        `confidence` and no `validation`: a human acceptance is a fact, not a
+        probability, and nothing independent remains to validate a provider's own
+        documentation against.
+
+
+        Unauthenticated in v1, as the read is. Recorded as `UPDATE_NOTE`,
+        including when the edit changed nothing — the row was still opened.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          description: The session whose note is being edited.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateNoteRequest'
+      responses:
+        '200':
+          description: The note as it stands after the edit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NoteResponse'
+        '404':
+          description: >-
+            Either the session is unknown or soft-deleted (`session_not_found`),
+            or it exists but no note has been generated for it yet
+            (`note_not_generated`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: >-
+            The body is invalid — an unknown field, a body that sets no fields at
+            all, or a code entry whose `source` and `confidence` contradict each
+            other.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   schemas:
     ComponentStatus:
@@ -343,6 +483,201 @@ components:
             `{session_id, provider_id, exp}`, HS256 under `JWT_SIGNING_KEY`. Only
             `exp` differs from the token it replaces.
 
+    CodeValidation:
+      type: object
+      additionalProperties: false
+      required: [confirmed]
+      description: What TASK-031's Comprehend Medical pass found for one proposed code.
+      properties:
+        source:
+          type: string
+          enum: [comprehend-medical]
+          default: comprehend-medical
+        confidence:
+          type: [number, 'null']
+          minimum: 0.0
+          maximum: 1.0
+          default: null
+          description: >-
+            Comprehend's `ICD10CMConcept.Score` for the matching code — the
+            concept score, not the entity score — or `null` when it returned no
+            such concept at all.
+        confirmed:
+          type: boolean
+
+    ExtractedCode:
+      type: object
+      additionalProperties: false
+      required: [code, source]
+      description: >-
+        One ICD-10-CM or CPT code, with where it came from and what confirmed it.
+        The contract is fixed in CLAUDE.md, "Extracted clinical codes — one JSON
+        shape".
+      properties:
+        code:
+          type: string
+          minLength: 1
+          description: >-
+            ICD-10-CM stored dotted (`M17.11`), CPT as five characters (`73721`).
+            Normalised on write, so comparison elsewhere is plain equality.
+          examples: ['M17.11']
+        display:
+          type: [string, 'null']
+          default: null
+          description: The source's own description, never one invented to fill the field.
+        source:
+          type: string
+          enum: [llm-extraction, comprehend-medical, provider-accepted]
+          description: >-
+            Which pass proposed the code, or that a provider did.
+            `comprehend-medical` is a suggestion rather than a stated diagnosis;
+            `provider-accepted` is one a provider deliberately documented through
+            this endpoint, and is the only value a human writes.
+        confidence:
+          type: [number, 'null']
+          minimum: 0.0
+          maximum: 1.0
+          default: null
+          description: >-
+            The proposing source's own score. Always `null` for `llm-extraction`
+            (a model's self-rating is not a measurement) and for
+            `provider-accepted` (a human acceptance is not a probability); both
+            are rejected rather than ignored.
+        validation:
+          oneOf:
+            - $ref: '#/components/schemas/CodeValidation'
+            - type: 'null'
+          default: null
+          description: >-
+            `null` means "not checked yet", never "checked and rejected". Stays
+            `null` permanently on CPT entries, on `comprehend-medical` entries
+            and on `provider-accepted` entries.
+
+    NoteData:
+      type: object
+      required:
+        - session_id
+        - note_id
+        - soap_subjective
+        - soap_objective
+        - soap_assessment
+        - soap_plan
+        - icd10_codes
+        - cpt_codes
+        - generated_at
+        - reviewed_by_provider
+        - provider_edited
+        - ehr_document_ref_id
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        note_id:
+          type: string
+          format: uuid
+          description: >-
+            The `clinical_notes` row id. Included because it is what the audit
+            trail records, so a provider reporting a problem can name the row.
+        soap_subjective:
+          type: [string, 'null']
+        soap_objective:
+          type: [string, 'null']
+        soap_assessment:
+          type: [string, 'null']
+        soap_plan:
+          type: [string, 'null']
+        icd10_codes:
+          oneOf:
+            - type: array
+              items:
+                $ref: '#/components/schemas/ExtractedCode'
+            - type: 'null'
+          description: >-
+            `null` when the extraction pass never answered, `[]` when it ran and
+            found nothing.
+        cpt_codes:
+          oneOf:
+            - type: array
+              items:
+                $ref: '#/components/schemas/ExtractedCode'
+            - type: 'null'
+          description: >-
+            Same null/empty distinction as `icd10_codes`. These entries keep
+            `validation: null` indefinitely — Comprehend Medical has no CPT
+            inference to check them against.
+        generated_at:
+          type: string
+          format: date-time
+          description: ISO 8601 UTC, when the note was generated.
+        reviewed_by_provider:
+          type: boolean
+          description: >-
+            Set only by an explicit `reviewed_by_provider` in a PATCH body. A
+            read never sets it.
+        provider_edited:
+          type: boolean
+          description: >-
+            Set by the server when a PATCH actually changes a content field.
+            Never cleared: a note that was edited stays edited.
+        ehr_document_ref_id:
+          type: [string, 'null']
+          description: >-
+            The DocumentReference id from EHR write-back (TASK-053). Null until
+            write-back succeeds.
+
+    UpdateNoteRequest:
+      type: object
+      additionalProperties: false
+      description: >-
+        A partial edit. Every field is optional and **an omitted field is not the
+        same as a null one** — omitting leaves the column alone, sending `null`
+        clears it. At least one field must be set; an empty body is rejected.
+      properties:
+        soap_subjective:
+          type: [string, 'null']
+          default: null
+        soap_objective:
+          type: [string, 'null']
+          default: null
+        soap_assessment:
+          type: [string, 'null']
+          default: null
+        soap_plan:
+          type: [string, 'null']
+          default: null
+        icd10_codes:
+          oneOf:
+            - type: array
+              items:
+                $ref: '#/components/schemas/ExtractedCode'
+            - type: 'null'
+          default: null
+          description: >-
+            Send the whole list, not a diff. Omit it entirely when the codes were
+            not touched — sending `[]` declares the encounter has no diagnoses.
+        cpt_codes:
+          oneOf:
+            - type: array
+              items:
+                $ref: '#/components/schemas/ExtractedCode'
+            - type: 'null'
+          default: null
+        reviewed_by_provider:
+          type: [boolean, 'null']
+          default: null
+          description: >-
+            The provider's attestation that they have reviewed the note. Setting
+            it alone does not set `provider_edited`.
+
+    NoteResponse:
+      type: object
+      required: [data, error]
+      properties:
+        data:
+          $ref: '#/components/schemas/NoteData'
+        error:
+          type: 'null'
+
     Error:
       type: object
       required: [code, message]
@@ -351,6 +686,7 @@ components:
           type: string
           enum:
             - session_not_found
+            - note_not_generated
             - signal_not_published
             - auth_rejected
             - session_completed

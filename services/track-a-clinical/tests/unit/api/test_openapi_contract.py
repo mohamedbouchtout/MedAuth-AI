@@ -15,6 +15,9 @@ from typing import Any
 import pytest
 import yaml
 
+from track_a_clinical.api.notes import (
+    ERROR_CODE_NOTE_NOT_GENERATED,
+)
 from track_a_clinical.api.sessions import (
     ERROR_CODE_AUTH_REJECTED,
     ERROR_CODE_SESSION_COMPLETED,
@@ -71,11 +74,25 @@ def test_same_required_request_fields(published: dict[str, Any], generated: dict
     assert set(published_request["properties"]) == set(generated_request["properties"])
 
 
-def test_published_request_forbids_unknown_fields(published: dict[str, Any]) -> None:
-    """A client-supplied session_id has to be rejected by the documented contract too."""
-    request_schema = published["components"]["schemas"]["StartSessionRequest"]
+@pytest.mark.parametrize("schema_name", ["StartSessionRequest", "UpdateNoteRequest"])
+def test_published_requests_forbid_unknown_fields(
+    published: dict[str, Any], schema_name: str
+) -> None:
+    """A client-supplied session_id, or an attempt to set provider_edited, has to be
+    rejected by the documented contract and not only by the running app."""
+    request_schema = published["components"]["schemas"][schema_name]
 
     assert request_schema["additionalProperties"] is False
+
+
+def test_the_editable_note_fields_are_the_documented_ones(
+    published: dict[str, Any], generated: dict[str, Any]
+) -> None:
+    """Server-owned fields must not appear as editable in either half of the contract."""
+    documented = set(published["components"]["schemas"]["UpdateNoteRequest"]["properties"])
+
+    assert documented == set(generated["components"]["schemas"]["UpdateNoteRequest"]["properties"])
+    assert not documented & {"provider_edited", "generated_at", "ehr_document_ref_id", "note_id"}
 
 
 def test_documented_error_codes_match_the_handlers(published: dict[str, Any]) -> None:
@@ -86,6 +103,7 @@ def test_documented_error_codes_match_the_handlers(published: dict[str, Any]) ->
         ERROR_CODE_SIGNAL_NOT_PUBLISHED,
         ERROR_CODE_AUTH_REJECTED,
         ERROR_CODE_SESSION_COMPLETED,
+        ERROR_CODE_NOTE_NOT_GENERATED,
     } <= documented
 
 

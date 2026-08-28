@@ -9,7 +9,7 @@ from track_a_clinical.api import dependencies
 from track_a_clinical.main import create_app
 
 
-def test_app_exposes_the_session_routes() -> None:
+def test_app_exposes_the_session_and_note_routes() -> None:
     paths = create_app().openapi()["paths"]
 
     assert set(paths) == {
@@ -17,8 +17,12 @@ def test_app_exposes_the_session_routes() -> None:
         "/sessions/start",
         "/sessions/{session_id}/end",
         "/sessions/{session_id}/token",
+        "/notes/{session_id}",
     }
     assert set(paths["/sessions/start"]) == {"post"}
+    # Read and edit share one path, which is why this asserts on the methods:
+    # a router registered with only one of them would still pass the set above.
+    assert set(paths["/notes/{session_id}"]) == {"get", "patch"}
 
 
 def test_each_app_is_independent() -> None:

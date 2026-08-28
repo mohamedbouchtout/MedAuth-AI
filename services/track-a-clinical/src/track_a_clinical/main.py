@@ -22,6 +22,7 @@ from fastapi import FastAPI
 from api_envelope import install_error_handlers
 from track_a_clinical.api.dependencies import close_redis, get_redis
 from track_a_clinical.api.health import router as health_router
+from track_a_clinical.api.notes import router as notes_router
 from track_a_clinical.api.sessions import router as sessions_router
 from track_a_clinical.bedrock import reset_clients
 from track_a_clinical.consumer import TranscriptConsumer
@@ -67,6 +68,7 @@ def create_app() -> FastAPI:
     install_error_handlers(app)
     app.include_router(health_router)
     app.include_router(sessions_router)
+    app.include_router(notes_router)
     return app
 
 
