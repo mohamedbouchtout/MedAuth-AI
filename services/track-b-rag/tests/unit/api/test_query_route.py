@@ -92,6 +92,7 @@ async def test_a_query_returns_the_standard_envelope(
             "nudge_message": "Prior authorization required for knee MRI.",
             "step_therapy_required": False,
             "step_therapy_details": None,
+            "policy_source": None,
             "source": "rag",
         },
         "error": None,

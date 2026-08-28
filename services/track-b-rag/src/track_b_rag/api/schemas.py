@@ -317,6 +317,15 @@ class PolicyQueryData(BaseModel):
     step_therapy_details: str | None = Field(
         description="What the step therapy requirement is, when there is one.",
     )
+    policy_source: str | None = Field(
+        default=None,
+        description=(
+            "Which indexed policy documents the criteria were read from, "
+            "comma-separated, for the nudge record a reviewer checks the "
+            "criteria against. Null on a fallback, where no policy text was "
+            "read. Derived from retrieval, never from the model's answer."
+        ),
+    )
     source: RulesSource = Field(
         description=(
             "Which tier established the payer's rules. Branch only on "

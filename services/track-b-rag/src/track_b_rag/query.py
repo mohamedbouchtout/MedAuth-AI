@@ -57,6 +57,9 @@ class PolicyQueryAnswer:
     nudge_message: str | None
     step_therapy_required: bool
     step_therapy_details: str | None
+    #: Which indexed policies the criteria were read from, for the nudge record
+    #: (TASK-040). None on a fallback, where no policy text was read at all.
+    policy_source: str | None = None
     source: RulesSource = field(default="rag")
 
 
@@ -159,5 +162,6 @@ async def answer_policy_query(
         nudge_message=assessment.nudge_message,
         step_therapy_required=rules.step_therapy_required,
         step_therapy_details=rules.step_therapy_details,
+        policy_source=rules.policy_source,
         source=resolution.source,
     )
