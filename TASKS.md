@@ -2609,7 +2609,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
       generated from that array, so no new job was needed and `ci-passed`'s
       `needs` is unchanged.
 
-- [ ] **TASK-031:** Comprehend Medical validation layer
+- [x] **TASK-031:** Comprehend Medical validation layer
   - Prerequisite: TASK-030 (writes the entries this validates)
   - Service: `services/track-a-clinical`
   - Validate the ICD-10 codes from TASK-030's Haiku pass against AWS Comprehend
@@ -2712,6 +2712,57 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **Test:** a transcript over 10,000 characters is chunked, not truncated, and
     a code confirmed in a later chunk is confirmed in the result
   - **Test:** CPT entries are untouched and keep `validation: null`
+
+  - Built (236 tests, 97% coverage; 683 in track-b-rag still pass unchanged).
+    **One thing here is deliberately unfinished — read the first note.**
+    - **UNVERIFIED: the format of `ICD10CMConcept.Code`.** Nobody has run this
+      against real AWS. There are no credentials on the development machine and
+      none in CI, so points that needed live data could not be closed. ICD-10-CM
+      has two standard spellings (`M17.11`, `M1711`) and botocore types the
+      field as an unconstrained string, so no contract settles which one comes
+      back. The exposure is confined to one pure function,
+      `models.extracted_code.matching_key`, which reduces both sides of every
+      comparison to a dotless key and is therefore correct under either answer —
+      defensive against the unknown rather than a bet on one outcome. Closing it
+      means running `scratchpad/probe_real.py` with real credentials and
+      confirming that function against the response; it is not a rework of the
+      validation path. `test_comprehend.py` and `test_extracted_code.py` carry
+      the marker too, and the fixtures deliberately hold both spellings so the
+      tests fail if anything ever starts depending on one.
+    - **Three things were checked empirically rather than from documentation,
+      and one of them overturned what the docs say.** Moto does not implement
+      Comprehend Medical at all — `@mock_aws` returns `404 Not yet implemented`,
+      because moto's `comprehend` module is Amazon Comprehend, a different
+      service. The real per-request cap is **10,000 characters**, carried in
+      botocore's shape metadata and enforced client-side; the 20,000-byte figure
+      in general circulation belongs to `DetectEntitiesV2`, and building against
+      it would have sized every chunk at twice the limit. And the response nests
+      two distinct score fields whose meanings the service model separates,
+      which is what settled the concept-score choice without live data.
+    - **`CONFIRMATION_THRESHOLD = 0.8` is a guess, and its comment says so.** It
+      came from this task's original wording, not from a measurement. No real
+      distribution of concept scores has been seen, so it could be far too
+      strict or far too lax. Revisit with the same live call that closes the
+      format question.
+    - **Validation runs before the insert and is never fatal.** The ordering is
+      forced by `store_note` being `ON CONFLICT DO NOTHING` with no update path;
+      the non-fatality is TASK-030's "passes fail independently" applied one
+      level down, with the note as the artifact that matters and validation as
+      metadata about it.
+    - **`_canonicalize` was fixed, not just extended.** It previously only
+      uppercased and stripped, so `M1711` and `M17.11` were two entries for one
+      diagnosis and nothing anywhere reported it. That bug predates this task
+      and would have made this task's output look like a finding about the codes
+      rather than a formatting mismatch.
+    - **The consumer takes the validator as an injected seam**, so no test in
+      `test_consumer.py` can reach AWS, and `test_comprehend.py` owns the
+      behaviour.
+    - No new environment variables, no migration, no new route, and so no audit
+      row: a code disagreeing with a second opinion is a quality metric, not a
+      PHI access. `AWS_REGION` was already in `Settings` from TASK-030.
+    - CI needed no change — `track-a-clinical` already has a job and no package
+      was added.
+
 
 - [ ] **TASK-031b:** Record ICD-10 codes Comprehend found that the LLM missed
   - Prerequisite: TASK-031 (the validation pass this extends)
