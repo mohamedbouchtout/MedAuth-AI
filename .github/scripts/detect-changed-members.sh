@@ -83,11 +83,29 @@ main() {
       # audio-ingestion validates the session JWT that track-a-clinical mints,
       # and tests/unit/test_remint_token_contract.py proves the two agree by
       # calling the real issuer. That test is decorative unless a change to the
-      # issuer re-runs it, so select the validator's job too. This is the only
-      # service-to-service test coupling so far; add a line here if another one
-      # appears rather than widening the loop.
+      # issuer re-runs it, so select the validator's job too.
       if changed_matches '^services/track-a-clinical/'; then
         selected+=("services/audio-ingestion")
+      fi
+
+      # track-a-clinical also ships the shared SQLAlchemy models (CLAUDE.md,
+      # "Where the shared SQLAlchemy models live"), and every service that
+      # writes those tables imports them from there rather than mapping its own
+      # — which is the whole point of centralising them. That makes an edit to
+      # a mapped class a change to those services' code, and until TASK-040 it
+      # selected none of their jobs: track-b-rag's nudge emitter builds an
+      # insert against ClinicalNudge, and a column renamed one service over
+      # would have gone green here and failed at runtime.
+      #
+      # The same reasoning as the JWT pairing above, and the same reasoning
+      # CLAUDE.md gives for a service's OpenAPI spec: a test that guards two
+      # things has to re-run when either of them moves. These are dependency
+      # edges rather than test couplings, so they are listed from
+      # `medauth-track-a-clinical` in each pyproject.toml — add to this list
+      # when a new service declares that dependency.
+      if changed_matches '^services/track-a-clinical/src/'; then
+        selected+=("services/track-b-rag")
+        selected+=("services/policy-scraper")
       fi
     fi
 
