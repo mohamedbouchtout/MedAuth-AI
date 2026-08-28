@@ -34,6 +34,7 @@ from track_a_clinical.models.encounter import (
 from track_a_clinical.models.extracted_code import (
     SOURCE_COMPREHEND_MEDICAL,
     SOURCE_LLM_EXTRACTION,
+    SOURCE_PROVIDER_ACCEPTED,
     CodeValidation,
     ExtractedCode,
     dump_codes,
@@ -65,6 +66,7 @@ __all__ = [
     "PRIOR_AUTH_STATUS_SUBMITTED",
     "SOURCE_COMPREHEND_MEDICAL",
     "SOURCE_LLM_EXTRACTION",
+    "SOURCE_PROVIDER_ACCEPTED",
     "Base",
     "ClinicalNote",
     "ClinicalNudge",

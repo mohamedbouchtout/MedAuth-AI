@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from track_a_clinical.models import (
     SOURCE_COMPREHEND_MEDICAL,
     SOURCE_LLM_EXTRACTION,
+    SOURCE_PROVIDER_ACCEPTED,
     CodeValidation,
     ExtractedCode,
     dump_codes,
@@ -219,3 +220,54 @@ def test_a_comprehend_proposal_is_distinguishable_from_an_llm_one() -> None:
     assert proposed.source != extracted.source
     assert proposed.confidence is not None
     assert extracted.confidence is None
+
+
+def test_a_provider_acceptance_carries_no_score() -> None:
+    """A human acceptance is a fact, not a probability (TASK-032).
+
+    The entry a provider accepts arrives carrying Comprehend's own score, and
+    forwarding it under the new source would make a machine's uncertainty read
+    as a measurement of the person's decision.
+    """
+    accepted = ExtractedCode(
+        code="E11.9",
+        display="Type 2 diabetes mellitus without complications",
+        source=SOURCE_PROVIDER_ACCEPTED,
+    )
+
+    assert accepted.confidence is None
+    assert accepted.validation is None
+
+
+def test_a_provider_acceptance_may_not_carry_a_forwarded_score() -> None:
+    with pytest.raises(ValidationError) as raised:
+        ExtractedCode(
+            code="E11.9",
+            source=SOURCE_PROVIDER_ACCEPTED,
+            confidence=0.91,
+        )
+
+    assert "not a probability" in str(raised.value)
+
+
+def test_a_provider_acceptance_may_not_carry_a_validation() -> None:
+    """Nothing independent remains to check a provider's own documentation against."""
+    with pytest.raises(ValidationError) as raised:
+        ExtractedCode(
+            code="E11.9",
+            source=SOURCE_PROVIDER_ACCEPTED,
+            validation=CodeValidation(confidence=0.91, confirmed=True),
+        )
+
+    assert "no validation" in str(raised.value)
+
+
+def test_an_accepted_code_is_still_canonicalised() -> None:
+    """The dotted/dotless rule does not stop applying because a human sent it."""
+    assert ExtractedCode(code="e1211", source=SOURCE_PROVIDER_ACCEPTED).code == "E12.11"
+
+
+def test_an_acceptance_survives_a_round_trip_through_the_column() -> None:
+    entries = [ExtractedCode(code="E11.9", source=SOURCE_PROVIDER_ACCEPTED)]
+
+    assert load_codes(dump_codes(entries)) == entries
