@@ -1,4 +1,10 @@
-"""Storing a generated note, once per encounter.
+"""Storing a generated note once per encounter, and serving it back for review.
+
+The write half is TASK-030's, driven by a Redis signal with no request behind
+it. The read and edit half is TASK-032's, driven by a provider's request. They
+share this module because they are the same row and the same invariant; they
+differ in who the actor is and what the audit trail records.
+
 
 The write is idempotent because its caller is a Redis consumer and pub/sub
 delivery is not exactly-once. A redelivered ``session:ended`` signal, a consumer
@@ -24,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import Any, Final
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -110,3 +117,104 @@ async def store_note(
     await session.commit()
     logger.info("Stored clinical note %s for encounter %s", note_id, encounter.id)
     return note_id
+
+
+#: The fields a provider edits that are *content*. A change to any of them is
+#: what ``provider_edited`` records. ``reviewed_by_provider`` is deliberately not
+#: here: marking a note reviewed is an attestation about the note, not an edit of
+#: it, and conflating the two would make every review look like a rewrite.
+CONTENT_FIELDS: Final = (
+    "soap_subjective",
+    "soap_objective",
+    "soap_assessment",
+    "soap_plan",
+    "icd10_codes",
+    "cpt_codes",
+)
+
+#: The two content fields holding :class:`ExtractedCode` entries rather than text.
+CODE_FIELDS: Final = frozenset({"icd10_codes", "cpt_codes"})
+
+
+async def load_note(session: AsyncSession, *, encounter: Encounter) -> ClinicalNote | None:
+    """Return the encounter's note, or None when TASK-030 has not written one.
+
+    Zero or one row, never two: ``uq_clinical_notes_encounter`` enforces it and
+    :func:`store_note` writes through it, so this does not order or tie-break.
+
+    None here is not the same answer as an unknown encounter, and the routes keep
+    them apart — a review screen has to be able to say "the note is not ready
+    yet" rather than "this visit does not exist".
+    """
+    result: ClinicalNote | None = await session.scalar(
+        sa.select(ClinicalNote).where(
+            ClinicalNote.encounter_id == encounter.id,
+            ClinicalNote.deleted_at.is_(None),
+        )
+    )
+    return result
+
+
+async def apply_note_edits(
+    session: AsyncSession,
+    *,
+    encounter: Encounter,
+    note: ClinicalNote,
+    edits: dict[str, Any],
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> ClinicalNote:
+    """Apply a provider's partial edit to a stored note and audit it.
+
+    Args:
+        session: The session whose transaction the update and its audit join.
+        encounter: The note's encounter — its ``provider_id`` is the audit actor.
+        note: The row to edit, already loaded.
+        edits: Only the fields the request actually carried. The caller builds
+            this from ``model_fields_set``, so a field the client omitted is
+            absent here and a field the client explicitly set to ``null`` is
+            present with a ``None`` value. Those are different requests and this
+            function must not collapse them: reading an omitted ``icd10_codes``
+            as ``[]`` would let a provider fixing a typo in the plan section
+            silently declare the encounter has no diagnoses. See CLAUDE.md, "So
+            an editing endpoint needs three states, not two".
+        ip_address: Client IP, for the audit row.
+        user_agent: Client user agent, for the audit row.
+
+    Returns:
+        The same note instance, updated.
+    """
+    content_changed = False
+    for field, value in edits.items():
+        new_value = dump_codes(value) if field in CODE_FIELDS and value is not None else value
+        if new_value != getattr(note, field):
+            setattr(note, field, new_value)
+            content_changed = content_changed or field in CONTENT_FIELDS
+
+    # Set on a real change rather than on the mere arrival of a PATCH: a client
+    # re-sending the text it was given has edited nothing, and a flag that says
+    # otherwise stops meaning anything. Never cleared — a note that was edited
+    # stays edited even if the provider restores the original wording.
+    if content_changed:
+        note.provider_edited = True
+
+    # Audited whether or not anything changed. The row was read and written
+    # against on a request, which is the access the trail is asked about; a
+    # no-op edit is still someone opening a patient's note.
+    await audit.audit_note_access(
+        session,
+        action=audit.ACTION_UPDATE_NOTE,
+        note_id=note.id,
+        session_id=encounter.session_id,
+        provider_id=encounter.provider_id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    await session.commit()
+    logger.info(
+        "Updated clinical note %s for encounter %s (content_changed=%s)",
+        note.id,
+        encounter.id,
+        content_changed,
+    )
+    return note

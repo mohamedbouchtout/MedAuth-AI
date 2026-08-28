@@ -33,6 +33,10 @@ ACTION_REMINT_SESSION_TOKEN = "REMINT_SESSION_TOKEN"
 #: no request behind it, which is why the actor comes from the encounter row —
 #: see CLAUDE.md "Auditing work that no request triggered".
 ACTION_WRITE_NOTE = "WRITE_NOTE"
+#: A stored note was read for review (TASK-032).
+ACTION_READ_NOTE = "READ_NOTE"
+#: A provider edited a stored note (TASK-032).
+ACTION_UPDATE_NOTE = "UPDATE_NOTE"
 
 SERVICE_NAME = "track-a-clinical"
 RESOURCE_TYPE_ENCOUNTER = "Encounter"
@@ -108,5 +112,51 @@ async def audit_note_write(
         resource_id=str(note_id),
         session_id=str(session_id),
         service_name=SERVICE_NAME,
+        conn=await raw_asyncpg_connection(session),
+    )
+
+
+async def audit_note_access(
+    session: AsyncSession,
+    *,
+    action: str,
+    note_id: uuid.UUID,
+    session_id: uuid.UUID,
+    provider_id: uuid.UUID | None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> None:
+    """Record one request-driven access to a ``clinical_notes`` row (TASK-032).
+
+    The counterpart to :func:`audit_note_write`, and deliberately a separate
+    function rather than a flag on it: this one has a client. A note read or
+    edited through the review endpoints carries ``ip_address`` and
+    ``user_agent``, where the consumer's generation write leaves them
+    permanently absent because no request exists for it.
+
+    ``provider_id`` still comes from the ``encounters`` row rather than from
+    anything the caller sent. These routes take no credential in v1 — see
+    CLAUDE.md, "Session-scoped routes are keyed on ``session_id``" — so the
+    provider recorded when the visit was opened is the only defensible actor,
+    and the absence of authentication makes this row matter more, not less.
+
+    Args:
+        session: The active session whose transaction the audit row joins.
+        action: :data:`ACTION_READ_NOTE` or :data:`ACTION_UPDATE_NOTE`.
+        note_id: Primary key of the ``clinical_notes`` row touched.
+        session_id: The encounter's session identifier, for trace correlation.
+        provider_id: The provider from the encounter row.
+        ip_address: Client IP, from the request.
+        user_agent: Client user agent, from the request.
+    """
+    await audit_log(
+        actor_id=str(provider_id) if provider_id else None,
+        action=action,
+        resource_type=RESOURCE_TYPE_CLINICAL_NOTE,
+        resource_id=str(note_id),
+        session_id=str(session_id),
+        service_name=SERVICE_NAME,
+        ip_address=ip_address,
+        user_agent=user_agent,
         conn=await raw_asyncpg_connection(session),
     )
