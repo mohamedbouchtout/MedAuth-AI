@@ -6,7 +6,7 @@ the mapped classes for the reason CLAUDE.md gives for those: four consumers read
 or write this shape and the alternative is each of them re-deriving it from the
 column. TASK-030 writes it — both the LLM's codes and the ones only
 Comprehend Medical found — TASK-031 fills in the validation half, TASK-060 reads
-``icd10_codes`` as a bundle's diagnoses, and TASK-072 renders both.
+``icd10_codes`` as a bundle's diagnoses, and TASK-071 renders both.
 
 The contract is fixed in CLAUDE.md "Extracted clinical codes — one JSON shape";
 this module is the executable half of it. Two of its rules are enforced here
@@ -28,6 +28,12 @@ rather than left to call sites:
   review, and it is not a diagnosis a prior-auth bundle may claim on the
   provider's behalf. See :meth:`ExtractedCode.from_comprehend` and CLAUDE.md's
   shape contract for what each consumer owes it.
+* **A ``provider-accepted`` entry carries neither a confidence nor a
+  validation.** It is the one source a human writes, through TASK-032's note
+  edit, and it is how a suggestion becomes documentation TASK-060 may claim. A
+  human acceptance is a fact rather than a probability, so there is no score to
+  record; and there is nothing independent left to validate a provider's own
+  documentation against.
 
 Nothing here is PHI on its own: a diagnosis code attached to an encounter is,
 which is why the rows carrying it are audited, but the model is just a shape.
@@ -44,6 +50,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 SOURCE_LLM_EXTRACTION: Final = "llm-extraction"
 #: Written by TASK-031's Comprehend Medical pass.
 SOURCE_COMPREHEND_MEDICAL: Final = "comprehend-medical"
+#: Written only by a provider, through TASK-032's note edit. No automated pass
+#: produces this value and none may promote an entry to it.
+SOURCE_PROVIDER_ACCEPTED: Final = "provider-accepted"
+
+#: The sources that report no confidence, for opposite reasons: a model's
+#: self-rating is not a measurement, and a human's decision is not a probability.
+#: Kept as one set because the *rule* is identical even though the arguments for
+#: it are not — see the validator below and CLAUDE.md's shape contract.
+_UNSCORED_SOURCES: Final = frozenset({SOURCE_LLM_EXTRACTION, SOURCE_PROVIDER_ACCEPTED})
 
 #: An ICD-10-CM code: a letter, two alphanumerics, then up to four more
 #: characters of extension. Used only to decide *where the dot belongs* when
@@ -55,7 +70,7 @@ _ICD10_SHAPE: Final = re.compile(r"^([A-Z][0-9A-Z]{2})([0-9A-Z]{1,4})$")
 #: Everything that is not an alphanumeric — dots, spaces, stray punctuation.
 _NON_ALNUM: Final = re.compile(r"[^0-9A-Z]")
 
-CodeSource = Literal["llm-extraction", "comprehend-medical"]
+CodeSource = Literal["llm-extraction", "comprehend-medical", "provider-accepted"]
 
 #: A probability, and only ever one a source actually reported.
 Confidence = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -151,15 +166,52 @@ class ExtractedCode(BaseModel):
         return _redot(canonical)
 
     @model_validator(mode="after")
+    def _provider_acceptance_is_not_measured(self) -> Self:
+        """Reject a confidence or a validation attached to a provider acceptance.
+
+        Both would be a machine's number describing a human's decision. The
+        entry a provider accepts usually arrives carrying Comprehend Medical's
+        own score, and forwarding that score under the new source would make it
+        read as a measurement of the acceptance — which nothing measured. The
+        score is not preserved elsewhere on purpose: what the provider accepted
+        is the code, and the note's edit history is where the acceptance is
+        recorded.
+
+        ``validation`` is refused for the reason a ``comprehend-medical`` entry
+        keeps ``None`` permanently: there is nothing independent left to check a
+        provider's own documentation against.
+        """
+        if self.source != SOURCE_PROVIDER_ACCEPTED:
+            return self
+        if self.validation is not None:
+            raise ValueError(
+                "a provider-accepted entry carries no validation — nothing "
+                "independent remains to check a provider's own documentation "
+                "against, which is why it stays null permanently"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _llm_extractions_report_no_confidence(self) -> Self:
-        """Reject a confidence attached to an LLM extraction.
+        """Reject a confidence attached to an LLM extraction or a provider acceptance.
 
         Enforced rather than documented: the whole value of the column is that a
         score in it came from something that measures. A caller that wants to
         record a model's self-assessment is asking for the field to mean two
         things at once.
+
+        A ``provider-accepted`` entry is refused for a different reason with the
+        same shape — a human acceptance is a fact, not a probability — so both
+        sources share one check and the message names whichever applies.
         """
-        if self.source == SOURCE_LLM_EXTRACTION and self.confidence is not None:
+        if self.source in _UNSCORED_SOURCES and self.confidence is not None:
+            if self.source == SOURCE_PROVIDER_ACCEPTED:
+                raise ValueError(
+                    "a provider-accepted entry carries no confidence — a human "
+                    "acceptance is a fact, not a probability, and forwarding a "
+                    "suggestion's score would attach a machine's uncertainty to "
+                    "a person's decision"
+                )
             raise ValueError(
                 "an llm-extraction entry carries no confidence — a model's "
                 "self-rating is not a measurement and must not share a column "
