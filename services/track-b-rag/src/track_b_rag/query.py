@@ -52,7 +52,9 @@ class PolicyQueryAnswer:
     auth_criteria: list[str]
     missing_criteria: list[str]
     denial_risk: DenialRisk
-    nudge_message: str
+    #: ``None`` when Stage 2 found nothing worth interrupting for. This is what
+    #: TASK-040's emitter triggers on; see :mod:`track_b_rag.gap_analysis`.
+    nudge_message: str | None
     step_therapy_required: bool
     step_therapy_details: str | None
     source: RulesSource = field(default="rag")

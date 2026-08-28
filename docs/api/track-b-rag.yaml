@@ -414,8 +414,16 @@ components:
           description: >-
             How likely a claim is to be denied given what is documented so far.
         nudge_message:
-          type: string
-          description: The message to put in front of the provider, mid-encounter.
+          type: [string, 'null']
+          description: >-
+            The message to put in front of the provider, mid-encounter, or null
+            when there is nothing worth interrupting the consultation for. This
+            is the nudge trigger (TASK-040): a caller raises a nudge if and only
+            if this is non-null, and never re-derives that condition from
+            missing_criteria or denial_risk, which is how the two came to
+            disagree. Null when authorization is not required, or when it is
+            required and every criterion is documented — in both cases with no
+            step therapy requirement, which always has something to say.
         step_therapy_required:
           type: boolean
           description: >-

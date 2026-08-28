@@ -213,32 +213,102 @@ def test_the_nudge_names_the_procedure_and_what_is_missing() -> None:
     assert "neurological deficit" in assessment.nudge_message
 
 
-def test_the_nudge_says_so_when_nothing_is_required() -> None:
+def test_nothing_required_says_nothing_at_all() -> None:
+    """Silence, not "no prior authorization required".
+
+    The message is the nudge trigger (CLAUDE.md, "The nudge trigger is the
+    message"), so anything returned here is something a provider is interrupted
+    with mid-consultation. Confirming that a procedure needs no authorization is
+    not worth an interruption, and this branch returning prose is what made the
+    message useless as a signal — every branch was non-empty, so triggering on
+    "non-empty" would have nudged on every query in the product.
+    """
     assessment = gap_analysis.assess(
         rules=rules(requires_auth=False, auth_criteria=[]),
         clinical_context={},
         procedure="knee MRI",
     )
 
-    assert "No prior authorization required" in assessment.nudge_message
+    assert assessment.nudge_message is None
 
 
-def test_the_nudge_says_so_when_everything_is_documented() -> None:
+def test_everything_documented_says_nothing_at_all() -> None:
+    """The other silent case: authorization required and nothing is missing."""
     assessment = gap_analysis.assess(
         rules=rules(auth_criteria=["Failed conservative therapy"]),
         clinical_context={"note": "failed conservative therapy"},
         procedure="knee MRI",
     )
 
-    assert "appears to be met" in assessment.nudge_message
+    assert assessment.nudge_message is None
 
 
 def test_the_nudge_asks_for_a_manual_check_when_no_criteria_were_found() -> None:
+    """Regression: this composed a message that nothing would ever show.
+
+    Authorization is required and no published criteria could be found, which
+    ``denial_risk()`` scores ``medium`` — deliberately, because "no criteria"
+    here means *not known* rather than *none*. Under TASK-040's original
+    trigger, ``missing_criteria`` non-empty or ``denial_risk == "high"``,
+    neither leg fires, so the provider was asked to confirm the requirements
+    manually by a message no consumer would ever emit. The trigger is now the
+    message itself, so this case reaches a provider.
+    """
     assessment = gap_analysis.assess(
         rules=rules(auth_criteria=[]), clinical_context={}, procedure="knee MRI"
     )
 
+    assert assessment.nudge_message is not None
     assert "confirm the requirements manually" in assessment.nudge_message
+    assert not assessment.missing_criteria
+    assert assessment.denial_risk == "medium"
+
+
+def test_step_therapy_alone_still_nudges() -> None:
+    """Regression: the second case the original trigger scored below.
+
+    Every criterion is documented and the only outstanding requirement is step
+    therapy, which lifts the risk floor to ``medium`` with nothing missing —
+    below both legs of the original trigger. It has to reach the provider:
+    step therapy is a prerequisite the payer checks before it will consider the
+    request at all, so an otherwise perfect submission still fails on it.
+    """
+    assessment = gap_analysis.assess(
+        rules=rules(
+            auth_criteria=["Failed conservative therapy"],
+            step_therapy_required=True,
+            step_therapy_details="NSAIDs for six weeks first",
+        ),
+        clinical_context={"note": "failed conservative therapy"},
+        procedure="knee MRI",
+    )
+
+    assert assessment.nudge_message is not None
+    assert "step therapy" in assessment.nudge_message
+    assert not assessment.missing_criteria
+    assert assessment.denial_risk == "medium"
+
+
+def test_step_therapy_nudges_even_when_no_authorization_is_required() -> None:
+    """Step therapy overrides the no-authorization silence, for the same reason.
+
+    A plan can require a first-line therapy without requiring prior
+    authorization, and the provider still needs to know before ordering.
+    """
+    assessment = gap_analysis.assess(
+        rules=rules(
+            requires_auth=False,
+            auth_criteria=[],
+            step_therapy_required=True,
+            step_therapy_details="NSAIDs for six weeks first",
+        ),
+        clinical_context={},
+        procedure="knee MRI",
+    )
+
+    assert assessment.nudge_message is not None
+    assert "step therapy" in assessment.nudge_message
+    assert assessment.denial_risk == "medium"
 
 
 def test_the_nudge_mentions_step_therapy_and_its_details() -> None:
