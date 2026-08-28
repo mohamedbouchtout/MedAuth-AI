@@ -28,6 +28,7 @@ which is why the rows carrying it are audited, but the model is just a shape.
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any, Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -37,10 +38,61 @@ SOURCE_LLM_EXTRACTION: Final = "llm-extraction"
 #: Written by TASK-031's Comprehend Medical pass.
 SOURCE_COMPREHEND_MEDICAL: Final = "comprehend-medical"
 
+#: An ICD-10-CM code: a letter, two alphanumerics, then up to four more
+#: characters of extension. Used only to decide *where the dot belongs* when
+#: re-inserting it, never to validate that a code exists — this repository does
+#: not hold the ICD-10-CM tabular list and must not reject a real code for
+#: failing a hand-written pattern.
+_ICD10_SHAPE: Final = re.compile(r"^([A-Z][0-9A-Z]{2})([0-9A-Z]{1,4})$")
+
+#: Everything that is not an alphanumeric — dots, spaces, stray punctuation.
+_NON_ALNUM: Final = re.compile(r"[^0-9A-Z]")
+
 CodeSource = Literal["llm-extraction", "comprehend-medical"]
 
 #: A probability, and only ever one a source actually reported.
 Confidence = Annotated[float, Field(ge=0.0, le=1.0)]
+
+
+def _redot(canonical: str) -> str:
+    """Return an ICD-10-CM code in dotted form, leaving anything else alone.
+
+    Only a string matching :data:`_ICD10_SHAPE` once its punctuation is removed
+    is re-dotted. A CPT code is five digits and does not match, so it passes
+    through untouched — which is the intent: CPT has no dot and inserting one
+    would corrupt it.
+    """
+    bare = _NON_ALNUM.sub("", canonical)
+    shape = _ICD10_SHAPE.match(bare)
+    if shape is None:
+        # Not an ICD-10-CM code by shape: a CPT code, or something this function
+        # has no business rewriting. Return what the caller had, minus stray
+        # whitespace, rather than guessing at a format for it.
+        return canonical
+    return f"{shape.group(1)}.{shape.group(2)}"
+
+
+def matching_key(code: str) -> str:
+    """Return the dotless key two sources are compared on.
+
+    **UNVERIFIED — see TASK-031.** ICD-10-CM has two standard spellings of every
+    code with an extension (``M17.11`` and ``M1711``), and which one AWS
+    Comprehend Medical returns in ``ICD10CMConcept.Code`` has never been checked
+    against the real service. It cannot be settled from the API contract:
+    botocore types that field as an unconstrained string, so the format is data
+    rather than schema. Running ``scratchpad/probe_real.py`` against real
+    credentials produces a live response and closes this.
+
+    Stripping the dot from both sides is what makes the open question harmless.
+    Whichever spelling Comprehend uses, both sides reduce to the same key, so
+    the comparison is correct under either answer — this function is defensive
+    against the unknown rather than a bet on one outcome. It is deliberately the
+    only place either side is normalised: confirming the real format is then a
+    change here and nowhere else.
+
+    Do not delete the UNVERIFIED marker without having seen a real response.
+    """
+    return _NON_ALNUM.sub("", code.strip().upper())
 
 
 class CodeValidation(BaseModel):
@@ -73,16 +125,23 @@ class ExtractedCode(BaseModel):
     @field_validator("code")
     @classmethod
     def _canonicalize(cls, value: str) -> str:
-        """Uppercase and strip, so every later comparison is string equality.
+        """Uppercase, strip, and normalise dot placement to the dotted form.
 
         The same reasoning as the payer slug in CLAUDE.md: a code matched by
         exact equality anywhere must be normalised everywhere it is written, or
-        the mismatch is silent.
+        the mismatch is silent. Uppercasing alone was not enough — ICD-10-CM has
+        two equally standard spellings of one code, and a source emitting
+        ``M1711`` where another emits ``M17.11`` produces two entries for one
+        diagnosis with nothing anywhere reporting a problem.
+
+        Stored dotted, because that is what a clinician reads and what TASK-060
+        puts in a prior-auth bundle. Comparison between sources goes through
+        :func:`matching_key` instead.
         """
         canonical = value.strip().upper()
         if not canonical:
             raise ValueError("code must not be blank")
-        return canonical
+        return _redot(canonical)
 
     @model_validator(mode="after")
     def _llm_extractions_report_no_confidence(self) -> Self:
