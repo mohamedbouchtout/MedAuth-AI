@@ -2965,7 +2965,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
 
 ## Phase 4 — Live Nudge System
 
-- [ ] **TASK-040:** Nudge emitter
+- [x] **TASK-040:** Nudge emitter
   - Prerequisite: TASK-012 (the answer this turns into a nudge), TASK-021 (the
     consumer that holds that answer today and discards it), TASK-024 (the
     procedure key the dedup claim is held on), TASK-005 (`clinical_nudges`)
@@ -3095,6 +3095,59 @@ The insurance policy RAG is the technical core. Build and validate before other 
     second row when the same procedure is mentioned again
   - **Test:** the `WRITE_NUDGE` audit row names the encounter's `provider_id` as
     actor and carries no procedure, code or criteria text
+  - Built (725 tests in track-b-rag, 321 in track-a-clinical, 100% coverage on
+    both). Shipped as six commits, the first of them a labelled bugfix against
+    TASK-012 rather than part of this feature. Decisions worth knowing before
+    touching this:
+    - **`gap_analysis.nudge_message()` returns `str | None` and that is the
+      trigger.** The two silent cases are fixed and `PolicyQueryData.nudge_message`
+      is nullable to carry the decision over HTTP. Worth knowing if this is ever
+      revisited: the obvious repair — triggering on a non-empty message while
+      leaving the function as it was — nudges on *every* query, because every
+      branch returned prose including "No prior authorization required". The
+      message had to be allowed to be absent before it could be a signal.
+    - **`nudges.should_escalate()` is the only place `haptic` is decided**, and
+      the reason is written at the decision rather than in a task file. A client
+      that re-derives the buzz from `denial_risk` reinstates exactly what the
+      rule prevents, so TASK-043's bullet says so too.
+    - **`PolicyQueryData` gained `source` and `policy_source`.** The first
+      reverses a standing decision, narrowly: the response deliberately said
+      nothing about which path answered, which still holds for cache/rag/crd and
+      is stated in the field's own description — but `fallback` is the difference
+      between an answer and the absence of one, and the emitter needs it. The
+      second fills `clinical_nudges.payer_policy_source`, which no code path
+      could supply before.
+    - **`policy_source` is overwritten from the retrieved chunks, always.** It
+      is a field on the model the LLM's answer is parsed into, so an answer
+      naming its own sources would otherwise be believed and cached. It is the
+      string a reviewer checks a nudge's criteria against; a plausible
+      fabrication there is worse than an empty column.
+    - **The dedup claim now protects the store and the publish**, and migration
+      0005 is what makes a retry safe rather than duplicating. The emitter
+      raises rather than swallowing, because the consumer releasing the claim is
+      how the next mention gets another attempt — a swallowed failure would
+      silence that procedure for the rest of the visit.
+    - **A republish writes no second audit row.** The nudge was raised once and
+      recorded once; the retry is re-sending something already recorded. One row
+      per unit of work, as CLAUDE.md's consumer-auditing section has it.
+    - **`db.raw_asyncpg_connection()` was a clean gap-close, not a reversal.**
+      It was absent because TASK-011 wrote that module when the service's only
+      route audited nothing; TASK-012's audited route writes no domain row, so
+      nothing forced it then either. The module docstring's claim that this
+      service audits nothing had been stale since TASK-012 and is corrected.
+    - **CI had a hole this branch would have fallen into.** A change to
+      track-a-clinical's shared models selected no job in track-b-rag or
+      policy-scraper, both of which import them. Fixed in
+      `detect-changed-members.sh`, scoped to `src/` so a migration still selects
+      only the JWT pairing, with a case for each direction.
+    - **Still not reachable end to end.** `resolve_query_parameters()` raises for
+      every real encounter until TASK-052b populates the payer columns, so no
+      live transcript reaches the emitter. Everything here is tested against a
+      directly constructed answer, and the store against a real database.
+    - Deferred deliberately: keyword-only nudges are TASK-044's, and so is the
+      other half of the uniqueness invariant — the partial index does not
+      constrain rows with a null `cpt_code`, which is pinned as a test rather
+      than left to be discovered.
 
 - [ ] **TASK-041:** Nudge WebSocket relay
   - Prerequisite: TASK-006 (JWT), same auth pattern as TASK-020
