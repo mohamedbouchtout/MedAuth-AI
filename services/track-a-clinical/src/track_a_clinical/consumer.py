@@ -58,14 +58,16 @@ import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import replace
 from typing import Any, Final
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from track_a_clinical import notes, soap
+from track_a_clinical import comprehend, notes, soap
 from track_a_clinical.db import get_sessionmaker
+from track_a_clinical.models import ExtractedCode
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +158,9 @@ class TranscriptConsumer:
         *,
         session_factory: SessionFactory | None = None,
         generate: Callable[..., Awaitable[soap.GeneratedNote | None]] = soap.generate,
+        validate_icd10: Callable[
+            [list[ExtractedCode], str], Awaitable[list[ExtractedCode]]
+        ] = comprehend.validate_icd10,
     ) -> None:
         """Build a consumer.
 
@@ -164,10 +169,13 @@ class TranscriptConsumer:
             session_factory: Opens the database session each generation writes
                 through. Defaults to the service's own sessionmaker.
             generate: The SOAP generation seam. Defaults to the real one.
+            validate_icd10: The Comprehend Medical validation seam (TASK-031).
+                Defaults to the real one.
         """
         self._redis = redis
         self._session_factory = session_factory or _default_session_factory
         self._generate = generate
+        self._validate_icd10 = validate_icd10
         self._buffers: dict[uuid.UUID, TranscriptBuffer] = {}
         self._task: asyncio.Task[None] | None = None
         #: Keyed by session so a second end signal for a session already being
@@ -378,6 +386,44 @@ class TranscriptConsumer:
         self._generations[session_id] = task
         task.add_done_callback(lambda _: self._generations.pop(session_id, None))
 
+    async def _validate_codes(
+        self,
+        note: soap.GeneratedNote,
+        transcript: str,
+        session_id: uuid.UUID,
+    ) -> soap.GeneratedNote:
+        """Return `note` with its ICD-10 codes validated, or unchanged on failure.
+
+        **Runs before the insert, deliberately.** ``store_note`` is
+        ``ON CONFLICT DO NOTHING`` and has no idempotent update path, so a
+        validation pass running after the write would have nothing to update on
+        the retry of a duplicated signal. Validating first means the row is
+        written already validated, in one write, with no second transaction to
+        get half-applied.
+
+        **Never fatal.** Any failure leaves every ``validation`` at ``None`` and
+        the note is stored as it stands — the same independence TASK-030 gives
+        the Sonnet and Haiku passes, with the note as the higher-priority
+        artifact and validation as metadata about it. ``None`` already reads as
+        "not checked yet", so nothing further is needed to represent it
+        honestly.
+
+        ``cpt_codes`` are not touched: Comprehend Medical has no CPT inference,
+        so those entries keep ``validation: None`` permanently by design.
+        """
+        if not note.icd10_codes:
+            return note
+        try:
+            validated = await self._validate_icd10(note.icd10_codes, transcript)
+        except Exception:
+            logger.warning(
+                "ICD-10 validation failed for session %s; storing the note unvalidated",
+                session_id,
+                exc_info=True,
+            )
+            return note
+        return replace(note, icd10_codes=validated)
+
     async def _generate_and_store(self, session_id: uuid.UUID, buffer: TranscriptBuffer) -> None:
         """Generate the note for one ended session and store it, then free the buffer.
 
@@ -388,11 +434,14 @@ class TranscriptConsumer:
         than a transcript that quietly no longer exists.
         """
         try:
-            note = await self._generate(buffer.transcript(), session_id=session_id)
+            transcript = buffer.transcript()
+            note = await self._generate(transcript, session_id=session_id)
             if note is None:
                 # soap.generate has already logged which pass failed. The buffer
                 # stays; nothing here can improve on the attempt.
                 return
+
+            note = await self._validate_codes(note, transcript, session_id)
 
             async with self._session_factory() as session:
                 encounter = await notes.load_encounter(session, session_id)
