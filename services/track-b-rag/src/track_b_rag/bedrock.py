@@ -29,13 +29,18 @@ import logging
 from functools import lru_cache
 from typing import Any, Final
 
-import boto3
 from langchain_aws import ChatBedrock
-from langchain_core.messages import HumanMessage
 
+import bedrock_client
+from bedrock_client import message_text
 from track_b_rag.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+#: ``message_text`` is re-exported rather than re-implemented: this module stays
+#: the one place this service reaches for Bedrock, and the implementation is
+#: shared with every other service through ``packages/bedrock-client``.
+__all__ = ["get_reasoning_model", "get_runtime_client", "invoke_reasoning", "message_text"]
 
 #: Deterministic decoding. The prompt asks for a JSON document matching a fixed
 #: shape, so sampling buys nothing and costs reproducibility — two identical
@@ -52,11 +57,11 @@ MAX_TOKENS: Final = 2048
 def get_runtime_client() -> Any:
     """Return the process-wide ``bedrock-runtime`` boto3 client.
 
-    Typed ``Any`` because boto3 builds its clients dynamically and has no static
-    type for one; this is the single place that escape hatch lives, rather than
-    at every call site.
+    The construction lives in ``packages/bedrock-client``; the cache lives here,
+    because this service's settings are what decide the region and therefore
+    when the client is stale.
     """
-    return boto3.client("bedrock-runtime", region_name=get_settings().aws_region)
+    return bedrock_client.build_runtime_client(get_settings().aws_region)
 
 
 @lru_cache(maxsize=1)
@@ -64,12 +69,9 @@ def get_reasoning_model() -> ChatBedrock:
     """Return the Sonnet chat model used for policy analysis."""
     settings = get_settings()
     logger.info("Using Bedrock reasoning model %r", settings.bedrock_model_id_reasoning)
-    # ``model=`` rather than ``model_id=``: langchain-aws aliases the field and
-    # only the alias appears in the constructor it synthesises, so the other
-    # spelling works at runtime and fails type checking.
-    return ChatBedrock(
+    return bedrock_client.build_chat_model(
         client=get_runtime_client(),
-        model=settings.bedrock_model_id_reasoning,
+        model_id=settings.bedrock_model_id_reasoning,
         temperature=TEMPERATURE,
         max_tokens=MAX_TOKENS,
     )
@@ -81,27 +83,6 @@ def reset_clients() -> None:
     get_runtime_client.cache_clear()
 
 
-def message_text(content: object) -> str:
-    """Flatten a LangChain message's content into plain text.
-
-    ``AIMessage.content`` is a string for a simple completion but a list of
-    typed blocks when the model returns anything structured, and a caller that
-    assumes the string form silently sees ``"[{'type': 'text', ...}]"`` instead
-    of the answer. Non-text blocks are dropped rather than rendered.
-    """
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict) and block.get("type") == "text":
-                parts.append(str(block.get("text", "")))
-        return "".join(parts)
-    return str(content)
-
-
 async def invoke_reasoning(prompt: str) -> str:
     """Send one prompt to the reasoning model and return its text.
 
@@ -109,5 +90,4 @@ async def invoke_reasoning(prompt: str) -> str:
     invocation means; in this service it means the same as an unparseable
     answer — see :mod:`track_b_rag.policy_rules`.
     """
-    response = await get_reasoning_model().ainvoke([HumanMessage(content=prompt)])
-    return message_text(response.content)
+    return await bedrock_client.invoke(get_reasoning_model(), prompt)
