@@ -287,8 +287,14 @@ class PolicyQueryData(BaseModel):
     denial_risk: Literal["low", "medium", "high"] = Field(
         description="How likely a claim is to be denied given what is documented so far.",
     )
-    nudge_message: str = Field(
-        description="The message to put in front of the provider, mid-encounter.",
+    nudge_message: str | None = Field(
+        description=(
+            "The message to put in front of the provider, mid-encounter, or null "
+            "when there is nothing worth interrupting the consultation for. This "
+            "is the nudge trigger (TASK-040): a caller raises a nudge if and only "
+            "if this is non-null, and never re-derives that from missing_criteria "
+            "or denial_risk, which is how the two came to disagree."
+        ),
     )
     step_therapy_required: bool = Field(
         description="Whether the plan requires a first-line therapy to be tried first.",

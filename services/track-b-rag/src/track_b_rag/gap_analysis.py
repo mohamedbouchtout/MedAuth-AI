@@ -27,6 +27,28 @@ direction TASK-012 rules out.
 No PHI leaves this module. The clinical context is read here and referenced
 nowhere in the output: ``missing_criteria`` echoes the payer's own criteria
 text, and ``nudge_message`` is built from those criteria and the procedure name.
+
+**This module also decides whether to nudge at all, and it is the only place
+that decides it.** ``nudge_message`` is ``None`` when there is nothing worth
+interrupting a consultation for, and the emitter (TASK-040) fires if and only if
+it was handed a message. Nothing downstream re-derives that condition from
+``missing_criteria`` or ``denial_risk``.
+
+That is a correction rather than an original design. TASK-040 originally
+specified the trigger as "``missing_criteria`` non-empty or ``denial_risk ==
+'high'``", which is a second derivation of the judgement this module already
+makes, and the two disagreed in both directions that matter. A payer requiring
+authorization with no criteria we could find scores ``medium`` with nothing
+missing, and a plan whose only problem is step therapy does the same — yet both
+compose a message asking the provider to act, which nothing would ever have
+shown them. See CLAUDE.md, "The nudge trigger is the message".
+
+Note what does not work, because it is the obvious repair: keying the trigger on
+a non-empty message while every branch here still returns prose. The
+no-authorization-required branch used to return "No prior authorization required
+for X", so that reading would nudge on every single query. The message only
+becomes a usable signal once it is allowed to be absent, which is what this
+module now does.
 """
 
 from __future__ import annotations
@@ -112,7 +134,9 @@ class DocumentationAssessment:
 
     missing_criteria: list[str]
     denial_risk: DenialRisk
-    nudge_message: str
+    #: ``None`` when there is nothing worth putting in front of the provider.
+    #: This is the nudge trigger, and the only one — see the module docstring.
+    nudge_message: str | None
 
 
 def assess(
@@ -198,16 +222,32 @@ def denial_risk(*, rules: PolicyRules, missing: int, total: int) -> DenialRisk:
     return "high"
 
 
-def nudge_message(*, rules: PolicyRules, missing: Sequence[str], procedure: str) -> str:
-    """Return the one-or-two sentence message a provider sees mid-encounter.
+def nudge_message(*, rules: PolicyRules, missing: Sequence[str], procedure: str) -> str | None:
+    """Return the message a provider sees mid-encounter, or None to stay silent.
 
     Built from the payer's criteria and the procedure name only. Nothing from
     the clinical context reaches it — the provider already knows what is in
     their own note, and a nudge is rendered in a browser and relayed over a
     WebSocket, which is not somewhere to put clinical detail that need not be
     there.
+
+    Returning ``None`` is how this module says "nothing here is worth
+    interrupting a consultation for", and it is the nudge trigger: TASK-040's
+    emitter fires if and only if this returns a string. Two cases qualify, and
+    both are cases where the provider learns nothing they need to act on —
+    authorization is not required, or it is required and everything the payer
+    asks for is already documented. Step therapy overrides both: it is a
+    prerequisite the payer checks before considering the request at all, so a
+    plan that has one always has something to say.
+
+    Everything else returns prose, including the two cases that used to score
+    below TASK-040's original trigger and are the reason this function owns the
+    decision now: authorization required with no criteria found, and step
+    therapy on an otherwise clean answer.
     """
     if not rules.requires_auth:
+        if not rules.step_therapy_required:
+            return None
         head = f"No prior authorization required for {procedure}."
     elif not rules.auth_criteria:
         head = (
@@ -215,6 +255,8 @@ def nudge_message(*, rules: PolicyRules, missing: Sequence[str], procedure: str)
             "were found for this plan — confirm the requirements manually."
         )
     elif not missing:
+        if not rules.step_therapy_required:
+            return None
         head = (
             f"Prior authorization required for {procedure}. Every documented criterion "
             "appears to be met."
