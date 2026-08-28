@@ -38,6 +38,7 @@ from track_a_clinical.models.extracted_code import (
     ExtractedCode,
     dump_codes,
     load_codes,
+    matching_key,
 )
 from track_a_clinical.models.insurance_policy import (
     DEFAULT_QDRANT_COLLECTION,
@@ -75,4 +76,5 @@ __all__ = [
     "PriorAuthRequest",
     "dump_codes",
     "load_codes",
+    "matching_key",
 ]

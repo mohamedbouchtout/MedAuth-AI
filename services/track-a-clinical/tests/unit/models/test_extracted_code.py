@@ -17,6 +17,7 @@ from track_a_clinical.models import (
     ExtractedCode,
     dump_codes,
     load_codes,
+    matching_key,
 )
 
 
@@ -131,3 +132,56 @@ def test_an_empty_column_loads_as_no_codes() -> None:
 def test_a_column_holding_something_other_than_an_array_is_rejected() -> None:
     with pytest.raises(ValueError, match="JSON array"):
         load_codes({"code": "M17.11"})
+
+
+# --- dot normalisation (TASK-031) -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("written", "stored"),
+    [
+        ("M17.11", "M17.11"),
+        ("M1711", "M17.11"),
+        (" m17.11 ", "M17.11"),
+        ("e119", "E11.9"),
+        ("S52501A", "S52.501A"),
+        ("Z0000", "Z00.00"),
+    ],
+)
+def test_an_icd10_code_is_stored_dotted_however_it_was_written(written: str, stored: str) -> None:
+    """One diagnosis must not become two entries because two sources dot it differently.
+
+    Uppercasing alone left ``M1711`` and ``M17.11`` as separate strings, which
+    is the payer-slug bug one column over: a silent mismatch that looks like a
+    code the other source never proposed.
+    """
+    assert ExtractedCode.from_llm(written).code == stored
+
+
+def test_a_three_character_icd10_code_takes_no_dot() -> None:
+    """``I10`` has no extension, so there is nothing to put a dot in front of."""
+    assert ExtractedCode.from_llm("I10").code == "I10"
+
+
+def test_a_cpt_code_is_never_dotted() -> None:
+    """Five digits is not an ICD-10 shape, and inserting a dot would corrupt it."""
+    assert ExtractedCode.from_llm("73721").code == "73721"
+
+
+def test_both_icd10_spellings_share_one_matching_key() -> None:
+    """UNVERIFIED — see :func:`track_a_clinical.models.matching_key`.
+
+    Which spelling AWS Comprehend Medical returns has never been checked against
+    the live service and cannot be settled from the API contract. Reducing both
+    to one key is what makes the comparison correct under either answer.
+    """
+    assert matching_key("M17.11") == matching_key("M1711") == "M1711"
+
+
+def test_the_matching_key_is_case_and_whitespace_insensitive() -> None:
+    assert matching_key(" m17.11 ") == "M1711"
+
+
+def test_a_blank_code_is_still_rejected() -> None:
+    with pytest.raises(ValueError, match="must not be blank"):
+        ExtractedCode.from_llm("   ")
