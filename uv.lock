@@ -1858,6 +1858,7 @@ source = { editable = "services/track-a-clinical" }
 dependencies = [
     { name = "alembic" },
     { name = "asyncpg" },
+    { name = "boto3" },
     { name = "fastapi" },
     { name = "langchain" },
     { name = "langchain-aws" },
@@ -1877,6 +1878,7 @@ dependencies = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.14" },
     { name = "asyncpg", specifier = ">=0.30" },
+    { name = "boto3", specifier = ">=1.43.77" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "langchain", specifier = ">=1.3.16" },
     { name = "langchain-aws", specifier = ">=0.2" },
