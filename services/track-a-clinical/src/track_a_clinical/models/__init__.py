@@ -31,6 +31,14 @@ from track_a_clinical.models.encounter import (
     ENCOUNTER_STATUS_COMPLETED,
     Encounter,
 )
+from track_a_clinical.models.extracted_code import (
+    SOURCE_COMPREHEND_MEDICAL,
+    SOURCE_LLM_EXTRACTION,
+    CodeValidation,
+    ExtractedCode,
+    dump_codes,
+    load_codes,
+)
 from track_a_clinical.models.insurance_policy import (
     DEFAULT_QDRANT_COLLECTION,
     InsurancePolicy,
@@ -54,11 +62,17 @@ __all__ = [
     "PRIOR_AUTH_STATUS_DENIED",
     "PRIOR_AUTH_STATUS_PENDING",
     "PRIOR_AUTH_STATUS_SUBMITTED",
+    "SOURCE_COMPREHEND_MEDICAL",
+    "SOURCE_LLM_EXTRACTION",
     "Base",
     "ClinicalNote",
     "ClinicalNudge",
+    "CodeValidation",
     "Encounter",
+    "ExtractedCode",
     "InsurancePolicy",
     "JsonObject",
     "PriorAuthRequest",
+    "dump_codes",
+    "load_codes",
 ]

@@ -51,6 +51,22 @@ MIN_SIGNING_KEY_BYTES: Final = 32
 #: tokens is first-party and already shares the secret.
 JWT_ALGORITHM: Final = "HS256"
 
+#: Every AWS service this platform uses is HIPAA-eligible in us-east-1 and the
+#: BAA is signed for that region. Matches ``track_b_rag.config``.
+DEFAULT_AWS_REGION: Final = "us-east-1"
+
+#: Sonnet, for the SOAP note itself: CLAUDE.md's Bedrock Model Assignment table
+#: names "TASK-030 SOAP note generation" as long-form structured clinical
+#: writing. The default exists so local dev works unset; code reads the setting
+#: and never a literal model id.
+DEFAULT_BEDROCK_MODEL_ID_REASONING: Final = "anthropic.claude-sonnet-4-6"
+
+#: Haiku, for the ICD-10/CPT pass in the same task — extraction rather than
+#: reasoning, and 15x cheaper per call. The two ids are separate settings
+#: because TASK-030 makes both calls, deliberately, rather than asking one
+#: model to write the note and pull the codes out of it.
+DEFAULT_BEDROCK_MODEL_ID_FAST: Final = "anthropic.claude-haiku-4-5-20251001"
+
 
 class Settings(BaseSettings):
     """Environment-backed settings for session lifecycle.
@@ -67,6 +83,18 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = Field(default=DEFAULT_SESSION_TTL_SECONDS, gt=0)
     session_remint_grace_seconds: int = Field(default=DEFAULT_REMINT_GRACE_SECONDS, gt=0)
     redis_url: str = Field(default="redis://localhost:6379/0", min_length=1)
+
+    aws_region: str = Field(default=DEFAULT_AWS_REGION, min_length=1)
+    #: Sonnet — the SOAP note. See :mod:`track_a_clinical.soap`.
+    bedrock_model_id_reasoning: str = Field(
+        default=DEFAULT_BEDROCK_MODEL_ID_REASONING,
+        min_length=1,
+    )
+    #: Haiku — the ICD-10/CPT extraction pass.
+    bedrock_model_id_fast: str = Field(
+        default=DEFAULT_BEDROCK_MODEL_ID_FAST,
+        min_length=1,
+    )
 
 
 @lru_cache(maxsize=1)
