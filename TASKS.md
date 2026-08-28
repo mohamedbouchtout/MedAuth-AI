@@ -2307,7 +2307,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **Test:** a row that would collapse two procedures onto one code is rejected
     at load, naming the conflict
 
-- [ ] **TASK-025:** Mobile session screen
+- [x] **TASK-025:** Mobile session screen
   - Prerequisite: TASK-006 (`POST /sessions/start` and `/end`), TASK-006b
     (`POST /sessions/{session_id}/token`), TASK-022 and TASK-026 (the capture
     hook this screen drives, and the deadline that makes it fail rather than
@@ -2402,17 +2402,60 @@ The insurance policy RAG is the technical core. Build and validate before other 
     asked to start a new one. Still never re-call `/sessions/start` to get a
     token; that forks the encounter.
   - **Test:** capture reports `SAMPLE_RATE_UNSUPPORTED`, verify the visit does
-    not start and the error is rendered
-  - **Test:** permission denied, verify the same
+    not start and the error is rendered ✓
+  - **Test:** permission denied, verify the same ✓
   - **Test:** an error code with no dedicated branch — `STREAM_FAILED` — still
-    blocks the in-progress state and renders its own message
+    blocks the in-progress state and renders its own message ✓
   - **Test:** `AUTH_REJECTED` re-mints via `POST /sessions/{session_id}/token`
     and never calls `/sessions/start`; a 409 from that re-mint asks the provider
-    to start a new visit
+    to start a new visit ✓
   - **Test:** start/active/end transitions with mocked APIs. `apps/web`'s
     equivalent (TASK-070) is not built, so there is nothing to mirror — the
     shared behaviour comes from the CLAUDE.md section cited above, and this
-    screen is the first of the two to implement it.
+    screen is the first of the two to implement it. ✓
+  - Built. Notes:
+    - **The "never in progress while capture has failed" rule is a pure
+      function, `src/session/visitPhase.ts`.** It returns `recording` only when
+      the hook reports `streaming`, and there is no other path to it, so the
+      rule can be tested over every code in the vocabulary instead of over the
+      branches someone remembered to write. `src/session/recovery.ts` holds the
+      part that does vary per code — what the provider is offered next — behind
+      a switch that is exhaustive over `AudioCaptureErrorCode`. A code added to
+      `packages/audio-wire` fails typechecking there until someone decides what
+      to say about it, which is the compile-time form of the same rule.
+    - **The patient seam is `src/session/patientSource.ts`**, and `App.tsx`
+      wires it to `patientSelectionUnavailable`, so this build shows a provider
+      that a visit cannot be started rather than starting one against an
+      invented identifier. TASK-025b fills it.
+    - **Two ordering details in the screen are load-bearing.** After a re-mint
+      the capture hook still holds the old token in the render the effect
+      belongs to, so the effect bumps an attempt counter and re-enters rather
+      than starting capture against a token that is about to be replaced; the
+      counter is a counter and not a boolean because a retry and the second pass
+      after a refresh both need to re-enter a start that has already run. And a
+      visit gets at most one proactive refresh per attempt, so a token that
+      arrives already near `exp` cannot loop.
+    - **Ending stops the microphone before closing the encounter**, because the
+      provider has said the visit is over and audio must not keep being captured
+      while that call is in flight. An end that fails keeps the session held and
+      offers to retry the end — offering a new visit there would fork the
+      encounter, which is the failure the whole re-mint path exists to avoid.
+    - `EXPO_PUBLIC_API_BASE_URL` needed no addition to `.env.example`; it has
+      been there since TASK-001 and this is its first consumer. The comment
+      block beside it now says what it is for and why the audio origin is not
+      interchangeable with it.
+    - `src/api/jwt.ts` decodes base64url by hand. Hermes does not guarantee
+      `atob`, and the test fixtures encode by hand for a matching reason — the
+      app has no `@types/node` and adding it to build a token would let Node-only
+      globals typecheck inside `src/`.
+    - **A leftover from TASK-022 was corrected here**: the hook's
+      `AUTH_REJECTED` message told the provider to start a new session, written
+      before TASK-006b existed. The screen would have rendered that directly
+      above its own contradicting offer to refresh. The message now reports the
+      failure and leaves the response to the screen.
+    - CI needed no change — the `mobile` job already covers `apps/mobile/**`.
+      131 tests pass with 94% coverage against the 80% gate, and each commit in
+      the series typechecks and passes its own suite.
 
 - [ ] **TASK-025b:** Real patient and provider selection on mobile
   - Prerequisite: TASK-025 (the seam this fills), TASK-052 (base FHIR resource
