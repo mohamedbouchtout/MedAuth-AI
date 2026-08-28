@@ -552,7 +552,9 @@ transcription:{session_id}      pub/sub — raw transcript segments, published b
                                  audio-ingestion (TASK-020), consumed by
                                  track-a-clinical (TASK-030) and track-b-rag (TASK-021)
 nudges:{session_id}              pub/sub — nudge events, published by track-b-rag
-                                 (TASK-040), consumed by nudge-service (TASK-041)
+                                 (TASK-040), consumed by nudge-service (TASK-041).
+                                 Payload shape is fixed in "The nudge payload —
+                                 one shape" above; five tasks read or write it.
 session:ended:{session_id}       pub/sub — empty-payload signal, published by
                                  track-a-clinical (TASK-006), consumed by
                                  track-a-clinical itself (TASK-030),
@@ -607,6 +609,108 @@ Redis key pattern not listed here, add it to this list in the same PR.
 The `{payer}` segment is the canonical slug from `packages/payer-vocab`, never a
 payer's display name — see "Payer and jurisdiction identity" below for why a raw
 name in this key silently halves the hit rate and hides a retrieval miss.
+
+### The nudge payload — one shape (cross-cutting)
+What rides on `nudges:{session_id}` is fixed here rather than inside TASK-040,
+because five tasks have to agree on it and only one of them writes it: TASK-040
+publishes, TASK-041 relays it verbatim over a WebSocket, TASK-042 and TASK-043
+render it on two platforms, and TASK-044 publishes a second variety of it. Same
+reasoning as the `icd10_codes` shape below — a contract with one writer and four
+readers is fixed before the first message, not migrated after four consumers
+have each guessed.
+
+```json
+{
+  "type": "PAYER_RULE_ALERT",
+  "nudge_id": "0b7f...",
+  "procedure": "knee MRI",
+  "cpt_code": "73721",
+  "message": "Prior authorization required for knee MRI. Still undocumented: ...",
+  "missing_criteria": ["six weeks of conservative therapy"],
+  "denial_risk": "high",
+  "haptic": false
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `type` | `str` | `PAYER_RULE_ALERT` today. It exists so a client can switch on the kind of nudge rather than inferring it, and TASK-044 is the reason it is not simply assumed. |
+| `nudge_id` | `str` (UUID) | The `clinical_nudges` row's primary key. This is what TASK-041b's `PATCH /nudges/{nudge_id}/acknowledge` takes, so a client can only dismiss a nudge that was actually recorded — which is why the row is written before the publish and not after. |
+| `procedure` | `str` | As the clinician said it, not a canonical descriptor. |
+| `cpt_code` | `str \| None` | **Nullable from the start, though TASK-040 never emits null.** TASK-044 nudges on a keyword that resolved no code, and a client that assumed a string would break on the first one. |
+| `message` | `str` | The provider-facing text, from `gap_analysis.nudge_message()`. Carries the procedure and the payer's criteria and nothing from `clinical_context` — a nudge crosses a WebSocket and is rendered in a browser, which is not a place to put clinical detail that need not be there. |
+| `missing_criteria` | `list[str]` | The payer criteria not yet evidenced. Empty is meaningful: on a fallback answer it means the criteria are *unknown*, not that none are missing. |
+| `denial_risk` | `"low" \| "medium" \| "high"` | Drives TASK-042's yellow/orange/red banner. |
+| `haptic` | `bool` | Whether to buzz the device (TASK-043). **Not a synonym for `denial_risk == "high"` — see below.** |
+
+**`haptic` is a decision, not a restatement of `denial_risk`.** The rule is
+`denial_risk == "high"` **and** the answer is not the safe fallback. TASK-040's
+original wording tied it to the risk level alone, which was written before
+anyone traced what the fallback returns: `query.fallback_answer()` sets
+`denial_risk="high"` for an unreachable Qdrant, a Bedrock error, or a retrieval
+that matched nothing. Under the original rule a single infrastructure outage
+buzzes a physician's device once per procedure in every concurrent encounter,
+and every one of those alerts says only "confirm manually".
+
+The risk level stays `high` — that is honest, the requirement genuinely is
+unverified — and the nudge still fires. What is suppressed is the escalation.
+The reasoning is about the signal rather than the annoyance: a haptic alert
+earns its interruption by being rare and meaning something, and a physician who
+learns that the buzz usually means "our vendor is down" has been taught to tune
+out the one that means "this order will be denied". An outage must not be able
+to spend the credibility of the channel that genuinely high-risk nudges depend
+on. Encode it in the emitter explicitly, never as an inherited default.
+
+**Whether to nudge at all is decided in one place, and it is not this payload.**
+`gap_analysis` owns it, by returning no message when there is nothing worth
+interrupting a consultation for. The emitter fires if and only if it was given a
+message. See "The nudge trigger is the message" below.
+
+### The nudge trigger is the message (corrects shipped TASK-012 logic)
+**The bug.** TASK-040 says to nudge when `missing_criteria` is non-empty or
+`denial_risk == "high"`. `gap_analysis` independently decides what to *say*.
+Those are two derivations of one judgement — "is this worth interrupting a
+consultation for" — and they disagree in two cases that ship today:
+
+- **Authorization required, no criteria found.** `denial_risk()` returns
+  `medium` (deliberately: "no criteria" here means *not known*, not *none*) and
+  `missing_criteria` is empty, so neither leg of the trigger fires. Meanwhile
+  `nudge_message()` composes "Prior authorization required for X, but no
+  published criteria were found for this plan — confirm the requirements
+  manually." A message that explicitly asks the provider to act, that nothing
+  will ever show them.
+- **Step therapy only.** `_with_step_therapy_floor` lifts an otherwise clean
+  answer to `medium` with nothing missing, and the message appends the step
+  therapy requirement. Same silence, and step therapy is a prerequisite the
+  payer checks *before* considering the request at all.
+
+Neither is a design gap to be argued about; they are a defect arising from
+deriving one decision in two places, which is exactly how the two drifted
+without anyone noticing.
+
+**The fix: `gap_analysis` decides, and the message carries the decision.**
+`nudge_message()` returns `str | None`, and `None` means there is nothing worth
+interrupting for. The emitter fires if and only if it was handed a message. No
+consumer re-derives the condition from `missing_criteria` or `denial_risk`, and
+`PolicyQueryData.nudge_message` becomes nullable to carry it (a spec change to
+`docs/api/track-b-rag.yaml`, guarded by the existing contract drift test).
+
+**Note what does *not* work: keying off "the message is non-empty" while leaving
+`nudge_message()` as it is.** Every one of its branches returns a non-empty
+string — including "No prior authorization required for X." — so that reading
+nudges on literally every policy query, which is worse than the silence it
+replaces. The message only becomes a usable signal once it is allowed to be
+absent. That is the substance of this change; the trigger is downstream of it.
+
+`None` is returned when authorization is not required and no step therapy
+applies, and when authorization is required, the criteria are known, and every
+one of them is documented. Everything else carries a message — including the
+safe fallback, which never reaches `gap_analysis` and always nudges, with
+`haptic` suppressed per the rule above.
+
+This ships as its own bugfix commit against TASK-012's logic, separately from
+TASK-040's new code, with a regression test naming each of the two previously
+silent cases.
 
 ### Qdrant Initialization — Must Be Idempotent
 `qdrant.recreate_collection()` deletes and rebuilds the collection — calling it
@@ -1123,7 +1227,12 @@ disagreeing.
 is not listed adds it to this list in the same PR — the same rule the Redis key
 list carries, for the same reason. Until now this vocabulary existed only as
 three examples in a comment on the `audit_log` schema above, which is how
-`WRITE_NOTE` came to be cited by a task while no service defined it.
+`WRITE_NOTE` came to be cited by a task while no service defined it. The same
+drift ran the other way with `QUERY_POLICY`: TASK-012 shipped it as a constant in
+`track_b_rag/audit.py`, under a comment claiming it came from this vocabulary,
+while this list had never carried it. Both directions are the same failure — the
+list and the code each look authoritative on their own — and both are corrected
+below.
 
 | Action | Written by | Meaning |
 |---|---|---|
@@ -1134,6 +1243,8 @@ three examples in a comment on the `audit_log` schema above, which is how
 | `WRITE_NOTE` | track-a-clinical (TASK-030) | A SOAP note was generated and stored |
 | `READ_NOTE` | track-a-clinical (TASK-032), prior-auth (TASK-060) | A `clinical_notes` row was read |
 | `UPDATE_NOTE` | track-a-clinical (TASK-032) | A provider edited a stored note |
+| `QUERY_POLICY` | track-b-rag (TASK-012) | An encounter's clinical context was read to answer a policy query |
+| `WRITE_NUDGE` | track-b-rag (TASK-040) | A nudge was raised and stored against an encounter |
 | `READ_NUDGE` | prior-auth (TASK-060) | An encounter's `clinical_nudges` rows were read |
 | `WRITE_PRIOR_AUTH` | prior-auth (TASK-060) | A prior-auth bundle was assembled and stored |
 | `SUBMIT_PRIOR_AUTH` | prior-auth (TASK-061) | A bundle was transmitted to a payer |

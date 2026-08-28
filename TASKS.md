@@ -843,7 +843,14 @@ The insurance policy RAG is the technical core. Build and validate before other 
     TASK-021 is the caller and has both available.
   - Response model: `{requires_auth: bool, auth_criteria: list[str], missing_criteria: list[str],
     denial_risk: Literal["low","medium","high"], nudge_message: str, step_therapy_required: bool,
-    step_therapy_details: str | None}` — wrapped in the standard envelope
+    step_therapy_details: str | None}` — wrapped in the standard envelope.
+    **Two fields changed in TASK-040 and this line is no longer current.**
+    `nudge_message` became `str | None`, where `None` means there is nothing
+    worth interrupting the consultation for — see CLAUDE.md, "The nudge trigger
+    is the message", which also explains why the original always-a-string
+    version made the field useless as a signal. And a `source` field was added,
+    carrying which tier answered, because the emitter has to tell a real answer
+    from the safe fallback and was otherwise left inferring it.
   - **Calls `audit_log()`** — this route touches PHI, unlike `/policies/ingest`.
     Never log `clinical_context` contents; the audit row records the access
     (actor, session, resource type), not the clinical detail.
@@ -904,6 +911,20 @@ The insurance policy RAG is the technical core. Build and validate before other 
       `clinical_context` parameter at all, so nothing patient-specific can reach
       the prompt, the retrieval or the cached value. A unit test asserts the
       parameter list, so adding one back fails the build rather than review.
+    - **Corrected in TASK-040: `gap_analysis` decided what to *say* while the
+      nudge emitter separately decided *whether to speak*, and the two
+      disagreed.** A payer that requires authorization but publishes no criteria
+      we can find, and a plan whose only problem is step therapy, both compose a
+      message asking the provider to act and both scored below the emission
+      trigger — so the message was written and never shown. The judgement now
+      lives in one place: `nudge_message()` returns `None` when there is nothing
+      to say, and the emitter fires if and only if it was handed a message.
+      Nothing downstream re-derives it from `missing_criteria` or `denial_risk`.
+      Two things worth keeping in view if this is ever revisited: the defect came
+      from deriving one decision twice, not from either derivation being wrong on
+      its own; and the naive repair — triggering on a non-empty message string —
+      nudges on every single query, because every branch of the original
+      function returned prose, including "No prior authorization required".
     - `gap_analysis` (Stage 2) is **deterministic Python, not a second Bedrock
       call.** It has to be: TASK-012's cache-hit test says "no Bedrock call" on
       the second query, and a model call in Stage 2 would make that false. It
@@ -2254,6 +2275,15 @@ The insurance policy RAG is the technical core. Build and validate before other 
     was left taking an opaque `procedure_key` for exactly this, so the guard
     itself is unchanged. The prefixes keep a keyword claim from ever colliding
     with a code claim and make the set self-describing when read out of Redis.
+  - **TASK-040 adds `Encounter.id` to that guarded SELECT**, because
+    `clinical_nudges.encounter_id` is a foreign key and the consumer holds only
+    a `session_id`. Both halves of the guard below — the `_Row` fake that
+    carries exactly the columns the SELECT asks for, and the compiled-SQL
+    assertion that no patient column appears — were updated deliberately in
+    that task rather than being allowed to pass by coincidence. A primary key
+    is a row identifier, not a patient attribute, so the compliance answer the
+    guard protects is unchanged. That is the guard working, not the guard being
+    weakened; the columns it exists to keep out are still out.
   - **Decided: reading `encounters` to build a query is not a PHI access**, so
     it writes no `audit_log()` row and the audit obligation stays where it is —
     one row per `/policies/query` call, written by the route. The decision is
@@ -2936,18 +2966,135 @@ The insurance policy RAG is the technical core. Build and validate before other 
 ## Phase 4 — Live Nudge System
 
 - [ ] **TASK-040:** Nudge emitter
+  - Prerequisite: TASK-012 (the answer this turns into a nudge), TASK-021 (the
+    consumer that holds that answer today and discards it), TASK-024 (the
+    procedure key the dedup claim is held on), TASK-005 (`clinical_nudges`)
   - Service: `services/track-b-rag`
-  - When `/policies/query` (TASK-012) returns `missing_criteria` non-empty or
-    `denial_risk == "high"`: publish nudge to `nudges:{session_id}` per
-    CLAUDE.md's Redis key list
-  - Nudge payload: `{type: "PAYER_RULE_ALERT", procedure, cpt_code, message,
-    missing_criteria, denial_risk, haptic: bool}` — `haptic` is true only when
-    `denial_risk == "high"`
-  - Store nudge in `clinical_nudges` table (schema in TASK-005), get back the
-    row `id` — include it in the Redis payload as `nudge_id` so the client can
-    later acknowledge this specific nudge
-  - **Test:** trigger policy query with known missing criteria, verify Redis pub
-    includes a valid nudge_id matching the stored row
+  - **The payload shape is fixed in CLAUDE.md, "The nudge payload — one shape",
+    not here.** TASK-041 relays it, TASK-042 and TASK-043 render it and TASK-044
+    publishes a second variety of it; four readers and one writer is a contract
+    that gets settled once. This task implements that shape and does not
+    redefine it. Note `cpt_code` is nullable there from the start even though
+    nothing this task emits sets it to null — TASK-044 is why.
+  - **Ship the trigger fix first, as its own commit.** CLAUDE.md's "The nudge
+    trigger is the message" corrects logic that shipped with TASK-012:
+    `gap_analysis` composes a real provider-facing message in two cases the
+    original `missing_criteria`/`denial_risk` trigger never fires on, so the
+    message is written and never shown. The fix makes `nudge_message()` return
+    `str | None`, gives that decision exactly one home, and makes
+    `PolicyQueryData.nudge_message` nullable (`docs/api/track-b-rag.yaml`
+    changes with it, and the contract drift test guards the pair). It is a
+    correctness fix to already-shipped code, so it lands as a labelled `fix(...)`
+    commit before any of this task's new code and carries its own regression
+    tests for both previously silent cases. Do not fold it into the feature
+    commit — a bisect should be able to land between them.
+  - **Emit from the consumer, not from the route.** `transcript_consumer` is
+    what knows a procedure was ordered during a live encounter;
+    `POST /policies/query` is a query endpoint, and making it write rows and
+    publish as a side effect hands that behaviour to every future caller of it.
+    The seam is `transcript_consumer._query_for`, which already receives the
+    answer from `policy_dispatch.resolve_and_query_policy()` and throws it away.
+  - **The route's answer must carry `source`, and the emitter must not
+    reconstruct it.** `query.PolicyQueryAnswer.source` distinguishes `cache`,
+    `rag`, `crd*` and `fallback`, and the HTTP response drops it, so a consumer
+    cannot currently tell a real answer from the safe fallback. Add `source` to
+    `PolicyQueryData` (and to the OpenAPI spec) rather than inferring
+    "this looks like a fallback" from the risk level and an empty criteria list
+    — that inference is a fourth derivation of a decision this PR is busy
+    reducing to one.
+  - **`haptic` is not `denial_risk == "high"`.** It is that *and* a non-fallback
+    answer. The full reasoning — an outage must not spend the credibility of the
+    channel that genuine high-risk nudges depend on — is in CLAUDE.md with the
+    payload shape. State it in the emitter as an explicit rule with the reason
+    attached, never as a default inherited from the risk field.
+  - **`encounter_id` needs one more column on an existing SELECT.**
+    `clinical_nudges.encounter_id` is a FK to `encounters.id`, and the consumer
+    holds only `session_id`. Add `Encounter.id` to the statement in
+    `policy_dispatch.resolve_query_parameters()` and carry it on
+    `PolicyQueryParameters`. That SELECT is guarded by TASK-024 in two places,
+    because adding a patient column there would silently turn a non-PHI read
+    into a PHI one, and **both are updated deliberately as part of this
+    change** rather than being allowed to pass by coincidence:
+    - `_Row` in `tests/unit/test_policy_dispatch.py` is a fake carrying exactly
+      the four columns the real SELECT asks for, and deliberately *not* an
+      `Encounter`, so a SELECT that had started reading PHI would have nothing
+      to read it from. Adding `id` breaks it with an `AttributeError` — that is
+      the guard doing its job; add the column to the fake.
+    - The integration test in `tests/integration/test_query_parameters.py`
+      compiles the emitted SQL and asserts `patient_fhir_id`,
+      `insurance_member_id` and `ehr_encounter_id` are absent. Those assertions
+      do not change — add one naming `id` as now expected, so the column list
+      stays pinned in both directions rather than only against additions.
+    `id` is a row identifier and not a patient attribute, so the compliance
+    answer the guard protects is unchanged.
+  - **Writing the nudge is a PHI write and audits as `WRITE_NUDGE`**, added to
+    CLAUDE.md's action vocabulary in this PR — along with `QUERY_POLICY`, which
+    TASK-012 shipped in code without ever adding to that list. `resource_type`
+    is `ClinicalNudge`, `resource_id` the new row's id. Per CLAUDE.md's
+    "Auditing work that no request triggered": `actor_id` is
+    `encounters.provider_id` — never a minted service-account UUID — `session_id`
+    comes from the same row, and `ip_address`/`user_agent` are permanently
+    `None` here rather than pending, because a Redis-driven consumer has no
+    client and never will.
+  - **The audit row joins the insert's transaction**, which needs a
+    `raw_asyncpg_connection()` helper in track-b-rag's `db.py` mirroring
+    track-a-clinical's. Checked why it was omitted: `db.py` was written in
+    TASK-011, when this service's only route was `/policies/ingest` and wrote no
+    audit row at all, and it has not been touched since. TASK-012 then added an
+    audited route that writes no domain row, so nothing forced the helper then
+    either. So this is a clean gap-close and not a reversal — but note the
+    module docstring's claim that "this service's one route writes no audit row
+    at all" went stale the moment TASK-012 landed, and correct it in the same
+    change.
+  - **Thread `policy_id` through Stage 1 to fill `payer_policy_source`.** The
+    column is described on the model as "the one field that makes a nudge
+    auditable after the fact", and nothing supplies it: `RetrievedChunk` carries
+    `policy_id` and it is dropped before `PolicyRules` is built. Carry it onto
+    the Stage 1 result so the emitter can record which policy the criteria came
+    from. It is payer-scoped, not patient-scoped, so it caches under the
+    existing `rag:` key without violating the two-stage split — and make the
+    field optional so entries cached before this change still deserialise
+    instead of forcing a mass fallback on deploy.
+  - **Store, then publish, both inside the dedup claim.** The row is written
+    first because the payload carries its `nudge_id`; a client must not be able
+    to acknowledge a nudge that was never recorded. The claim from
+    `dedup.claim_procedure()` is what makes one order raise one nudge, so the
+    emit happens inside the region it protects.
+  - **A publish failure must not become a duplicate row.** `_query_for` releases
+    the claim on a transient failure so a later mention gets another attempt —
+    correct for a failed query, wrong for a stored-but-unpublished nudge, which
+    would re-insert on the retry. The retry path checks for an existing nudge
+    for that encounter and procedure before inserting, and republishes the row
+    it finds rather than writing a second one. Same reasoning as TASK-011's
+    write ordering: structure the sequence so a mid-operation failure is
+    recoverable rather than silently duplicative.
+  - Enforce that in the schema too, not only in the retry path: a partial unique
+    index on `(encounter_id, cpt_code) WHERE cpt_code IS NOT NULL`, as a real
+    Alembic migration in track-a-clinical (`alembic_version_track_a_clinical`).
+    "One nudge per procedure per encounter" is already assumed by the dedup
+    guard and by TASK-041b's acknowledge; an assumed invariant that holds only
+    because one code path remembers to check is one bad retry away from being
+    false. The `WHERE` clause is deliberate — TASK-044's keyword-only nudges
+    have a null `cpt_code` and NULLs do not collide in a unique index, so that
+    half of the invariant lands with the task that introduces the case.
+  - **This does not run end to end yet, and TASK-052b is the gate.**
+    `resolve_query_parameters()` still raises `MissingQueryParameters` for every
+    real encounter until the payer columns are populated at SMART launch, so no
+    live transcript reaches this emitter. Test against a directly constructed
+    answer rather than inventing placeholder payer values — the reasoning that
+    ruled those out in TASK-021 and TASK-024 is unchanged and is stronger here,
+    since a nudge is what a provider actually sees. Say so plainly in the build
+    notes rather than implying the path is live.
+  - **Test:** an answer with known missing criteria — verify the Redis publish
+    carries a `nudge_id` matching the stored row
+  - **Test:** a `fallback` answer publishes a nudge with `denial_risk == "high"`
+    and `haptic` false
+  - **Test:** an answer with nothing worth saying (`nudge_message is None`)
+    stores no row and publishes nothing
+  - **Test:** a publish failure after the row is stored does not produce a
+    second row when the same procedure is mentioned again
+  - **Test:** the `WRITE_NUDGE` audit row names the encounter's `provider_id` as
+    actor and carries no procedure, code or criteria text
 
 - [ ] **TASK-041:** Nudge WebSocket relay
   - Prerequisite: TASK-006 (JWT), same auth pattern as TASK-020
@@ -2959,7 +3106,10 @@ The insurance policy RAG is the technical core. Build and validate before other 
     WebSocket endpoint" — `apps/web` opens this socket too and can only use the
     subprotocol form.
   - Subscribe to `nudges:{session_id}`
-  - Forward each nudge event to connected client in real time
+  - Forward each nudge event to connected client in real time — verbatim. The
+    relay does not reshape, filter or enrich the payload; CLAUDE.md's "The nudge
+    payload — one shape" is the contract, and a relay that edits it becomes a
+    second definition of it.
   - On client disconnect: unsubscribe from Redis channel
   - **Test:** publish nudge to Redis, verify it appears at WebSocket client
   - **Test:** connect with invalid JWT, verify 4401 close
@@ -2975,6 +3125,9 @@ The insurance policy RAG is the technical core. Build and validate before other 
 - [ ] **TASK-042:** Nudge UI component (web)
   - App: `apps/web`
   - `<NudgeOverlay sessionId={...} />` — subscribes to nudge WebSocket
+  - Payload shape: CLAUDE.md, "The nudge payload — one shape". Note `cpt_code`
+    is nullable there — TASK-044 emits nudges without one, so the component must
+    render a nudge that names no code rather than assuming a string.
   - High-contrast banner, color-coded by denial_risk (yellow/orange/red)
   - Dismiss button calls `PATCH /nudges/{nudge_id}/acknowledge` (TASK-041b)
     using the `nudge_id` included in the WebSocket payload
@@ -2984,7 +3137,13 @@ The insurance policy RAG is the technical core. Build and validate before other 
 
 - [ ] **TASK-043:** Haptic nudge (mobile)
   - App: `apps/mobile`
-  - On nudge received with `haptic: true`: call `Haptics.notificationAsync()`
+  - On nudge received with `haptic: true`: call `Haptics.notificationAsync()`.
+    Trigger on that field alone — never on `denial_risk == "high"`. The emitter
+    deliberately withholds `haptic` on a high-risk answer it could not verify
+    (CLAUDE.md, "The nudge payload — one shape"), and a client that re-derives
+    the buzz from the risk level reinstates exactly the behaviour that rule
+    exists to prevent: an infrastructure outage buzzing a physician's device
+    once per procedure until they stop trusting the alert.
   - Same visual alert as web, same dismiss-calls-acknowledge behavior (TASK-041b)
   - **Test:** mock WebSocket message, verify Haptics mock called
 
@@ -3004,6 +3163,15 @@ The insurance policy RAG is the technical core. Build and validate before other 
     before ordering." It could not name missing criteria, because those come out
     of the RAG path and the RAG path needs a code to filter on. It would not be
     empty either.
+  - **The payload already has room for this and needs no new shape.**
+    CLAUDE.md's "The nudge payload — one shape" makes `cpt_code` nullable
+    precisely for this task, and TASK-042 is required to render a nudge that
+    names no code. Two things this task still owes, because TASK-040 scoped them
+    to the coded case: the `procedure_seen:` claim is held on `keyword:{keyword}`
+    rather than `cpt:{code}`, and the partial unique index TASK-040 adds on
+    `(encounter_id, cpt_code)` does not constrain rows whose `cpt_code` is null —
+    NULLs do not collide — so the once-per-encounter invariant for keyword-only
+    nudges has to be enforced here rather than assumed to be inherited.
   - **Decide first whether this clears the dismiss-fatigue bar, because the
     repository has already argued the other way once.** CLAUDE.md rejects a
     CRD-only answer on the grounds that it "would hand Stage 2 an empty criteria
