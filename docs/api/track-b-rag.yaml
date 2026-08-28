@@ -390,6 +390,7 @@ components:
         - nudge_message
         - step_therapy_required
         - step_therapy_details
+        - policy_source
         - source
       properties:
         requires_auth:
@@ -432,6 +433,14 @@ components:
         step_therapy_details:
           type: [string, 'null']
           description: What the step therapy requirement is, when there is one.
+        policy_source:
+          type: [string, 'null']
+          description: >-
+            Which indexed policy documents the criteria were read from,
+            comma-separated. Null on a fallback, where no policy text was read
+            at all. This is what a reviewer checks a nudge's criteria against,
+            so it is derived from what retrieval returned and never from the
+            model's own answer.
         source:
           type: string
           enum: [cache, rag, fallback, crd, crd+cache, crd+rag]
