@@ -554,6 +554,59 @@ The actual `.env.example` vars are `BEDROCK_MODEL_ID_FAST` and
 Fixed here; use the `_FAST`/`_REASONING` names in code, never hardcode a
 model ID string.
 
+### Extracted clinical codes — one JSON shape (cross-cutting)
+`clinical_notes.icd10_codes` and `clinical_notes.cpt_codes` are JSONB, and
+TASK-005 fixed the columns without fixing what goes inside them. Four consumers
+have to agree: TASK-030's Haiku pass writes them, TASK-031 validates the ICD-10
+half against Comprehend Medical and needs somewhere to record what it found,
+TASK-060 reads `icd10_codes` as a bundle's diagnoses, and TASK-072's review
+screen renders both. A bare list of code strings would have to break every one
+of them the moment TASK-031 lands, so the shape is fixed here before the first
+row is written rather than migrated afterwards.
+
+Both columns hold a **JSON array of objects**, the same shape in each:
+
+```json
+[
+  {
+    "code": "M17.11",
+    "display": "Unilateral primary osteoarthritis, right knee",
+    "source": "llm-extraction",
+    "confidence": null,
+    "validation": null
+  }
+]
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `code` | `str`, required | ICD-10-CM carries its dot (`M17.11`); CPT is five characters (`73721`). Uppercased on write, so every later comparison is plain string equality — the same reasoning as the payer slug above. |
+| `display` | `str \| None` | The source's own description, never one invented to fill the field. |
+| `source` | `"llm-extraction" \| "comprehend-medical"` | Which pass proposed this code. |
+| `confidence` | `float \| None`, 0.0–1.0 | The proposing source's own score. **`None` for every `llm-extraction` entry** — Haiku is not asked to rate itself, because a number a model invents about its own output is not a measurement and would be indistinguishable from Comprehend's calibrated score once both sit in the same column. |
+| `validation` | object \| `None` | Written by TASK-031; absent until it runs. |
+| `validation.source` | `"comprehend-medical"` | The validating pass. |
+| `validation.confidence` | `float \| None` | Comprehend's score for the matching entity, or `None` when it returned no such entity at all. |
+| `validation.confirmed` | `bool` | Whether the validating source produced this code at or above TASK-031's 0.8 threshold. |
+
+**`validation: null` means "not checked yet" and never "checked and rejected".**
+An unconfirmed code and an unvalidated one are different facts, and collapsing
+them makes a code Comprehend Medical actively failed to find look exactly like
+one written before TASK-031 existed. This is the distinction this document
+already insists on for a silent payer — no determination is not a negative
+determination — one layer down and with the same consequence if ignored.
+
+**CPT entries keep `validation: null` indefinitely, and that is not a bug.**
+Comprehend Medical infers ICD-10-CM, RxNorm and SNOMED CT and has no CPT
+inference of any kind, so nothing in the current design can validate the CPT
+half. TASK-031 is scoped to ICD-10 for that reason.
+
+The Pydantic model for this shape lives beside the mapped classes in
+`services/track-a-clinical/src/track_a_clinical/models/`, for the reason that
+section already gives: the alternative is prior-auth and the web app each
+re-deriving it from the column, which is how two definitions of one contract
+drift apart.
+
 ### Migration Ownership vs. Table Write Access (clarifies TASK-005)
 "Owns the schema" means owns the Alembic migration history for those tables —
 it does not mean only that service may read/write them. `clinical_nudges` is
@@ -792,6 +845,72 @@ async def audit_log(
 `ip_address` and `user_agent` are optional and default to None until a request-context
 mechanism (likely FastAPI middleware) populates them automatically in a later task.
 Ship them as real parameters, not permanently-empty columns silently filled with NULL.
+
+### Auditing work that no request triggered (cross-cutting — every consumer)
+Every rule about `audit_log()` above this line is written for a route. Known
+Constraints #6 in TASKS.md says "every new API route needs ... an `audit_log()`
+call if and only if the route touches PHI", and `ip_address`/`user_agent` are
+described as waiting on request-context middleware that will populate them.
+Phase 3 breaks that assumption: TASK-030 generates a SOAP note when a Redis
+signal arrives and TASK-060 assembles a prior-auth bundle from the same signal.
+Both read an entire encounter's clinical content and write a new PHI record, and
+neither has a request, a caller, or a client behind it. Settled here once,
+because the two tasks are the same shape and solving it twice is how they end up
+disagreeing.
+
+- **The "if and only if it touches PHI" test is unchanged — only the trigger
+  is.** A consumer that reads or writes patient data audits. That the work was
+  started by a pub/sub message rather than an HTTP request is not grounds to
+  skip the row; it is the reason no other record of the access exists.
+- **`actor_id` is `encounters.provider_id`, read from the encounter row.** The
+  signal carries no identity — `session:ended:{session_id}` has an empty payload
+  by design and `sessions:started` carries only a session id. The provider who
+  opened the visit is who the work is done for and is the only defensible actor.
+  Never mint a service-account UUID to fill the field: `actor_id` is nullable,
+  and a fabricated identifier in an audit trail is worse than an honest null.
+  This is the same rule as "the provider comes from the `encounters` row, never
+  from the presented token's claim" in the session section above.
+- **`session_id` comes from the same row**, not from parsing it back out of the
+  channel name in a handler that has already loaded the encounter.
+- **`ip_address` and `user_agent` are permanently `None` here, not pending.**
+  There is no client. The middleware that will populate them for routes will
+  never populate them for a consumer, and a later reader should not mistake this
+  for the gap that middleware closes.
+- **One row per unit of work, never one per message.** TASK-030 buffers hundreds
+  of transcript segments and writes one note: the auditable access is the
+  generation — which reads the accumulated transcript and produces the record —
+  not each segment arriving on the bus. A row per segment would bury the events
+  an audit is actually asked about under per-message noise, the same argument
+  that keeps health probes out of this table.
+- **The audit row joins the transaction that does the work**, through
+  `audit_log(..., conn=...)`, exactly as `track_a_clinical.audit` already does
+  for routes. A note that exists with no audit row, and an audit row for a note
+  that rolled back, are both worse than the write failing outright.
+
+**The action vocabulary is this list, and it is authoritative.** Each service's
+`audit.py` declares constants only from here, and a task needing an action that
+is not listed adds it to this list in the same PR — the same rule the Redis key
+list carries, for the same reason. Until now this vocabulary existed only as
+three examples in a comment on the `audit_log` schema above, which is how
+`WRITE_NOTE` came to be cited by a task while no service defined it.
+
+| Action | Written by | Meaning |
+|---|---|---|
+| `START_SESSION` | track-a-clinical (TASK-006) | An encounter was opened |
+| `END_SESSION` | track-a-clinical (TASK-006) | An encounter was closed |
+| `READ_ENCOUNTER` | track-a-clinical (TASK-006) | An `encounters` row was read |
+| `REMINT_SESSION_TOKEN` | track-a-clinical (TASK-006b) | A session's token was refreshed |
+| `WRITE_NOTE` | track-a-clinical (TASK-030) | A SOAP note was generated and stored |
+| `READ_NOTE` | track-a-clinical (TASK-032), prior-auth (TASK-060) | A `clinical_notes` row was read |
+| `UPDATE_NOTE` | track-a-clinical (TASK-032) | A provider edited a stored note |
+| `READ_NUDGE` | prior-auth (TASK-060) | An encounter's `clinical_nudges` rows were read |
+| `WRITE_PRIOR_AUTH` | prior-auth (TASK-060) | A prior-auth bundle was assembled and stored |
+| `SUBMIT_PRIOR_AUTH` | prior-auth (TASK-061) | A bundle was transmitted to a payer |
+| `READ_PATIENT` | fhir-integration (Phase 5) | Patient context was read from an EHR |
+
+`resource_type` is the resource name the row is about — `Encounter`,
+`ClinicalNote`, `ClinicalNudge`, `PriorAuthRequest`, `Patient` — and
+`resource_id` is that row's primary key.
 
 ### Alembic version table isolation
 hipaa-logger's migrations and each service's migrations run against the same database.

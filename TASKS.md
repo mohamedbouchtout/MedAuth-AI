@@ -2488,10 +2488,18 @@ The insurance policy RAG is the technical core. Build and validate before other 
 - [ ] **TASK-030:** Transcript accumulation + SOAP generation
   - Prerequisite: TASK-006 (session-end signal), TASK-020/021 (transcript events)
   - Service: `services/track-a-clinical`
+  - This is also the Track A half of TASK-021's fan-out, which that task
+    deliberately left to be built here. Subscription discipline is inherited
+    from it and not re-derived: subscribe per session on `sessions:started`,
+    **never** by pattern on `transcription:*`, and release on
+    `session:ended:{session_id}`. `track_b_rag/transcript_consumer.py` is the
+    working precedent for the shape, including the restart gap below.
   - Subscribe to `transcription:{session_id}` — accumulate segments into a rolling
     transcript buffer per session, in-memory (not persisted mid-session; the
     session is short enough that a service restart mid-encounter is an accepted
-    edge case for v1, not something to build recovery for yet)
+    edge case for v1, not something to build recovery for yet). A restart
+    therefore loses the visits in flight, exactly as TASK-021's consumer does,
+    and logs at WARNING naming the count rather than pretending otherwise.
   - Subscribe to `session:ended:{session_id}` (published by TASK-006) — on
     receipt, call Claude **Sonnet** via Bedrock with the full accumulated
     transcript (see CLAUDE.md "Bedrock Model Assignment" — SOAP generation is
@@ -2500,14 +2508,76 @@ The insurance policy RAG is the technical core. Build and validate before other 
     ICD-10 codes and anticipated CPT codes — two calls, not one, so the cheap
     model handles the mechanical extraction and the expensive model focuses on
     the clinical writing
-  - Store result in `clinical_notes` table
+  - Store result in `clinical_notes` table. The `icd10_codes` and `cpt_codes`
+    JSONB columns take the object shape fixed in CLAUDE.md "Extracted clinical
+    codes — one JSON shape": every entry written here is `source:
+    "llm-extraction"` with `confidence: null` and `validation: null`, and
+    TASK-031 fills the validation half in place. Do not write bare code strings.
+  - **Ordering on the end signal, in this order and for this reason.**
+    Unsubscribe from the session's channels first, so no segment arrives during
+    generation and no second end signal is processed. Then keep the in-memory
+    buffer alive across the whole Sonnet call, the Haiku call and the database
+    write, and drop it **only after the row is durably committed.** Structuring
+    it the other way — releasing the buffer when the signal arrives, the way the
+    Track B consumer releases its dedup claim — makes any mid-operation failure
+    silent and unrecoverable: the transcript is gone, no note exists, and
+    nothing anywhere records that an encounter produced nothing. Holding the
+    buffer means a failed generation is retryable, which is safe precisely
+    because the write is idempotent per the next bullet. Same reasoning as
+    TASK-011's Qdrant-first/Postgres-second ordering. TASK-060's documented race
+    against this task depends on the timing here, so it is stated rather than
+    left to the implementation.
+  - **`clinical_notes.encounter_id` gets a real UNIQUE constraint, added by
+    migration in this task, and the insert is `ON CONFLICT DO NOTHING`.**
+    TASK-060 already treats "at most one note per encounter" as true while
+    nothing enforces it. Redis pub/sub redelivery, a consumer reconnect, or any
+    retry of the bullet above would otherwise spend a second Sonnet call and
+    leave a second row that TASK-060 was not built to see — and neither the
+    duplicate call nor the duplicate row would raise anything. Same defensive
+    write as TASK-011's `_record_policy`, with `DO NOTHING` rather than `DO
+    UPDATE` because the first note generated for an encounter is the one to
+    keep: a retry has no better information than the attempt it follows, and
+    TASK-032's provider edits must not be silently overwritten by a late
+    duplicate signal.
+  - **Audit:** this consumer reads a whole encounter's speech and writes a PHI
+    record with no request behind it. It audits `WRITE_NOTE` per CLAUDE.md
+    "Auditing work that no request triggered" — `actor_id` from
+    `encounters.provider_id`, one row per generated note and not one per
+    segment, on the same transaction as the insert. A generation suppressed by
+    `ON CONFLICT DO NOTHING` wrote no note and audits nothing.
+  - **`GET /health` is added to this service in this task**, with
+    `transcript_consumer` and `session_end_consumer` flags, matching
+    track-b-rag's existing endpoint rather than inventing a second convention
+    (envelope on 503, no `audit_log()` call, flags in `data`). Both flags
+    because this task subscribes to both channel families. The justification is
+    the one TASK-021 already made and is stronger here: a dead consumer stops
+    every future SOAP note for every encounter on the pod, and nothing else in
+    the system notices — TASK-060 would simply wait out its retries and log a
+    warning per visit. track-a-clinical has no health endpoint at all today,
+    which is its own gap.
+  - **Config:** add `aws_region` and the Bedrock model ids
+    (`BEDROCK_MODEL_ID_FAST`, `BEDROCK_MODEL_ID_REASONING`) to `Settings`
+    alongside the existing `redis_url`. All three already exist in
+    `.env.example`; the model id is never a literal in code.
   - **Test:** send sample orthopedic encounter transcript, verify SOAP structure returned
   - **Test:** publish `session:ended:{session_id}` with an accumulated transcript
     buffered from prior TASK-020 test data, verify clinical_notes row is created
+  - **Test:** publish `session:ended:{session_id}` twice, verify exactly one
+    `clinical_notes` row and exactly one Sonnet call
+  - **Test:** a failing database write leaves the buffer held, and a retry of the
+    same session still produces a note
+  - **Test:** `GET /health` reports 503 naming the stopped consumer when the
+    consumer task is not running
 
 - [ ] **TASK-031:** Comprehend Medical validation layer
   - After LLM extracts ICD-10 codes (TASK-030's Haiku pass), validate with AWS
     Comprehend Medical InferICD10CM
+  - Writes into the `validation` half of each entry's object, per CLAUDE.md
+    "Extracted clinical codes — one JSON shape" — the column shape TASK-030
+    already writes has the field waiting, so this task adds no migration.
+    ICD-10 only: Comprehend Medical has no CPT inference, so `cpt_codes`
+    entries keep `validation: null` and that is the designed outcome, not a
+    gap this task should paper over.
   - Flag any codes LLM returned that Comprehend Medical did not confirm (confidence < 0.8)
   - Log discrepancies for quality monitoring — via standard `logging`, not
     hipaa-logger (this is a quality metric, not a PHI access event; log the
@@ -2867,6 +2937,11 @@ logic do not change.
 - [ ] **TASK-060:** Bundle assembler
   - Prerequisite: TASK-006 (session:ended signal), TASK-030 (clinical_notes must
     exist before this runs), TASK-040 (clinical_nudges), TASK-052 (FHIR patient data)
+  - "At most one clinical_note per encounter" is an enforced invariant, not an
+    assumption: TASK-030 added a UNIQUE constraint on
+    `clinical_notes.encounter_id` and writes through `ON CONFLICT DO NOTHING`.
+    Fetch the row expecting zero or one, and treat two as impossible rather
+    than writing a tie-breaker for it.
   - Service: `services/prior-auth`
   - Subscribe to `session:ended:{session_id}` per CLAUDE.md's Redis key list
   - On receipt: fetch clinical_note (by encounter's session_id), nudges fired
