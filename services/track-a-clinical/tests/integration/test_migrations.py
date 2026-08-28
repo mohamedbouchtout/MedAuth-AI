@@ -118,6 +118,70 @@ async def test_upgrade_creates_every_index(engine: AsyncEngine) -> None:
     assert set(CORE_INDEXES) <= present
 
 
+# --- one nudge per procedure per encounter (TASK-040, migration 0005) -------
+#
+# Asserted as behaviour against the real database rather than by reflecting the
+# index definition. The point of the constraint is that a second insert fails,
+# and a partial unique index is exactly the kind of DDL where the predicate can
+# be right in the migration and wrong in effect.
+
+
+def _an_encounter(connection: sa.Connection) -> str:
+    """Insert a throwaway encounter and return its id. Runs inside ``run_sync``."""
+    return str(
+        connection.execute(
+            sa.text(
+                "INSERT INTO encounters (session_id, patient_fhir_id, provider_id) "
+                "VALUES (gen_random_uuid(), 'synthea-placeholder-0', gen_random_uuid()) "
+                "RETURNING id"
+            )
+        ).scalar_one()
+    )
+
+
+def _add_nudge(connection: sa.Connection, encounter_id: str, cpt_code: str | None) -> None:
+    connection.execute(
+        sa.text(
+            "INSERT INTO clinical_nudges (encounter_id, cpt_code, procedure_name) "
+            "VALUES (:encounter_id, :cpt_code, 'knee MRI')"
+        ),
+        {"encounter_id": encounter_id, "cpt_code": cpt_code},
+    )
+
+
+async def test_a_second_nudge_for_the_same_code_is_rejected(engine: AsyncEngine) -> None:
+    """The retry path's safety net: a stored-then-unpublished nudge cannot double."""
+
+    def attempt(connection: sa.Connection) -> None:
+        encounter_id = _an_encounter(connection)
+        _add_nudge(connection, encounter_id, "73721")
+        with pytest.raises(sa.exc.IntegrityError):
+            _add_nudge(connection, encounter_id, "73721")
+
+    async with engine.begin() as connection:
+        await connection.run_sync(attempt)
+        await connection.rollback()
+
+
+async def test_two_nudges_with_no_code_coexist(engine: AsyncEngine) -> None:
+    """TASK-044's case is deliberately unconstrained here.
+
+    NULLs do not collide in a unique index, so keyword-only nudges are outside
+    this index by construction. Pinned as a test because it is the half of the
+    invariant that is *not* enforced yet, and a later reader should find that
+    stated rather than discover it from a duplicate in production.
+    """
+
+    def attempt(connection: sa.Connection) -> None:
+        encounter_id = _an_encounter(connection)
+        _add_nudge(connection, encounter_id, None)
+        _add_nudge(connection, encounter_id, None)
+
+    async with engine.begin() as connection:
+        await connection.run_sync(attempt)
+        await connection.rollback()
+
+
 async def test_version_table_is_namespaced_and_the_default_is_unused(
     engine: AsyncEngine,
 ) -> None:

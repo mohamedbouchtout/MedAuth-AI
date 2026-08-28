@@ -37,7 +37,19 @@ class ClinicalNudge(Base):
     """A prior-authorization alert raised mid-encounter."""
 
     __tablename__ = "clinical_nudges"
-    __table_args__ = (sa.Index("idx_clinical_nudges_encounter", "encounter_id"),)
+    __table_args__ = (
+        sa.Index("idx_clinical_nudges_encounter", "encounter_id"),
+        # One nudge per procedure per encounter (migration 0005). Partial,
+        # because TASK-044's keyword-only nudges carry no code and NULLs do not
+        # collide — see the migration for why that half waits for its own task.
+        sa.Index(
+            "uq_clinical_nudges_encounter_cpt",
+            "encounter_id",
+            "cpt_code",
+            unique=True,
+            postgresql_where=sa.text("cpt_code IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = uuid_primary_key()
     encounter_id: Mapped[uuid.UUID] = mapped_column(
