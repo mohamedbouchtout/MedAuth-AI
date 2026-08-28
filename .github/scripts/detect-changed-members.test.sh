@@ -82,8 +82,18 @@ assert_members 'nothing changed selects nothing' '' '[]'
 section 'service and package selection'
 assert_members 'a service selects only itself' \
   'services/track-b-rag/src/x.py' '["services/track-b-rag"]'
-assert_members 'track-a-clinical also selects audio-ingestion' \
+# Three couplings at once: the JWT contract test in audio-ingestion, and the
+# shared SQLAlchemy models that track-b-rag and policy-scraper import from this
+# service rather than mapping their own.
+assert_members 'track-a-clinical src selects its dependents' \
   'services/track-a-clinical/src/x.py' \
+  '["services/audio-ingestion","services/policy-scraper","services/track-a-clinical","services/track-b-rag"]'
+
+# The model dependents hang off src/ specifically. A migration or a test is not
+# code those services import, so it selects the JWT pairing and no more — the
+# rule stays as narrow as the coupling it stands for.
+assert_members 'a track-a-clinical migration selects only the JWT pairing' \
+  'services/track-a-clinical/migrations/versions/0005_x.py' \
   '["services/audio-ingestion","services/track-a-clinical"]'
 assert_members 'a spec and its own service dedupe to one entry' \
   "$(printf 'docs/api/track-b-rag.yaml\nservices/track-b-rag/src/x.py')" \
