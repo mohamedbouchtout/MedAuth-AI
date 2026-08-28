@@ -15,7 +15,7 @@ botocore's own service model for the operation rather than from prose docs:
 ``Entities`` is a list; each entity carries ``Score``, ``Text``, ``Category``,
 ``Type`` and a nested ``ICD10CMConcepts`` list; each concept carries
 ``Description``, ``Code`` and its own ``Score``. Both score fields are real and
-distinct, which is the distinction :func:`track_a_clinical.comprehend._best_scores`
+distinct, which is the distinction :func:`track_a_clinical.comprehend._best_concepts`
 turns on.
 
 **What is UNVERIFIED** is the format of ``ICD10CMConcept.Code``. ICD-10-CM has
@@ -88,6 +88,17 @@ THREE_CLEAR_DIAGNOSES: dict[str, Any] = response(
 #: the case the entity/concept score distinction exists for.
 WEAKLY_LINKED: dict[str, Any] = response(
     entity("some joint discomfort", concepts=[("M17.11", 0.42)], entity_score=0.99),
+)
+
+#: One clear diagnosis alongside a candidate concept Comprehend was unsure of.
+#: The pair is what separates "propose this" from "propose everything the
+#: service listed": ``InferICD10CM`` returns several candidate concepts per
+#: entity and most of them are wrong.
+ONE_STRONG_ONE_WEAK: dict[str, Any] = response(
+    entity(
+        "essential hypertension",
+        concepts=[("I10", 0.96), ("I11.9", 0.31)],
+    ),
 )
 
 #: Comprehend found nothing at all. A real possibility for a short or

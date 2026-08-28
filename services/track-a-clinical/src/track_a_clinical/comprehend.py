@@ -1,10 +1,21 @@
-"""Checking the LLM's ICD-10 codes against AWS Comprehend Medical.
+"""Reconciling the LLM's ICD-10 codes with AWS Comprehend Medical.
 
 TASK-030's Haiku pass proposes ICD-10-CM codes from an encounter transcript.
 This module asks a second, independent source — Comprehend Medical's
-``InferICD10CM`` — what codes it finds in the same transcript, and records the
-answer in the ``validation`` half of each entry per CLAUDE.md "Extracted
-clinical codes — one JSON shape".
+``InferICD10CM`` — what codes it finds in the same transcript, and uses the one
+answer for both halves of the comparison, per CLAUDE.md "Extracted clinical
+codes — one JSON shape": what Comprehend says about the codes the LLM proposed
+goes in each entry's ``validation``, and what Comprehend found that the LLM did
+not is appended as its own ``comprehend-medical`` entry.
+
+**A code only Comprehend found is a suggestion, not a stated diagnosis.**
+Nobody in the encounter said it and no note asserted it — a machine read it out
+of the transcript. It is written into the same column because that is where a
+provider will review it, and it stays distinguishable there by ``source`` and
+by carrying a ``confidence`` an ``llm-extraction`` entry structurally cannot
+have. What each consumer owes such an entry is fixed in CLAUDE.md, not decided
+here: TASK-072 shows it as a suggestion, and TASK-060 does not claim it in a
+prior-auth bundle as a diagnosis the provider stated.
 
 **The transcript is the input, never the generated note.** Validating the LLM's
 codes against text the same LLM wrote measures self-consistency rather than
@@ -13,8 +24,8 @@ encounter, so it would agree with itself and confirm nothing. The transcript is
 the independent source both passes derive from.
 
 **This pass is never fatal.** A Comprehend failure — throttling, an outage, a
-text-size rejection — leaves every entry's ``validation`` at ``None`` and the
-note is stored anyway. The note is what the provider is waiting for; validation
+text-size rejection — leaves every entry's ``validation`` at ``None``, adds
+nothing, and the note is stored anyway. The note is what the provider is waiting for; validation
 is secondary metadata about it, and blocking the first on the second trades the
 thing that matters for the thing that annotates it. ``validation is None``
 already means exactly "not checked yet", so an unvalidated note needs no extra
@@ -38,7 +49,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from functools import lru_cache
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 import boto3
 
@@ -62,6 +73,21 @@ logger = logging.getLogger(__name__)
 #: provisional in the meantime, exactly as CLAUDE.md treats
 #: ``SESSION_REMINT_GRACE_SECONDS``.
 CONFIRMATION_THRESHOLD: Final = 0.8
+
+#: The score at or above which a code the LLM never proposed is written as its
+#: own entry.
+#:
+#: **Also unvalidated, and deliberately a separate constant from
+#: :data:`CONFIRMATION_THRESHOLD` even though it currently holds the same
+#: value.** The two answer different questions and are expected to diverge once
+#: a real distribution of scores exists: confirming a code a second source
+#: already proposed is a weaker claim than asserting one nothing in the
+#: encounter's documentation asserted. ``InferICD10CM`` returns several
+#: candidate concepts per detected entity, most of which are wrong, so this bar
+#: is what stops every near-miss candidate from landing in a clinical note. If
+#: the two ever need to move together, that is a finding to record rather than a
+#: reason to collapse them back into one name.
+PROPOSAL_THRESHOLD: Final = 0.8
 
 #: The hard limit on one ``InferICD10CM`` request, in characters.
 #:
@@ -104,7 +130,7 @@ def split_for_requests(text: str, limit: int = MAX_REQUEST_CHARACTERS) -> list[s
 
     A single token longer than ``limit`` — which no transcript of speech
     produces, but a corrupted segment might — is emitted as its own oversized
-    chunk rather than being cut. :func:`validate_icd10` reports it as uncovered
+    chunk rather than being cut. :func:`reconcile_icd10` reports it as uncovered
     instead of quietly sending a truncated version.
 
     Args:
@@ -134,8 +160,21 @@ def split_for_requests(text: str, limit: int = MAX_REQUEST_CHARACTERS) -> list[s
     return chunks
 
 
-def _best_scores(response: dict[str, Any]) -> dict[str, float]:
-    """Reduce one ``InferICD10CM`` response to the best score per code.
+class _Concept(NamedTuple):
+    """One ICD-10-CM concept Comprehend linked a span of transcript to.
+
+    ``code`` is kept in Comprehend's own spelling: the entry written from it
+    goes through ``ExtractedCode``'s canonicaliser, which is the one place a
+    stored code's dot placement is decided.
+    """
+
+    code: str
+    display: str | None
+    score: float
+
+
+def _best_concepts(response: dict[str, Any]) -> dict[str, _Concept]:
+    """Reduce one ``InferICD10CM`` response to the best concept per code.
 
     The score read is ``ICD10CMConcept.Score`` and deliberately not the
     entity-level ``Score``. The botocore service model separates their meanings:
@@ -153,8 +192,11 @@ def _best_scores(response: dict[str, Any]) -> dict[str, float]:
     One code can be inferred from several spans in a long transcript. The
     highest score wins: a condition mentioned once in passing and once in the
     assessment should be judged on the mention Comprehend read most clearly.
+    ``Description`` travels with the score it was reported alongside, so an
+    entry proposed from this never pairs one span's wording with another
+    span's confidence.
     """
-    best: dict[str, float] = {}
+    best: dict[str, _Concept] = {}
     for entity in response.get("Entities", []):
         for concept in entity.get("ICD10CMConcepts", []):
             code = concept.get("Code")
@@ -162,8 +204,14 @@ def _best_scores(response: dict[str, Any]) -> dict[str, float]:
             if not code or score is None:
                 continue
             key = matching_key(str(code))
-            if key and score > best.get(key, -1.0):
-                best[key] = float(score)
+            previous = best.get(key)
+            if key and (previous is None or score > previous.score):
+                description = concept.get("Description")
+                best[key] = _Concept(
+                    code=str(code),
+                    display=str(description) if description else None,
+                    score=float(score),
+                )
     return best
 
 
@@ -181,36 +229,44 @@ async def _infer_icd10(text: str) -> dict[str, Any]:
     return result
 
 
-async def validate_icd10(codes: list[ExtractedCode], transcript: str) -> list[ExtractedCode]:
-    """Return `codes` with each LLM-extracted entry's ``validation`` filled in.
+async def reconcile_icd10(codes: list[ExtractedCode], transcript: str) -> list[ExtractedCode]:
+    """Reconcile the LLM's ICD-10 codes with what Comprehend Medical reads.
 
-    Entries are returned in their original order, as new objects — nothing is
-    mutated in place. An entry that is not an ``llm-extraction`` is passed
-    through untouched, since this pass exists to check what the LLM proposed.
+    Two things come out of the one request, because they come out of one
+    response and a second call would cost a second round trip to say the same
+    thing:
 
-    Codes Comprehend found that the LLM did not are **not** added here. That is
-    TASK-031b: proposing a diagnosis nobody stated is a different question from
-    checking one that was, and it needs its own decision before anything writes
-    such an entry.
+    * Every ``llm-extraction`` entry gets its ``validation`` filled in — see
+      :func:`_validated` for the three outcomes it distinguishes.
+    * Codes Comprehend found that the LLM never proposed are **appended** as
+      their own ``comprehend-medical`` entries, above
+      :data:`PROPOSAL_THRESHOLD` — see :func:`_discovered`.
+
+    So the returned list can be longer than the one passed in. The entries that
+    arrived keep their original order and are returned as new objects; nothing
+    is mutated in place. An entry that is not an ``llm-extraction`` is passed
+    through untouched — this pass checks what the LLM proposed, and a code
+    Comprehend itself proposed has nothing independent left to check it.
 
     On any failure — a Comprehend error, or a transcript with nothing in it —
     the codes come back exactly as they arrived, every ``validation`` still
-    ``None``, meaning "not checked yet". The caller stores the note regardless.
+    ``None``, meaning "not checked yet", and nothing is appended. The caller
+    stores the note regardless.
 
     Args:
-        codes: The ICD-10 entries from TASK-030's Haiku pass.
+        codes: The ICD-10 entries from TASK-030's Haiku pass. May be empty:
+            an encounter the extraction pass found no diagnosis in is where
+            discovery is worth the most, so it is not a reason to skip the call.
         transcript: The encounter transcript, the independent source.
 
     Returns:
-        The entries, validated where this pass could reach them.
+        The entries, validated where this pass could reach them, followed by
+        any codes only Comprehend found.
     """
-    if not codes:
-        return codes
-
     chunks = split_for_requests(transcript)
     if not chunks:
         logger.warning(
-            "No transcript text to validate %d ICD-10 code(s) against; leaving them unchecked",
+            "No transcript text to check %d ICD-10 code(s) against; leaving them unchecked",
             len(codes),
         )
         return codes
@@ -227,7 +283,7 @@ async def validate_icd10(codes: list[ExtractedCode], transcript: str) -> list[Ex
             MAX_REQUEST_CHARACTERS,
         )
 
-    best: dict[str, float] = {}
+    best: dict[str, _Concept] = {}
     examined = 0
     for index, chunk in enumerate(chunks):
         if index in oversized:
@@ -244,29 +300,68 @@ async def validate_icd10(codes: list[ExtractedCode], transcript: str) -> list[Ex
             )
             continue
         examined += 1
-        for key, score in _best_scores(response).items():
-            if score > best.get(key, -1.0):
-                best[key] = score
+        for key, concept in _best_concepts(response).items():
+            previous = best.get(key)
+            if previous is None or concept.score > previous.score:
+                best[key] = concept
 
     if examined == 0:
         logger.warning(
-            "No transcript chunk could be validated; %d ICD-10 code(s) remain unchecked",
+            "No transcript chunk could be checked; %d ICD-10 code(s) remain unchecked",
             len(codes),
         )
         return codes
 
     if examined < len(chunks):
+        # Incomplete coverage can only cost a confirmation or a proposal, never
+        # invent one — but it is still named, per CLAUDE.md's rule that a
+        # partial analysis is never presented as a complete one.
         logger.warning(
-            "Validated %d of %d transcript chunks; a code stated only in an "
-            "unexamined chunk may be reported unconfirmed",
+            "Checked %d of %d transcript chunks; a code stated only in an "
+            "unexamined chunk may be reported unconfirmed or missed entirely",
             examined,
             len(chunks),
         )
 
-    return [_validated(code, best) for code in codes]
+    return [_validated(code, best) for code in codes] + _discovered(best, codes)
 
 
-def _validated(code: ExtractedCode, best: dict[str, float]) -> ExtractedCode:
+def _discovered(best: dict[str, _Concept], existing: list[ExtractedCode]) -> list[ExtractedCode]:
+    """Return entries for the codes only Comprehend found.
+
+    A code already present in ``existing`` is skipped whatever its source: this
+    adds what is missing, and an entry here alongside a validated one would be
+    two rows for one diagnosis — the duplication
+    :func:`~track_a_clinical.models.matching_key` exists to prevent, arriving
+    from the other direction.
+
+    Ordered by descending score so a reviewer meets the strongest suggestion
+    first, with the code as a tiebreak so the same response always produces the
+    same list. Logged at INFO with codes and scores only — never the span they
+    were read from.
+    """
+    known = {matching_key(code.code) for code in existing}
+    candidates = [
+        concept
+        for key, concept in best.items()
+        if key not in known and concept.score >= PROPOSAL_THRESHOLD
+    ]
+    if not candidates:
+        return []
+
+    candidates.sort(key=lambda concept: (-concept.score, matching_key(concept.code)))
+    logger.info(
+        "Comprehend Medical found %d ICD-10 code(s) the extraction pass did not: %s",
+        len(candidates),
+        ", ".join(f"{concept.code} ({concept.score:.3f})" for concept in candidates),
+    )
+    return [
+        ExtractedCode.from_comprehend(concept.code, concept.display, concept.score)
+        for concept in candidates
+    ]
+
+
+def _validated(code: ExtractedCode, best: dict[str, _Concept]) -> ExtractedCode:
     """Return one entry with its validation recorded, logging a discrepancy.
 
     Three outcomes, and the middle one is the reason ``confidence`` is nullable:
@@ -284,7 +379,8 @@ def _validated(code: ExtractedCode, best: dict[str, float]) -> ExtractedCode:
     if code.source != SOURCE_LLM_EXTRACTION:
         return code
 
-    score = best.get(matching_key(code.code))
+    concept = best.get(matching_key(code.code))
+    score = None if concept is None else concept.score
     confirmed = score is not None and score >= CONFIRMATION_THRESHOLD
 
     if not confirmed:
