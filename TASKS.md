@@ -2485,7 +2485,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
 
 ## Phase 3 — Clinical Note Generation (Track A)
 
-- [ ] **TASK-030:** Transcript accumulation + SOAP generation
+- [x] **TASK-030:** Transcript accumulation + SOAP generation
   - Prerequisite: TASK-006 (session-end signal), TASK-020/021 (transcript events)
   - Service: `services/track-a-clinical`
   - This is also the Track A half of TASK-021's fan-out, which that task
@@ -2568,6 +2568,46 @@ The insurance policy RAG is the technical core. Build and validate before other 
     same session still produces a note
   - **Test:** `GET /health` reports 503 naming the stopped consumer when the
     consumer task is not running
+  - Built (227 tests, 100% coverage; 608 in track-b-rag still pass unchanged).
+    Decisions worth knowing before touching this:
+    - **`packages/bedrock-client` was extracted here**, because this service
+      became the second Bedrock caller and the honest description of what it
+      needed was track-b-rag's `bedrock.py`. Sharing without a package was not
+      available: track-b-rag already imports `track_a_clinical.models`, so the
+      reverse import would be a cycle. The package holds client construction
+      plus the two functions that fail *quietly* when wrong — `message_text`,
+      for `AIMessage.content` being a block list rather than a string, and
+      `first_json_object`, the balanced-brace scanner. Each service keeps its
+      own settings-coupled factory and its own cache, because its settings are
+      what decide when a client is stale. Same argument as api-envelope in
+      TASK-010.
+    - **The two passes fail independently and only one of them is fatal.** No
+      SOAP note means no row and a retained buffer. A failed extraction still
+      stores the note, with `icd10_codes` and `cpt_codes` NULL rather than `[]`
+      — the column then records that the codes were never determined instead of
+      claiming the visit had none, which is the same distinction the `validation`
+      field carries one level down.
+    - **A duplicate end signal is guarded twice, at different costs.** The
+      unique constraint stops the second row; an in-flight set keyed by session
+      stops the second pair of LLM calls, which the constraint cannot. A
+      redelivery arriving before the unsubscribe takes effect is the case only
+      the second guard covers.
+    - **Generation runs as its own task**, so one note being written does not
+      stall transcript accumulation for every other encounter on the pod. On
+      shutdown they are cancelled and the count is logged: their transcripts are
+      in memory and go with the process.
+    - `GET /health` reports `redis` and `transcript_consumer` and deliberately
+      **not** a separate session-end flag. One task on one subscription serves
+      all three channel families, so a second flag could never disagree with the
+      first, and a probe that cannot fail independently implies coverage that
+      does not exist. Split the end handling onto its own task and it earns one.
+    - No new environment variables. `AWS_REGION`, `BEDROCK_MODEL_ID_FAST` and
+      `BEDROCK_MODEL_ID_REASONING` were already in `.env.example`; this task
+      only added them to `Settings`.
+    - CI gained one entry: `bedrock-client` in `ALL_PACKAGES` in
+      `detect-changed-members.sh`, with a case in its test. The `test` matrix is
+      generated from that array, so no new job was needed and `ci-passed`'s
+      `needs` is unchanged.
 
 - [ ] **TASK-031:** Comprehend Medical validation layer
   - After LLM extracts ICD-10 codes (TASK-030's Haiku pass), validate with AWS
