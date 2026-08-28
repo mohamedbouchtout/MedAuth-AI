@@ -103,6 +103,9 @@ EXPECTED_COLUMNS = {
     ],
 }
 
+#: TASK-005 names seven indexes; anything beyond them was added by a later
+#: migration and is listed with the task that added it, so this stays an
+#: equality rather than becoming a subset check.
 EXPECTED_INDEXES = {
     "idx_encounters_session",
     "idx_encounters_provider",
@@ -111,6 +114,9 @@ EXPECTED_INDEXES = {
     "idx_prior_auth_encounter",
     "idx_prior_auth_status",
     "idx_insurance_policies_payer_state",
+    # TASK-040, migration 0005: one nudge per procedure per encounter. Partial
+    # on cpt_code IS NOT NULL — TASK-044's keyword-only nudges carry no code.
+    "uq_clinical_nudges_encounter_cpt",
 }
 
 
