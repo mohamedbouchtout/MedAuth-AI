@@ -29,6 +29,7 @@ from track_b_rag.policy_dispatch import (
 
 SESSION_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 PROVIDER_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
+ENCOUNTER_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")
 
 #: An MRI with no body site stated, so it resolves to no code. Kept as the
 #: unqualified case because it is what a clinician most often actually says.
@@ -54,6 +55,7 @@ PARAMETERS = PolicyQueryParameters(
     plan_type="PPO",
     state="MA",
     provider_id=PROVIDER_ID,
+    encounter_id=ENCOUNTER_ID,
 )
 
 ANSWER = {
@@ -81,13 +83,21 @@ _MISSING: Any = object()
 
 
 class _Row:
-    """The four non-patient columns the real SELECT asks for, and nothing else.
+    """The columns the real SELECT asks for, and nothing else.
 
     Deliberately not an ``Encounter``: a fake carrying ``patient_fhir_id`` would
     let a test pass against a SELECT that had quietly started reading PHI.
+
+    ``id`` was added by TASK-040, which needs the encounter's primary key for
+    ``clinical_nudges.encounter_id``. Updating this fake is the deliberate half
+    of that change — the guard fails with an ``AttributeError`` when a column is
+    added, which is it working. A primary key identifies the row rather than
+    describing the patient, so the compliance answer this fake protects is
+    unchanged and the patient columns stay out.
     """
 
     def __init__(self, payer: str, plan_type: str, state: str) -> None:
+        self.id = ENCOUNTER_ID
         self.provider_id = PROVIDER_ID
         self.insurance_payer = payer
         self.insurance_plan_type = plan_type
@@ -432,13 +442,17 @@ class TestResolveAndQueryPolicy:
         monkeypatch.setattr(policy_dispatch, "resolve_query_parameters", resolved)
         monkeypatch.setattr(policy_dispatch, "post_policy_query", posted)
 
-        answer = await resolve_and_query_policy(
+        outcome = await resolve_and_query_policy(
             session_id=SESSION_ID,
             mention=MENTION,
             clinical_context={"transcript_excerpt": MENTION.excerpt},
         )
 
-        assert answer is not None
+        assert outcome.answer is not None
+        # The parameters come back with the answer so the nudge emitter has the
+        # encounter id without a second read of a table this service is
+        # deliberately careful about touching.
+        assert outcome.parameters is PARAMETERS
         (call,) = seen
         assert call["parameters"] is PARAMETERS
         assert call["session_id"] == SESSION_ID
