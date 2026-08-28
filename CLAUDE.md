@@ -652,7 +652,7 @@ what TASK-060 puts in a bundle, and comparison between sources goes through a
 dotless key derived from it. Neither side of a comparison may normalise
 independently — one function produces the key, and every consumer calls it.
 | `display` | `str \| None` | The source's own description, never one invented to fill the field. |
-| `source` | `"llm-extraction" \| "comprehend-medical"` | Which pass proposed this code. |
+| `source` | `"llm-extraction" \| "comprehend-medical"` | Which pass proposed this code. A `comprehend-medical` entry is one the LLM never proposed — a suggestion rather than a stated diagnosis; see below. |
 | `confidence` | `float \| None`, 0.0–1.0 | The proposing source's own score. **`None` for every `llm-extraction` entry** — Haiku is not asked to rate itself, because a number a model invents about its own output is not a measurement and would be indistinguishable from Comprehend's calibrated score once both sit in the same column. |
 | `validation` | object \| `None` | Written by TASK-031; absent until it runs. |
 | `validation.source` | `"comprehend-medical"` | The validating pass. |
@@ -681,6 +681,42 @@ determination — one layer down and with the same consequence if ignored.
 Comprehend Medical infers ICD-10-CM, RxNorm and SNOMED CT and has no CPT
 inference of any kind, so nothing in the current design can validate the CPT
 half. TASK-031 is scoped to ICD-10 for that reason.
+
+**A `comprehend-medical` entry is a suggestion, not a stated diagnosis, and
+every consumer of the column owes it that reading.** The same request that
+validates the LLM's codes also surfaces ICD-10 codes it never proposed, and
+those are written into `icd10_codes` as their own entries (TASK-030). They are
+written there because that is where a provider will see them, and they stay
+distinguishable by two things at once: `source` says which pass proposed them,
+and they carry a `confidence` that an `llm-extraction` entry structurally
+cannot have. What that obliges:
+
+- **They keep `validation: null` permanently**, for the same reason CPT entries
+  do — there is nothing independent left to check them against. Asking
+  Comprehend to validate a code Comprehend proposed measures self-consistency,
+  which is the circularity that already stops the validating pass from being
+  handed the generated note instead of the transcript.
+- **TASK-072 renders them as suggestions**, visibly attributed to the machine
+  that proposed them, and never mixed indistinguishably into the list a
+  provider is signing.
+- **TASK-060 does not put one in a prior-auth bundle as a diagnosis.** A bundle
+  asserts to a payer what the provider documented; a code nobody stated and no
+  note asserted is not that. It becomes claimable the ordinary way — a provider
+  accepts it through TASK-032's note edit, which writes it as documentation.
+- **A code is one entry, whichever pass found it.** Nothing is ever appended
+  alongside a code already present in the column, and the comparison goes
+  through the dotless matching key above rather than raw string equality, so
+  `M1711` from one source and `M17.11` from another cannot become two entries
+  for one diagnosis.
+
+**`null` and `[]` are different answers on these columns.** `[]` means the
+extraction pass ran and found no code; `null` means it never produced an answer
+— see `GeneratedNote` in `services/track-a-clinical/src/track_a_clinical/soap.py`.
+The reconciliation above therefore runs on `[]`, which is where a code only
+Comprehend read is worth the most, and does **not** run on `null`: filling that
+column with suggestions would replace "not determined" with a list that reads
+as determined, which is the same collapse `validation: null` exists to avoid one
+level down.
 
 The Pydantic model for this shape lives beside the mapped classes in
 `services/track-a-clinical/src/track_a_clinical/models/`, for the reason that
