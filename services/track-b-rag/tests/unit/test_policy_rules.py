@@ -128,6 +128,65 @@ async def test_the_cached_entry_carries_the_24h_ttl(redis: FakeRedis, recorder: 
     assert redis.expiries[KEY] == cache.POLICY_RULES_TTL_SECONDS
 
 
+async def test_the_resolved_rules_cite_the_retrieved_policy(
+    redis: FakeRedis, recorder: Recorder
+) -> None:
+    """Provenance reaches the caller, and the cache, from the retrieved chunks."""
+    resolution = await resolve(redis)
+
+    assert resolution.rules.policy_source == "L33575"
+    assert json.loads(redis.store[KEY])["policy_source"] == "L33575"
+
+
+async def test_a_model_invented_policy_source_is_overwritten(
+    redis: FakeRedis, recorder: Recorder
+) -> None:
+    """The answer does not get to cite itself.
+
+    ``policy_source`` is a field on the same model the answer is parsed into, so
+    a model naming its own sources would otherwise have them accepted and
+    cached. It is overwritten unconditionally from what retrieval actually
+    returned. This matters more than an ordinary field would: it is what a
+    reviewer checks a nudge's criteria against, so a plausible fabrication here
+    is worse than an empty column.
+    """
+    recorder.answers = [json.dumps({**ANSWER, "policy_source": "L99999,NCD-999.9"})]
+
+    resolution = await resolve(redis)
+
+    assert resolution.rules.policy_source == "L33575"
+
+
+async def test_a_cache_hit_keeps_the_policy_source(redis: FakeRedis, recorder: Recorder) -> None:
+    """Provenance is payer-scoped, so it survives the cache rather than being lost."""
+    await resolve(redis)
+    recorder.retrievals = 0
+
+    resolution = await resolve(redis)
+
+    assert resolution.source == "cache"
+    assert recorder.retrievals == 0
+    assert resolution.rules.policy_source == "L33575"
+
+
+async def test_an_entry_cached_before_this_field_existed_still_parses(
+    redis: FakeRedis, recorder: Recorder
+) -> None:
+    """A deploy must not turn every live cache entry into a fallback.
+
+    Entries written before ``policy_source`` existed have no such key. The field
+    defaults rather than being required for exactly this: the alternative is a
+    day of mass cache misses, every one of them paying for a Sonnet call.
+    """
+    redis.store[KEY] = json.dumps(ANSWER)
+
+    resolution = await resolve(redis)
+
+    assert resolution.source == "cache"
+    assert resolution.rules.policy_source is None
+    assert resolution.rules.auth_criteria == ["Failed six weeks of conservative therapy"]
+
+
 async def test_a_hit_touches_neither_qdrant_nor_bedrock(
     redis: FakeRedis, recorder: Recorder
 ) -> None:
@@ -432,7 +491,16 @@ def test_stage_one_cannot_see_a_patient() -> None:
 
 
 def test_the_cached_model_holds_only_payer_policy_fields() -> None:
-    """The patient-specific three are absent from what gets written to Redis."""
+    """The patient-specific three are absent from what gets written to Redis.
+
+    ``policy_source`` was added by TASK-040 and belongs here on the same test
+    the rest of the field list is pinned by. It names the policy documents the
+    criteria were read from, which is a property of the payer's published
+    policy and identical for every patient on that payer, plan, state and code
+    — the definition of the cacheable half. The guard is what makes that a
+    stated judgement rather than an unnoticed addition, so the assertion is an
+    equality and not a subset check.
+    """
     fields = set(PolicyRules.model_fields)
 
     assert fields == {
@@ -440,8 +508,47 @@ def test_the_cached_model_holds_only_payer_policy_fields() -> None:
         "auth_criteria",
         "step_therapy_required",
         "step_therapy_details",
+        "policy_source",
     }
     assert not fields & {"missing_criteria", "denial_risk", "nudge_message"}
+
+
+def test_the_policy_source_is_the_retrieved_policies_not_the_models_claim() -> None:
+    """Provenance is derived from what was retrieved, never from the answer.
+
+    A model asked to cite itself will produce plausible identifiers, and this
+    string is exactly what a reviewer would use to check whether a nudge's
+    criteria were real. A fabricated citation is worse than none.
+    """
+    chunks = [
+        retrieval.RetrievedChunk(policy_id="L39529", text="...", score=0.9),
+        retrieval.RetrievedChunk(policy_id="NCD-220.1", text="...", score=0.8),
+        retrieval.RetrievedChunk(policy_id="L39529", text="...", score=0.7),
+    ]
+
+    assert policy_rules.policy_source(chunks) == "L39529,NCD-220.1"
+
+
+def test_the_policy_source_fits_the_column_it_is_written_to() -> None:
+    """Shortened by dropping the lowest-ranked policies, never mid-identifier.
+
+    A truncated identifier looks like a real one and refers to nothing.
+    """
+    chunks = [
+        retrieval.RetrievedChunk(policy_id=f"L{n:05d}" * 8, text="...", score=1.0)
+        for n in range(20)
+    ]
+
+    source = policy_rules.policy_source(chunks)
+
+    assert source is not None
+    assert len(source) <= policy_rules.POLICY_SOURCE_MAX_LENGTH
+    assert all(len(part) == 48 for part in source.split(","))
+
+
+def test_no_retrieved_policy_id_means_no_policy_source() -> None:
+    """None rather than an empty string: nothing was retrieved to cite."""
+    assert policy_rules.policy_source([]) is None
 
 
 # --- the Da Vinci CRD tier (TASK-015) --------------------------------------
