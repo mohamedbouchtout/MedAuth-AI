@@ -30,6 +30,7 @@ from track_a_clinical.consumer import (
     session_ended_channel,
     transcription_channel,
 )
+from track_a_clinical.models import SOURCE_LLM_EXTRACTION, CodeValidation, ExtractedCode
 from track_a_clinical.soap import GeneratedNote, SoapSections
 
 SESSION_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -143,12 +144,26 @@ def stored(monkeypatch: pytest.MonkeyPatch) -> list[uuid.UUID]:
     return written
 
 
-def build(generate: Recorder) -> tuple[TranscriptConsumer, FakePubSub]:
+async def _no_validation(codes: list[ExtractedCode], transcript: str) -> list[ExtractedCode]:
+    """Stand in for the Comprehend pass, which these tests are not about.
+
+    Injected rather than left to the default, so no test in this module can
+    reach AWS. TASK-031's own behaviour is covered in ``test_comprehend.py``;
+    what is tested here is only that the consumer calls it in the right place.
+    """
+    return codes
+
+
+def build(
+    generate: Recorder,
+    validate_icd10: Any = _no_validation,
+) -> tuple[TranscriptConsumer, FakePubSub]:
     """Return a consumer wired to a fake subscription and a stubbed generator."""
     consumer = TranscriptConsumer(
         redis=None,  # type: ignore[arg-type]
         session_factory=session_factory(),
         generate=generate,
+        validate_icd10=validate_icd10,
     )
     return consumer, FakePubSub()
 
@@ -598,3 +613,152 @@ def test_the_generation_seam_defaults_to_the_real_one() -> None:
     consumer = TranscriptConsumer(redis=None)  # type: ignore[arg-type]
 
     assert consumer._generate is soap.generate  # noqa: SLF001
+
+
+# --- ICD-10 validation (TASK-031) ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_codes_are_validated_before_the_note_is_stored(
+    stored: list[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row is written already validated, in one write.
+
+    ``store_note`` is ``ON CONFLICT DO NOTHING`` and has no idempotent update
+    path, so a validation pass running after the insert would have nothing to
+    update on the retry of a duplicated signal.
+    """
+    seen: list[list[ExtractedCode]] = []
+    written: list[Any] = []
+
+    async def validate(codes: list[ExtractedCode], transcript: str) -> list[ExtractedCode]:
+        seen.append(codes)
+        return [
+            code.model_copy(update={"validation": CodeValidation(confidence=0.9, confirmed=True)})
+            for code in codes
+        ]
+
+    async def store_note(session: Any, *, encounter: Any, note: Any) -> uuid.UUID:
+        written.append(note)
+        return encounter.id
+
+    from track_a_clinical import notes
+
+    monkeypatch.setattr(notes, "store_note", store_note)
+
+    note = GeneratedNote(
+        sections=SoapSections(subjective="s", objective="o", assessment="a", plan="p"),
+        icd10_codes=[ExtractedCode.from_llm("M17.11")],
+        cpt_codes=[ExtractedCode.from_llm("73721")],
+    )
+    consumer, pubsub = build(Recorder(note), validate)
+    await consumer.handle_message(pubsub, started(SESSION_ID))
+    await consumer.handle_message(pubsub, segment(SESSION_ID, "knee pain"))
+    await consumer.handle_message(pubsub, ended(SESSION_ID))
+    await drain(consumer)
+
+    assert seen == [[ExtractedCode.from_llm("M17.11")]]
+    assert written[0].icd10_codes[0].validation is not None
+    assert written[0].icd10_codes[0].validation.confirmed is True
+
+
+@pytest.mark.asyncio
+async def test_the_validator_receives_the_transcript_not_the_note(
+    stored: list[Any],
+) -> None:
+    """Checking the LLM's codes against the LLM's own prose confirms nothing."""
+    seen: list[str] = []
+
+    async def validate(codes: list[ExtractedCode], transcript: str) -> list[ExtractedCode]:
+        seen.append(transcript)
+        return codes
+
+    note = GeneratedNote(
+        sections=SoapSections(
+            subjective="written by the model", objective="o", assessment="a", plan="p"
+        ),
+        icd10_codes=[ExtractedCode.from_llm("M17.11")],
+        cpt_codes=[],
+    )
+    consumer, pubsub = build(Recorder(note), validate)
+    await consumer.handle_message(pubsub, started(SESSION_ID))
+    await consumer.handle_message(pubsub, segment(SESSION_ID, "spoken in the room"))
+    await consumer.handle_message(pubsub, ended(SESSION_ID))
+    await drain(consumer)
+
+    assert seen == ["spoken in the room"]
+
+
+@pytest.mark.asyncio
+async def test_a_validation_failure_still_stores_the_note(
+    stored: list[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Validation is metadata; the note is the artifact the provider waits for."""
+    written: list[Any] = []
+
+    async def validate(codes: list[ExtractedCode], transcript: str) -> list[ExtractedCode]:
+        raise RuntimeError("comprehend is down")
+
+    async def store_note(session: Any, *, encounter: Any, note: Any) -> uuid.UUID:
+        written.append(note)
+        return encounter.id
+
+    from track_a_clinical import notes
+
+    monkeypatch.setattr(notes, "store_note", store_note)
+
+    note = GeneratedNote(
+        sections=SoapSections(subjective="s", objective="o", assessment="a", plan="p"),
+        icd10_codes=[ExtractedCode.from_llm("M17.11")],
+        cpt_codes=[],
+    )
+    consumer, pubsub = build(Recorder(note), validate)
+    await consumer.handle_message(pubsub, started(SESSION_ID))
+    await consumer.handle_message(pubsub, segment(SESSION_ID, "knee pain"))
+    await consumer.handle_message(pubsub, ended(SESSION_ID))
+    await drain(consumer)
+
+    assert len(written) == 1
+    assert written[0].icd10_codes[0].validation is None
+    assert written[0].icd10_codes[0].source == SOURCE_LLM_EXTRACTION
+
+
+@pytest.mark.asyncio
+async def test_cpt_codes_are_never_sent_for_validation(stored: list[Any]) -> None:
+    """Comprehend Medical has no CPT inference; those entries stay unvalidated."""
+    seen: list[list[ExtractedCode]] = []
+
+    async def validate(codes: list[ExtractedCode], transcript: str) -> list[ExtractedCode]:
+        seen.append(codes)
+        return codes
+
+    note = GeneratedNote(
+        sections=SoapSections(subjective="s", objective="o", assessment="a", plan="p"),
+        icd10_codes=[ExtractedCode.from_llm("M17.11")],
+        cpt_codes=[ExtractedCode.from_llm("73721")],
+    )
+    consumer, pubsub = build(Recorder(note), validate)
+    await consumer.handle_message(pubsub, started(SESSION_ID))
+    await consumer.handle_message(pubsub, ended(SESSION_ID))
+    await drain(consumer)
+
+    assert seen == [[ExtractedCode.from_llm("M17.11")]]
+    assert note.cpt_codes is not None
+    assert note.cpt_codes[0].validation is None
+
+
+@pytest.mark.asyncio
+async def test_a_note_with_no_codes_skips_validation(stored: list[Any]) -> None:
+    """Nothing to check means no request is made."""
+    called: list[int] = []
+
+    async def validate(codes: list[ExtractedCode], transcript: str) -> list[ExtractedCode]:
+        called.append(1)
+        return codes
+
+    consumer, pubsub = build(Recorder(NOTE), validate)
+    await consumer.handle_message(pubsub, started(SESSION_ID))
+    await consumer.handle_message(pubsub, ended(SESSION_ID))
+    await drain(consumer)
+
+    assert called == []
