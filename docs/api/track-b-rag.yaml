@@ -390,6 +390,7 @@ components:
         - nudge_message
         - step_therapy_required
         - step_therapy_details
+        - source
       properties:
         requires_auth:
           type: boolean
@@ -431,6 +432,16 @@ components:
         step_therapy_details:
           type: [string, 'null']
           description: What the step therapy requirement is, when there is one.
+        source:
+          type: string
+          enum: [cache, rag, fallback, crd, crd+cache, crd+rag]
+          description: >-
+            Which tier established the payer's rules. Branch only on `fallback`,
+            which means they could not be established at all — the empty
+            `auth_criteria` then means "unknown", not "none", and a caller must
+            not treat the answer as verified. The rest distinguishes how an
+            established answer was reached and is provenance for logs and nudge
+            records, not a branch condition.
 
     PolicyQueryResponse:
       type: object

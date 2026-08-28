@@ -404,14 +404,27 @@ async def test_a_second_identical_query_is_served_from_cache(
     payer: str,
     bedrock_stub: BedrockStub,
 ) -> None:
-    """TASK-012's second test: the expensive half is paid for once."""
+    """TASK-012's second test: the expensive half is paid for once.
+
+    ``source`` is excluded from the comparison and then asserted on directly,
+    because TASK-040 made it the one field that is *supposed* to differ between
+    these two responses — it reports which tier answered, and the whole point
+    here is that the second was answered by the cache. Excluding it without
+    checking it would have quietly dropped the strongest available evidence
+    that the cache was used, so it is checked separately and the test ends up
+    saying more than it did before rather than less.
+    """
     index_policy(payer=payer, text="Prior authorization required.")
     body = request_body(payer)
 
     first = await client.post("/policies/query", json=body)
     second = await client.post("/policies/query", json=body)
 
-    assert first.json()["data"] == second.json()["data"]
+    first_data = first.json()["data"]
+    second_data = second.json()["data"]
+    assert first_data.pop("source") == "rag"
+    assert second_data.pop("source") == "cache"
+    assert first_data == second_data
     assert bedrock_stub.calls == 1
 
 
