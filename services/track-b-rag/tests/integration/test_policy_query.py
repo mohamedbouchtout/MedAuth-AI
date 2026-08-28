@@ -78,11 +78,20 @@ ANSWER = json.dumps(
 
 #: The two halves of the response, named here so the assertions about which is
 #: cacheable read as statements rather than as string literals.
+#:
+#: ``policy_source`` was added by TASK-040 and is on the payer side, which is a
+#: judgement rather than a formality: it names the policy documents the criteria
+#: were read from, so it is identical for every patient on that payer, plan,
+#: state and code. That is the definition the split turns on. The equality below
+#: is what makes adding a field to the cached model a decision someone has to
+#: make on purpose, and this is that decision recorded — the unit-level twin of
+#: it is ``test_the_cached_model_holds_only_payer_policy_fields``.
 PAYER_POLICY_FIELDS = {
     "requires_auth",
     "auth_criteria",
     "step_therapy_required",
     "step_therapy_details",
+    "policy_source",
 }
 PATIENT_SPECIFIC_FIELDS = {"missing_criteria", "denial_risk", "nudge_message"}
 

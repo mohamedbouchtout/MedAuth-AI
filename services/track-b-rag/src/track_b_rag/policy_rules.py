@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
@@ -98,6 +99,13 @@ class PolicyRules(BaseModel):
     step_therapy_details: str | None = Field(
         default=None,
         description="What the step therapy requirement is, when there is one.",
+    )
+    policy_source: str | None = Field(
+        default=None,
+        description=(
+            "Which indexed policy documents these criteria were read from. Set "
+            "from the retrieved chunks, never from the model's answer."
+        ),
     )
 
     @field_validator("auth_criteria", mode="after")
@@ -443,7 +451,9 @@ async def _resolve_from_rag(
 
         rules = parse_rules(answer)
         if rules is not None:
-            return rules
+            # Overwritten unconditionally, so an answer that named its own
+            # sources cannot keep them. See :func:`policy_source`.
+            return rules.model_copy(update={"policy_source": policy_source(chunks)})
 
         logger.warning(
             "Bedrock returned an unusable policy analysis for %s (attempt %d of %d)",
@@ -453,6 +463,38 @@ async def _resolve_from_rag(
         )
 
     logger.error("Falling back to manual review for %s after %d attempts", context, MAX_ATTEMPTS)
+    return None
+
+
+#: Width of ``clinical_nudges.payer_policy_source``. The provenance string is
+#: built to fit the column it ends up in rather than being truncated on write,
+#: where a mid-identifier cut would produce a policy id that looks real and
+#: refers to nothing.
+POLICY_SOURCE_MAX_LENGTH: Final = 500
+
+
+def policy_source(chunks: Sequence[retrieval.RetrievedChunk]) -> str | None:
+    """Return the policies these criteria were read from, or None if none were.
+
+    Distinct policy ids in retrieval rank order, comma-separated. Ranked rather
+    than sorted because if the string has to be shortened, the passages that
+    contributed least are the ones to lose.
+
+    This is derived from what was retrieved and is never taken from the model's
+    answer. A model asked to name its own sources will supply plausible ones,
+    and a fabricated citation on a nudge is worse than no citation: it is the
+    field a reviewer would use to check whether the criteria were real.
+    """
+    ordered: list[str] = []
+    for chunk in chunks:
+        if chunk.policy_id and chunk.policy_id not in ordered:
+            ordered.append(chunk.policy_id)
+
+    while ordered:
+        joined = ",".join(ordered)
+        if len(joined) <= POLICY_SOURCE_MAX_LENGTH:
+            return joined
+        ordered.pop()
     return None
 
 
