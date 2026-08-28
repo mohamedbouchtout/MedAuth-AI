@@ -186,9 +186,65 @@ Bedrock is the only AWS service called during local dev (no local mock available
 ### Testing
 - Unit tests for all business logic (pure functions, no external calls)
 - Integration tests for all API routes using test database and mocked AWS services
-- Moto for mocking AWS services (Bedrock, Transcribe Medical, Comprehend Medical)
+- Moto for mocking AWS services (Bedrock, Transcribe Medical, KMS) — but see
+  "Moto does not implement Comprehend Medical" below before writing a test
+  against that service.
 - Test files mirror src structure: `src/services/rag.py` → `tests/unit/services/test_rag.py`
 - Minimum 80% coverage on services/packages; CI fails below this
+
+### Moto does not implement Comprehend Medical (standing exception)
+"Moto for all AWS mocking" (Known Constraints #3 in TASKS.md) cannot be
+satisfied for AWS Comprehend Medical, and this is a permanent property of moto
+rather than something scoped to the task that found it. Verified against moto
+5.2.2 by calling the service under `@mock_aws`:
+
+```
+>>> boto3.client("comprehendmedical").infer_icd10_cm(Text="...")
+ClientError: An error occurred (404) when calling the InferICD10CM operation:
+Not yet implemented
+```
+
+Moto's `comprehend` module is **Amazon Comprehend, not Comprehend Medical** —
+two different services. Its `url_bases` match only
+`comprehend.<region>.amazonaws.com`, `comprehendmedical` appears nowhere in
+moto's `backends.py`, and no `infer_icd10_cm` operation exists. Botocore knows
+the service, so the client constructs and the call is well-formed; it is moto's
+dispatch that has nothing to answer with. Do not read the 404 as a bug in the
+call.
+
+**The two permitted alternatives**, for Comprehend Medical and for any future
+AWS service moto turns out not to cover:
+- **A real credentialed call behind an env-var gate**, following the rules in
+  "nightly-live-checks.yml" above — default off, paired with a scheduled run,
+  named after the external dependency it exercises.
+- **Hand-rolled fixtures that are explicitly labelled as synthetic**, stating in
+  the fixture module that they are hand-written approximations of the service's
+  response and naming what about them has never been checked against the real
+  service.
+
+**What is not permitted is a silent `unittest.mock` patch over the boto3 call
+presented as satisfying the moto rule.** That is the failure this exception
+exists to prevent: a test that looks like every other AWS test in the repo,
+passes for the same reasons they appear to, and is in fact asserting only that
+the code calls a function the test itself defined. If moto cannot cover a
+service, the test must say so where a reader will see it.
+
+### Raw sync boto3 calls in async contexts go through `asyncio.to_thread`
+The Python conventions above require async-first with no sync blocking calls in
+async contexts. Most AWS access in this repository satisfies that incidentally:
+the Bedrock path goes through `langchain_aws.ChatBedrock.ainvoke`, which is
+genuinely async, so nobody had to think about it.
+
+That stops being true for any service called through a raw boto3 client, because
+boto3 is synchronous and has no async variant. Calling one directly from inside
+an asyncio task blocks the event loop for the whole round trip to AWS — and in a
+consumer that is simultaneously accumulating transcript segments for every other
+live encounter on the pod, that stalls unrelated sessions.
+
+So: **every raw synchronous boto3 call made from an async context is wrapped in
+`asyncio.to_thread`.** This is a general rule, not a note attached to the task
+that first hit it (TASK-031's Comprehend Medical call). Apply it when adding any
+new direct AWS SDK call site.
 
 ### Git Commits
 - **50/72 rule.** Subject line 50 characters or fewer; body hard-wrapped at 72
@@ -580,14 +636,39 @@ Both columns hold a **JSON array of objects**, the same shape in each:
 
 | Field | Type | Notes |
 |---|---|---|
-| `code` | `str`, required | ICD-10-CM carries its dot (`M17.11`); CPT is five characters (`73721`). Uppercased on write, so every later comparison is plain string equality — the same reasoning as the payer slug above. |
+| `code` | `str`, required | ICD-10-CM is stored **dotted** (`M17.11`); CPT is five characters (`73721`). Uppercased, whitespace-stripped, and dot-normalised on write, so every later comparison is plain string equality — the same reasoning as the payer slug above. |
+
+**Storage is dotted, matching is dotless, and both halves are one function.**
+ICD-10-CM has two equally standard spellings of the same code — `M17.11` and
+`M1711` — and different sources emit different ones. A code matched by exact
+string equality against a source that dots differently fails silently and looks
+exactly like a code the other source never proposed. That is the payer-slug bug
+one column over, with the same consequence: TASK-031 would report every code
+unconfirmed and the failure would read as a genuine finding about the codes
+rather than a formatting mismatch.
+
+So the canonical *stored* form is dotted, because that is what a human reads and
+what TASK-060 puts in a bundle, and comparison between sources goes through a
+dotless key derived from it. Neither side of a comparison may normalise
+independently — one function produces the key, and every consumer calls it.
 | `display` | `str \| None` | The source's own description, never one invented to fill the field. |
 | `source` | `"llm-extraction" \| "comprehend-medical"` | Which pass proposed this code. |
 | `confidence` | `float \| None`, 0.0–1.0 | The proposing source's own score. **`None` for every `llm-extraction` entry** — Haiku is not asked to rate itself, because a number a model invents about its own output is not a measurement and would be indistinguishable from Comprehend's calibrated score once both sit in the same column. |
 | `validation` | object \| `None` | Written by TASK-031; absent until it runs. |
 | `validation.source` | `"comprehend-medical"` | The validating pass. |
-| `validation.confidence` | `float \| None` | Comprehend's score for the matching entity, or `None` when it returned no such entity at all. |
+| `validation.confidence` | `float \| None` | Comprehend's **`ICD10CMConcept.Score`** for the matching code, or `None` when it returned no such concept at all. Not the entity-level `Score` — see below. |
 | `validation.confirmed` | `bool` | Whether the validating source produced this code at or above TASK-031's 0.8 threshold. |
+
+**`validation.confidence` is the concept score, never the entity score.** The
+`InferICD10CM` response nests two different confidence values, and the botocore
+service model states their meanings apart: `ICD10CMEntity.Score` is "the level
+of confidence ... in the accuracy of the **detection**" — that this span of text
+is a medical condition at all — while `ICD10CMConcept.Score` is "the level of
+confidence ... that the entity is accurately **linked to an ICD-10-CM
+concept**". TASK-031 compares a code against a code, so the concept score is the
+one measuring the thing being asked about. The entity score can be high for a
+correctly-detected condition that was then linked to the wrong code, which is
+precisely the error this validation exists to catch.
 
 **`validation: null` means "not checked yet" and never "checked and rejected".**
 An unconfirmed code and an unvalidated one are different facts, and collapsing
@@ -606,6 +687,42 @@ The Pydantic model for this shape lives beside the mapped classes in
 section already gives: the alternative is prior-auth and the web app each
 re-deriving it from the column, which is how two definitions of one contract
 drift apart.
+
+### An accumulated transcript exceeds downstream limits (cross-cutting)
+`TranscriptBuffer` in track-a-clinical's consumer is unbounded by design — it
+accumulates every segment of an encounter and joins them only when a note is
+generated. Nothing caps it, and nothing should: truncating an encounter's speech
+to fit a downstream API would silently discard clinical content.
+
+The consequence is that **every consumer of a full transcript has to state what
+it does when the transcript is larger than the service it feeds.** This is not
+hypothetical arithmetic. A routine orthopedic or dermatology visit runs well past
+fifteen minutes (which is why `SESSION_TTL_SECONDS` needed the re-mint path in
+the session section above), and ordinary conversational speech runs on the order
+of 750–1,000 characters per minute. A transcript in the tens of thousands of
+characters is the normal case, not the tail.
+
+Known limits today:
+- **AWS Comprehend Medical `InferICD10CM` accepts at most 10,000 characters.**
+  This is enforced client-side by botocore — the shape metadata is
+  `{'min': 1, 'max': 10000}` — and server-side by a dedicated
+  `TextSizeLimitExceededException`. Note this is *not* the 20,000-byte figure
+  widely quoted for Comprehend Medical; that belongs to `DetectEntitiesV2`, and
+  assuming it here would build chunking against a threshold twice the real one.
+  There is also an asynchronous batch path (`StartICD10CMInferenceJob`) for
+  larger documents, which is S3-based and therefore unsuitable for anything in
+  a live encounter's path.
+- **Bedrock's context window** bounds the SOAP and extraction passes. Far larger
+  than Comprehend's cap and not currently a binding constraint, but the same
+  rule applies to it.
+
+**The standing rule: chunk and merge, or report reduced coverage — never
+silently truncate.** A partial analysis presented as a complete one is the same
+failure class this document rejects everywhere else: a payer's silence read as a
+negative determination, `validation: null` read as "checked and rejected", an
+empty retrieval indistinguishable from a payer we hold no policy for. A consumer
+that cannot process the whole transcript must make that visible in its output or
+its operational log, naming what was left unexamined.
 
 ### Migration Ownership vs. Table Write Access (clarifies TASK-005)
 "Owns the schema" means owns the Alembic migration history for those tables —

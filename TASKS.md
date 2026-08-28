@@ -2610,19 +2610,127 @@ The insurance policy RAG is the technical core. Build and validate before other 
       `needs` is unchanged.
 
 - [ ] **TASK-031:** Comprehend Medical validation layer
-  - After LLM extracts ICD-10 codes (TASK-030's Haiku pass), validate with AWS
-    Comprehend Medical InferICD10CM
-  - Writes into the `validation` half of each entry's object, per CLAUDE.md
-    "Extracted clinical codes — one JSON shape" — the column shape TASK-030
-    already writes has the field waiting, so this task adds no migration.
-    ICD-10 only: Comprehend Medical has no CPT inference, so `cpt_codes`
-    entries keep `validation: null` and that is the designed outcome, not a
-    gap this task should paper over.
-  - Flag any codes LLM returned that Comprehend Medical did not confirm (confidence < 0.8)
-  - Log discrepancies for quality monitoring — via standard `logging`, not
-    hipaa-logger (this is a quality metric, not a PHI access event; log the
-    code and confidence score, not the surrounding clinical text)
-  - **Test:** run on transcript with 3 clear diagnoses, verify codes match
+  - Prerequisite: TASK-030 (writes the entries this validates)
+  - Service: `services/track-a-clinical`
+  - Validate the ICD-10 codes from TASK-030's Haiku pass against AWS Comprehend
+    Medical `InferICD10CM`, and record what it found in the `validation` half of
+    each entry, per CLAUDE.md "Extracted clinical codes — one JSON shape". The
+    column shape already has the field waiting, so **this task adds no
+    migration**.
+  - **ICD-10 only.** Comprehend Medical infers ICD-10-CM, RxNorm and SNOMED CT
+    and has no CPT inference of any kind, so `cpt_codes` entries keep
+    `validation: null` indefinitely. That is the designed outcome, not a gap this
+    task should paper over.
+  - **Scope: this validates LLM-extracted codes only.** Comprehend will surface
+    ICD-10 codes the LLM never proposed, and adding them is deliberately out of
+    scope here — the `ExtractedCode` shape already supports a
+    `source: "comprehend-medical"` entry carrying a real confidence, so the
+    column can hold them whenever a task decides they should be written. Opened
+    as **TASK-031b** rather than folded in, the same way TASK-024b split off
+    from TASK-024: proposing new diagnoses is a different product question from
+    checking the ones already proposed, and it needs a decision about whether a
+    code no clinician stated belongs in a note at all.
+  - **Runs before the insert, not as an update after it.** `store_note` is
+    `ON CONFLICT DO NOTHING` and has no idempotent update path, so a validation
+    pass running after the write would have nothing to update on the retry of a
+    duplicated signal. Validating first means the row is written already
+    validated, in one write, with no second transaction to get half-applied.
+  - **The two passes fail independently and validation is never fatal.** Same
+    framing as TASK-030's Sonnet/Haiku split: a Comprehend failure — throttling,
+    an outage, a text-size rejection — leaves every entry's `validation` at
+    `null` and **stores the note anyway**. The note is the artifact the provider
+    is waiting for; validation is secondary metadata about it. Blocking a note
+    on a metadata pass would trade the thing that matters for the thing that
+    annotates it. `validation: null` already means exactly "not checked yet",
+    so an unvalidated note is honestly represented with no extra signalling.
+  - **The input is the transcript, not the generated note.** Validating the
+    LLM's codes against text the same LLM wrote is closer to circular than a
+    check — the note is where the model already committed to its reading of the
+    encounter, so agreement there measures self-consistency rather than
+    accuracy. The transcript is the independent source both passes derive from.
+  - **Chunking against a 10,000-character cap, and never a silent truncation.**
+    `InferICD10CM` accepts at most 10,000 characters — botocore enforces it
+    client-side from the shape metadata and the service raises
+    `TextSizeLimitExceededException`. This is **not** the 20,000-byte figure
+    commonly quoted for Comprehend Medical, which belongs to `DetectEntitiesV2`;
+    building against that number would size chunks at twice the real limit and
+    fail on every long visit. A transcript over the cap is chunked and the
+    results merged — a code confirmed in any chunk is confirmed. If any part of
+    a transcript cannot be covered, that is logged at WARNING naming the
+    shortfall, per CLAUDE.md "An accumulated transcript exceeds downstream
+    limits". A partial validation presented as complete is the failure class
+    this whole document rejects.
+  - **The confidence recorded is `ICD10CMConcept.Score`, not the entity-level
+    `Score`.** The response nests both, and the botocore service model separates
+    their meanings: entity `Score` is confidence in the *detection* that a span
+    is a medical condition, concept `Score` is confidence that the entity is
+    *linked to that ICD-10-CM concept*. This comparison is code-to-code, so the
+    concept score is the one measuring the question being asked — an entity
+    score can be high for a correctly-spotted condition linked to the wrong
+    code, which is the exact error this task exists to catch. Decided from the
+    wire contract, independent of live data.
+  - **Threshold `0.8` is a named constant, commented as an unvalidated initial
+    guess.** It comes from this task's original wording, not from a measurement
+    against real Comprehend output, and the comment must say so — same rule as
+    `SESSION_REMINT_GRACE_SECONDS` in CLAUDE.md's session section. Revisit once
+    a real response distribution exists.
+  - **Code matching is isolated in one small function and its dot handling is
+    UNVERIFIED.** ICD-10-CM has two standard spellings (`M17.11`, `M1711`) and
+    nothing yet establishes which Comprehend returns; `ICD10CMConcept.Code` is an
+    unconstrained string in the service model, so this cannot be settled from the
+    contract — it is data, not schema. Both sides of the comparison therefore go
+    through one normaliser producing a dotless key, per CLAUDE.md's
+    "Storage is dotted, matching is dotless" rule. The function and its tests are
+    marked UNVERIFIED and name `scratchpad/probe_real.py` as the way to close it.
+    Keeping it to one pure function is the point: confirming the real format is
+    then a change to that function, not a rework of the validation pipeline.
+    **Do not guess a format and quietly drop the marker.**
+  - **Testing cannot use moto** — it does not implement Comprehend Medical, per
+    Known Constraints #3 and CLAUDE.md's standing exception. Use
+    explicitly-labelled synthetic fixtures, stating in the fixture module that
+    they are hand-written and that the code format in them is the unverified
+    part. A silent `unittest.mock` patch presented as satisfying the moto rule is
+    not acceptable.
+  - **The sync boto3 call is wrapped in `asyncio.to_thread`**, per CLAUDE.md's
+    rule on raw sync boto3 in async contexts. This runs inside the consumer's
+    event loop alongside every other live encounter on the pod.
+  - **`boto3` becomes a direct dependency of `services/track-a-clinical`.** It is
+    currently only transitive through `medauth-bedrock-client`, and a direct
+    client call must not rely on another package's dependency continuing to
+    supply it.
+  - **No audit row and no new env var.** Discrepancies are a quality metric, not
+    a PHI access — log them through standard `logging` at WARNING, naming the
+    code and the confidence score and **never the surrounding clinical text**.
+    The transcript reaches Comprehend Medical, which is a HIPAA-eligible service,
+    and nowhere else. `AWS_REGION` is already in `Settings` from TASK-030.
+  - **Test:** run on a transcript with 3 clear diagnoses, verify codes match
+  - **Test:** a code Comprehend did not return at all gets `validation` present
+    with `confirmed: false` and `confidence: null` — never `validation: null`
+  - **Test:** a code returned below threshold gets `confirmed: false` with the
+    real score, distinguishable from the case above
+  - **Test:** a Comprehend failure stores the note with every `validation` null
+  - **Test:** a transcript over 10,000 characters is chunked, not truncated, and
+    a code confirmed in a later chunk is confirmed in the result
+  - **Test:** CPT entries are untouched and keep `validation: null`
+
+- [ ] **TASK-031b:** Record ICD-10 codes Comprehend found that the LLM missed
+  - Prerequisite: TASK-031 (the validation pass this extends)
+  - Service: `services/track-a-clinical`
+  - **The gap.** TASK-031 sends the transcript to `InferICD10CM` and uses the
+    response only to confirm or fail the codes Haiku already proposed. Every
+    concept Comprehend found that the LLM did not is discarded, including a
+    diagnosis stated plainly in the encounter and missed by the extraction pass.
+  - **What this would add.** Those concepts written as their own entries with
+    `source: "comprehend-medical"` and a real `confidence` — a combination the
+    `ExtractedCode` model already permits and nothing currently writes.
+  - **The product question this is gated on**, and the reason it is not folded
+    into TASK-031: a code no clinician stated and no LLM proposed appearing in a
+    note is a different claim from a code being checked. It affects what
+    TASK-060 puts in a prior-auth bundle as diagnoses and what TASK-072's review
+    screen shows a provider signing. Decide whether such entries are surfaced
+    for review rather than stored as equals, and settle it before writing them.
+  - **Test:** a transcript naming a diagnosis the LLM pass missed yields an
+    entry sourced to comprehend-medical with its score
 
 - [ ] **TASK-032:** SOAP note review endpoint
   - `GET /notes/{encounter_id}` — return generated SOAP note for provider review
@@ -3298,7 +3406,16 @@ helpful."
 
 2. **AWS Bedrock, not direct Anthropic API.** All LLM calls use `langchain_aws.ChatBedrock` with `boto3.client('bedrock-runtime')`. Never import `anthropic` directly.
 
-3. **Moto for all AWS mocking in tests.** `@mock_aws` decorator on test functions that call Bedrock, Transcribe Medical, Comprehend Medical, KMS.
+3. **Moto for all AWS mocking in tests.** `@mock_aws` decorator on test functions
+   that call Bedrock, Transcribe Medical, KMS.
+   **Comprehend Medical is a standing exception** — moto does not implement it
+   at all, confirmed by a live `@mock_aws` call returning
+   `404 Not yet implemented` on `InferICD10CM`. See CLAUDE.md, "Moto does not
+   implement Comprehend Medical", for the two permitted alternatives (a gated
+   real call, or explicitly-labelled synthetic fixtures) and for why a silent
+   `unittest.mock` patch does not count as satisfying this rule. If another AWS
+   service turns out to be uncovered, it goes in that section too rather than
+   being worked around locally.
 
 4. **Pydantic v2 syntax.** `model_config = ConfigDict(...)` not `class Config:`. `model_validate()` not `parse_obj()`.
 
