@@ -33,7 +33,23 @@ class ClinicalNote(Base):
     """A SOAP note plus the codes extracted alongside it."""
 
     __tablename__ = "clinical_notes"
-    __table_args__ = (sa.Index("idx_clinical_notes_encounter", "encounter_id"),)
+    __table_args__ = (
+        # One note per encounter, enforced rather than assumed. TASK-060 reads
+        # this table expecting zero or one row, and the writer is a Redis
+        # consumer: a redelivered ``session:ended`` signal, a reconnect, or a
+        # retry of a failed generation would otherwise each spend a Sonnet call
+        # and leave a second row, with nothing raising anywhere along the way.
+        # TASK-030's insert names this constraint as its ON CONFLICT target.
+        #
+        # A plain UNIQUE rather than an index partial on ``deleted_at IS NULL``:
+        # nothing in the system soft-deletes a note today — TASK-032 edits them
+        # in place — so the narrower form would buy a case that cannot arise.
+        # Whatever first deletes a note has to revisit this.
+        sa.UniqueConstraint("encounter_id", name="uq_clinical_notes_encounter"),
+        # Redundant against the constraint's own implicit index, and kept
+        # because TASK-005 specifies it by name and a migration test asserts it.
+        sa.Index("idx_clinical_notes_encounter", "encounter_id"),
+    )
 
     id: Mapped[uuid.UUID] = uuid_primary_key()
     encounter_id: Mapped[uuid.UUID] = mapped_column(
@@ -48,7 +64,9 @@ class ClinicalNote(Base):
     soap_plan: Mapped[str | None] = mapped_column(sa.Text(), nullable=True)
 
     #: Objects rather than bare code strings, because TASK-031 attaches a
-    #: Comprehend Medical confidence score to each code the LLM proposed.
+    #: Comprehend Medical confidence score to each code the LLM proposed. The
+    #: shape is :class:`~track_a_clinical.models.extracted_code.ExtractedCode`;
+    #: write through it rather than assembling dictionaries here.
     icd10_codes: Mapped[list[JsonObject] | None] = mapped_column(
         postgresql.JSONB(),
         nullable=True,
