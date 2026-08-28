@@ -35,7 +35,9 @@ import pytest
 import pytest_asyncio
 from redis.asyncio import Redis
 
+from track_b_rag.api.schemas import PolicyQueryData
 from track_b_rag.dedup import procedure_seen_key
+from track_b_rag.policy_dispatch import PolicyQueryOutcome, PolicyQueryParameters
 from track_b_rag.transcript_consumer import (
     SESSIONS_STARTED_CHANNEL,
     TranscriptConsumer,
@@ -56,14 +58,52 @@ pytestmark = [
 SETTLE_SECONDS = 0.25
 
 
+ENCOUNTER_ID = uuid.UUID("77777777-7777-7777-7777-777777777777")
+PROVIDER_ID = uuid.UUID("88888888-8888-8888-8888-888888888888")
+
+PARAMETERS = PolicyQueryParameters(
+    procedure="knee MRI",
+    cpt_code="73721",
+    payer="Aetna",
+    plan_type="PPO",
+    state="MA",
+    provider_id=PROVIDER_ID,
+    encounter_id=ENCOUNTER_ID,
+)
+
+ANSWER = PolicyQueryData(
+    requires_auth=True,
+    auth_criteria=["Failed six weeks of conservative therapy"],
+    missing_criteria=["Failed six weeks of conservative therapy"],
+    denial_risk="high",
+    nudge_message="Prior authorization required for knee MRI.",
+    step_therapy_required=False,
+    step_therapy_details=None,
+    policy_source="L33575",
+    source="rag",
+)
+
+
 class RecordedDispatch:
-    """Stands in for the policy query, which cannot run until TASK-024."""
+    """Stands in for the policy query, which cannot run until TASK-052b."""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    async def __call__(self, **kwargs: Any) -> None:
+    async def __call__(self, **kwargs: Any) -> PolicyQueryOutcome:
         self.calls.append(kwargs)
+        return PolicyQueryOutcome(parameters=PARAMETERS, answer=ANSWER)
+
+
+class RecordedEmit:
+    """Stands in for the nudge emitter, which needs a database this suite has not set up."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, **kwargs: Any) -> uuid.UUID | None:
+        self.calls.append(kwargs)
+        return uuid.uuid4()
 
 
 @pytest_asyncio.fixture
@@ -79,8 +119,15 @@ async def dispatch() -> RecordedDispatch:
 
 
 @pytest_asyncio.fixture
-async def consumer(redis: Redis, dispatch: RecordedDispatch) -> AsyncIterator[TranscriptConsumer]:
-    running = TranscriptConsumer(redis, dispatch=dispatch)
+async def emit() -> RecordedEmit:
+    return RecordedEmit()
+
+
+@pytest_asyncio.fixture
+async def consumer(
+    redis: Redis, dispatch: RecordedDispatch, emit: RecordedEmit
+) -> AsyncIterator[TranscriptConsumer]:
+    running = TranscriptConsumer(redis, dispatch=dispatch, emit=emit)
     running.start()
     await _until(lambda: running.is_healthy())
     yield running

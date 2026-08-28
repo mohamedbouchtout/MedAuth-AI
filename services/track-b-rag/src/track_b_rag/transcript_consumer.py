@@ -49,10 +49,13 @@ from typing import Any, Final
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
-from track_b_rag import dedup, keywords, policy_dispatch
-from track_b_rag.api.schemas import PolicyQueryData
+from track_b_rag import dedup, keywords, nudges, policy_dispatch
 from track_b_rag.keywords import ProcedureMention
-from track_b_rag.policy_dispatch import MissingQueryParameters, resolve_and_query_policy
+from track_b_rag.policy_dispatch import (
+    MissingQueryParameters,
+    PolicyQueryOutcome,
+    resolve_and_query_policy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +89,10 @@ _CONTEXT_KEY: Final = "transcript_excerpt"
 #: What :func:`resolve_and_query_policy` is called through. Injected so tests
 #: drive the consumer without a policy query, and so TASK-024 can change what
 #: happens behind the seam without touching this module.
-Dispatch = Callable[..., Awaitable[PolicyQueryData | None]]
+Dispatch = Callable[..., Awaitable[PolicyQueryOutcome]]
+
+#: What :func:`nudges.emit` is called through, injected for the same reason.
+Emit = Callable[..., Awaitable[uuid.UUID | None]]
 
 
 def transcription_channel(session_id: uuid.UUID) -> str:
@@ -116,15 +122,23 @@ def _session_id_from_channel(channel: str, prefix: str) -> uuid.UUID | None:
 class TranscriptConsumer:
     """Watches announced sessions and turns procedure mentions into policy queries."""
 
-    def __init__(self, redis: Redis, *, dispatch: Dispatch = resolve_and_query_policy) -> None:
+    def __init__(
+        self,
+        redis: Redis,
+        *,
+        dispatch: Dispatch = resolve_and_query_policy,
+        emit: Emit = nudges.emit,
+    ) -> None:
         """Build a consumer.
 
         Args:
             redis: The client whose pub/sub connection this consumer owns.
             dispatch: The policy-query seam. Defaults to the real one.
+            emit: The nudge emitter. Defaults to the real one.
         """
         self._redis = redis
         self._dispatch = dispatch
+        self._emit = emit
         self._watched: set[uuid.UUID] = set()
         self._task: asyncio.Task[None] | None = None
         self._connected = False
@@ -289,11 +303,24 @@ class TranscriptConsumer:
             return
 
         try:
-            await self._dispatch(
+            outcome = await self._dispatch(
                 session_id=session_id,
                 mention=mention,
                 clinical_context={_CONTEXT_KEY: mention.excerpt},
             )
+            if outcome.answer is not None:
+                # Inside the claim deliberately. The store-then-publish pair is
+                # what the claim protects, and a failure anywhere in it lands
+                # in the handler below, which gives the claim back so the next
+                # mention retries. The retry cannot duplicate the row: the
+                # insert names migration 0005's unique index and republishes
+                # what it finds.
+                await self._emit(
+                    redis=self._redis,
+                    session_id=session_id,
+                    parameters=outcome.parameters,
+                    answer=outcome.answer,
+                )
         except MissingQueryParameters as missing:
             # Structural, not transient: the claim is kept deliberately, so this
             # is logged once per procedure per session instead of once per
@@ -311,7 +338,7 @@ class TranscriptConsumer:
             # than being silently suppressed for the rest of the encounter.
             await dedup.release_procedure(self._redis, session_id, key)
             logger.error(
-                "Policy query dispatch failed for %r in session %s",
+                "Policy query or nudge failed for %r in session %s",
                 mention.keyword,
                 session_id,
                 exc_info=True,

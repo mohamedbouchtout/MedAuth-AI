@@ -83,6 +83,10 @@ class PolicyQueryParameters:
         state: Two-letter state code for the encounter.
         provider_id: The provider the query is made on behalf of, for the audit
             row the route writes.
+        encounter_id: The ``encounters`` primary key. Not sent to
+            ``/policies/query``, which keys on ``session_id`` like everything
+            else a client sees — it is here because ``clinical_nudges`` has a
+            foreign key to it and TASK-040 writes that row from this outcome.
     """
 
     procedure: str
@@ -91,6 +95,26 @@ class PolicyQueryParameters:
     plan_type: str
     state: str
     provider_id: uuid.UUID
+    encounter_id: uuid.UUID
+
+
+@dataclass(frozen=True)
+class PolicyQueryOutcome:
+    """One dispatched policy query: what it was built from, and what came back.
+
+    The parameters travel back out with the answer because the nudge emitter
+    needs both and the encounter has already been read to build them. The
+    alternative was a second SELECT against the same row moments later, which
+    is a needless read of a table this service is deliberately careful about
+    touching.
+
+    Attributes:
+        parameters: What the query was built from.
+        answer: What the route said, or None when the call could not be made.
+    """
+
+    parameters: PolicyQueryParameters
+    answer: PolicyQueryData | None
 
 
 class MissingQueryParameters(Exception):
@@ -205,7 +229,15 @@ async def resolve_query_parameters(
     # real PHI read that TASK-012's row does not cover, and the audit obligation
     # would then genuinely be missing. Change the columns and you change the
     # compliance answer.
+    #
+    # `id` was added by TASK-040 and does not change it: a primary key
+    # identifies the row, it does not describe the patient. The two guards on
+    # this statement were updated in that task rather than left to pass by
+    # luck — the `_Row` fake in the unit tests carries exactly these columns and
+    # the integration test compiles the SQL and checks the patient columns are
+    # absent.
     statement = sa.select(
+        Encounter.id,
         Encounter.provider_id,
         Encounter.insurance_payer,
         Encounter.insurance_plan_type,
@@ -252,6 +284,7 @@ async def resolve_query_parameters(
         plan_type=row.insurance_plan_type,
         state=row.state,
         provider_id=row.provider_id,
+        encounter_id=row.id,
     )
 
 
@@ -320,7 +353,7 @@ async def resolve_and_query_policy(
     session_id: uuid.UUID,
     mention: ProcedureMention,
     clinical_context: Mapping[str, Any],
-) -> PolicyQueryData | None:
+) -> PolicyQueryOutcome:
     """Turn one detected procedure into one policy query.
 
     The single entry point the transcript consumer calls, so that everything the
@@ -332,7 +365,9 @@ async def resolve_and_query_policy(
         clinical_context: The transcript excerpt and its metadata.
 
     Returns:
-        The answer, or None when the query could not be completed.
+        The resolved parameters and the answer. ``answer`` is None when the
+        query could not be completed; the parameters are always present,
+        because failing to resolve them raises instead.
 
     Raises:
         MissingQueryParameters: When the query cannot be built at all — an
@@ -343,8 +378,9 @@ async def resolve_and_query_policy(
             differently for each.
     """
     parameters = await resolve_query_parameters(session_id=session_id, mention=mention)
-    return await post_policy_query(
+    answer = await post_policy_query(
         parameters=parameters,
         session_id=session_id,
         clinical_context=clinical_context,
     )
+    return PolicyQueryOutcome(parameters=parameters, answer=answer)

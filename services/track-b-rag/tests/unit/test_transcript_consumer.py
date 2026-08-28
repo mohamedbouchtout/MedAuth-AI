@@ -11,8 +11,13 @@ import pytest
 
 from tests.unit.test_dedup import FakeRedis as FakeRedisBase
 from track_b_rag import transcript_consumer as consumer_module
+from track_b_rag.api.schemas import PolicyQueryData
 from track_b_rag.dedup import procedure_seen_key
-from track_b_rag.policy_dispatch import MissingQueryParameters
+from track_b_rag.policy_dispatch import (
+    MissingQueryParameters,
+    PolicyQueryOutcome,
+    PolicyQueryParameters,
+)
 from track_b_rag.transcript_consumer import (
     SESSIONS_STARTED_CHANNEL,
     TranscriptConsumer,
@@ -71,17 +76,59 @@ class FakeRedis(FakeRedisBase):
         return self.subscription
 
 
+ENCOUNTER_ID = uuid.UUID("44444444-4444-4444-4444-444444444444")
+PROVIDER_ID = uuid.UUID("55555555-5555-5555-5555-555555555555")
+
+PARAMETERS = PolicyQueryParameters(
+    procedure="knee MRI",
+    cpt_code="73721",
+    payer="Aetna",
+    plan_type="PPO",
+    state="MA",
+    provider_id=PROVIDER_ID,
+    encounter_id=ENCOUNTER_ID,
+)
+
+ANSWER = PolicyQueryData(
+    requires_auth=True,
+    auth_criteria=["Failed six weeks of conservative therapy"],
+    missing_criteria=["Failed six weeks of conservative therapy"],
+    denial_risk="high",
+    nudge_message="Prior authorization required for knee MRI.",
+    step_therapy_required=False,
+    step_therapy_details=None,
+    policy_source="L33575",
+    source="rag",
+)
+
+
 class RecordedDispatch:
     """Stands in for the policy query seam."""
 
     def __init__(self, *, raises: BaseException | None = None) -> None:
         self.calls: list[dict[str, Any]] = []
         self.raises = raises
+        self.outcome = PolicyQueryOutcome(parameters=PARAMETERS, answer=ANSWER)
 
-    async def __call__(self, **kwargs: Any) -> None:
+    async def __call__(self, **kwargs: Any) -> PolicyQueryOutcome:
         self.calls.append(kwargs)
         if self.raises is not None:
             raise self.raises
+        return self.outcome
+
+
+class RecordedEmit:
+    """Stands in for the nudge emitter."""
+
+    def __init__(self, *, raises: BaseException | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.raises = raises
+
+    async def __call__(self, **kwargs: Any) -> uuid.UUID | None:
+        self.calls.append(kwargs)
+        if self.raises is not None:
+            raise self.raises
+        return uuid.uuid4()
 
 
 @pytest.fixture
@@ -95,8 +142,15 @@ def dispatch() -> RecordedDispatch:
 
 
 @pytest.fixture
-def consumer(redis: FakeRedis, dispatch: RecordedDispatch) -> TranscriptConsumer:
-    return TranscriptConsumer(redis, dispatch=dispatch)  # type: ignore[arg-type]
+def emit() -> RecordedEmit:
+    return RecordedEmit()
+
+
+@pytest.fixture
+def consumer(
+    redis: FakeRedis, dispatch: RecordedDispatch, emit: RecordedEmit
+) -> TranscriptConsumer:
+    return TranscriptConsumer(redis, dispatch=dispatch, emit=emit)  # type: ignore[arg-type]
 
 
 def announcement(session_id: uuid.UUID = SESSION_ID) -> dict[str, Any]:
@@ -318,26 +372,93 @@ class TestDedup:
 
         assert [call["mention"].keyword for call in dispatch.calls] == ["MRI", "biopsy"]
 
+    async def test_an_answered_query_reaches_the_emitter(
+        self, redis: FakeRedis, dispatch: RecordedDispatch, emit: RecordedEmit
+    ) -> None:
+        """The wiring TASK-040 adds: the answer stops being thrown away.
+
+        Everything before this task ended at the dispatch. What the emitter does
+        with the answer is ``tests/unit/test_nudges.py``; what is asserted here
+        is that it is handed the outcome's own parameters rather than anything
+        this module reconstructed.
+        """
+        consumer = TranscriptConsumer(redis, dispatch=dispatch, emit=emit)  # type: ignore[arg-type]
+        await watch(consumer, redis.subscription)
+
+        await consumer.handle_message(
+            redis.subscription, segment(text="Let's get an MRI of the knee.")
+        )
+
+        (call,) = emit.calls
+        assert call["session_id"] == SESSION_ID
+        assert call["parameters"] is PARAMETERS
+        assert call["answer"] is ANSWER
+
+    async def test_a_query_that_could_not_be_made_raises_no_nudge(
+        self, redis: FakeRedis, dispatch: RecordedDispatch, emit: RecordedEmit
+    ) -> None:
+        """A failed query is not an answer, and silence is not "nothing to flag".
+
+        ``post_policy_query`` logs at ERROR and returns None for a timeout or a
+        transport failure. There is nothing to tell the provider — inventing a
+        nudge from a query that never came back would put words in a payer's
+        mouth — so the emitter is not called at all.
+        """
+        dispatch.outcome = PolicyQueryOutcome(parameters=PARAMETERS, answer=None)
+        consumer = TranscriptConsumer(redis, dispatch=dispatch, emit=emit)  # type: ignore[arg-type]
+        await watch(consumer, redis.subscription)
+
+        await consumer.handle_message(
+            redis.subscription, segment(text="Let's get an MRI of the knee.")
+        )
+
+        assert dispatch.calls
+        assert emit.calls == []
+
+    async def test_a_failing_emit_gives_the_claim_back(
+        self, redis: FakeRedis, dispatch: RecordedDispatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A nudge that could not be raised must not silence the procedure.
+
+        The emit sits inside the dedup claim, so a Redis or database failure
+        there lands in the same handler a failed query does and the claim goes
+        back. The next mention retries; the unique index from migration 0005 is
+        what stops that retry becoming a second row.
+        """
+        failing = RecordedEmit(raises=RuntimeError("redis is unreachable"))
+        consumer = TranscriptConsumer(redis, dispatch=dispatch, emit=failing)  # type: ignore[arg-type]
+        await watch(consumer, redis.subscription)
+
+        await consumer.handle_message(
+            redis.subscription, segment(text="Let's get an MRI of the knee.")
+        )
+        await consumer.handle_message(
+            redis.subscription, segment(text="Let's get an MRI of the knee.")
+        )
+
+        assert len(failing.calls) == 2
+        assert "Policy query or nudge failed" in caplog.text
+
     async def test_a_transient_failure_gives_the_claim_back(
-        self, redis: FakeRedis, caplog: pytest.LogCaptureFixture
+        self, redis: FakeRedis, emit: RecordedEmit, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Otherwise one bad moment silences that procedure for the whole visit."""
         failing = RecordedDispatch(raises=RuntimeError("connection reset"))
-        consumer = TranscriptConsumer(redis, dispatch=failing)  # type: ignore[arg-type]
+        consumer = TranscriptConsumer(redis, dispatch=failing, emit=emit)  # type: ignore[arg-type]
         await watch(consumer, redis.subscription)
 
         await consumer.handle_message(redis.subscription, segment())
         await consumer.handle_message(redis.subscription, segment())
 
         assert len(failing.calls) == 2
-        assert "Policy query dispatch failed" in caplog.text
+        assert "Policy query or nudge failed" in caplog.text
 
     async def test_a_structural_failure_keeps_the_claim(
-        self, redis: FakeRedis, caplog: pytest.LogCaptureFixture
+        self, redis: FakeRedis, emit: RecordedEmit, caplog: pytest.LogCaptureFixture
     ) -> None:
         """The remaining gap is logged once per procedure, not once per segment."""
         blocked = RecordedDispatch(raises=MissingQueryParameters(("state", "payer")))
-        consumer = TranscriptConsumer(redis, dispatch=blocked)  # type: ignore[arg-type]
+        consumer = TranscriptConsumer(redis, dispatch=blocked, emit=emit)  # type: ignore[arg-type]
         await watch(consumer, redis.subscription)
 
         await consumer.handle_message(redis.subscription, segment())
@@ -347,13 +468,13 @@ class TestDedup:
         assert "state, payer" in caplog.text
 
     async def test_the_reason_reaches_the_log_when_there_is_one(
-        self, redis: FakeRedis, caplog: pytest.LogCaptureFixture
+        self, redis: FakeRedis, emit: RecordedEmit, caplog: pytest.LogCaptureFixture
     ) -> None:
         """A missing cpt_code has four causes and only one means "fix the table"."""
         blocked = RecordedDispatch(
             raises=MissingQueryParameters(("cpt_code",), reason="axis_not_spoken: view count")
         )
-        consumer = TranscriptConsumer(redis, dispatch=blocked)  # type: ignore[arg-type]
+        consumer = TranscriptConsumer(redis, dispatch=blocked, emit=emit)  # type: ignore[arg-type]
         await watch(consumer, redis.subscription)
 
         await consumer.handle_message(redis.subscription, segment())
@@ -361,7 +482,7 @@ class TestDedup:
         assert "axis_not_spoken" in caplog.text
 
     async def test_the_claim_is_held_on_the_code_so_one_order_raises_one_nudge(
-        self, redis: FakeRedis, dispatch: RecordedDispatch
+        self, redis: FakeRedis, dispatch: RecordedDispatch, emit: RecordedEmit
     ) -> None:
         """TASK-024 moves the guard from the keyword to the CPT code.
 
@@ -369,7 +490,7 @@ class TestDedup:
         one nudge. Under TASK-021's keyword claim these were indistinguishable
         and the question could not even be asked; now they share a claim.
         """
-        consumer = TranscriptConsumer(redis, dispatch=dispatch)  # type: ignore[arg-type]
+        consumer = TranscriptConsumer(redis, dispatch=dispatch, emit=emit)  # type: ignore[arg-type]
         await watch(consumer, redis.subscription)
 
         await consumer.handle_message(
@@ -383,10 +504,10 @@ class TestDedup:
         assert redis.sets[procedure_seen_key(SESSION_ID)] == {"cpt:73721"}
 
     async def test_two_distinct_codes_each_get_their_own_claim(
-        self, redis: FakeRedis, dispatch: RecordedDispatch
+        self, redis: FakeRedis, dispatch: RecordedDispatch, emit: RecordedEmit
     ) -> None:
         """Sharing a claim is a property of sharing a code, not of sharing a keyword."""
-        consumer = TranscriptConsumer(redis, dispatch=dispatch)  # type: ignore[arg-type]
+        consumer = TranscriptConsumer(redis, dispatch=dispatch, emit=emit)  # type: ignore[arg-type]
         await watch(consumer, redis.subscription)
 
         await consumer.handle_message(
@@ -397,10 +518,10 @@ class TestDedup:
         assert len(dispatch.calls) == 2
 
     async def test_a_procedure_with_no_code_is_still_claimed_on_its_keyword(
-        self, redis: FakeRedis, dispatch: RecordedDispatch
+        self, redis: FakeRedis, dispatch: RecordedDispatch, emit: RecordedEmit
     ) -> None:
         """Otherwise an unmappable procedure would warn on every segment naming it."""
-        consumer = TranscriptConsumer(redis, dispatch=dispatch)  # type: ignore[arg-type]
+        consumer = TranscriptConsumer(redis, dispatch=dispatch, emit=emit)  # type: ignore[arg-type]
         await watch(consumer, redis.subscription)
 
         await consumer.handle_message(
