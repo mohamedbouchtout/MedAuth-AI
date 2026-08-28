@@ -10,10 +10,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from functools import lru_cache
 
+from fastapi import Request
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from track_a_clinical.config import get_settings
+from track_a_clinical.consumer import TranscriptConsumer
 from track_a_clinical.db import get_sessionmaker
 
 
@@ -48,3 +50,15 @@ async def close_redis() -> None:
     if _redis_client.cache_info().currsize:
         await _redis_client().aclose()
     _redis_client.cache_clear()
+
+
+async def get_transcript_consumer(request: Request) -> TranscriptConsumer | None:
+    """Return the running transcript consumer, or None when there is none.
+
+    The consumer is owned by the application lifespan and lives on
+    ``app.state``, so it is reached through the request rather than a module
+    global. An app built without the lifespan, as most route tests do, has no
+    consumer, and ``GET /health`` reports that as ``error`` rather than raising.
+    """
+    consumer = getattr(request.app.state, "transcript_consumer", None)
+    return consumer if isinstance(consumer, TranscriptConsumer) else None

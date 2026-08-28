@@ -20,10 +20,41 @@ servers:
     description: Local development (see the port table in CLAUDE.md)
 
 tags:
+  - name: health
+    description: Readiness for the Kubernetes probe.
   - name: sessions
     description: Start a clinical encounter, refresh its token, and end it.
 
 paths:
+  /health:
+    get:
+      tags: [health]
+      operationId: health
+      summary: Service health
+      description: >-
+        Reports whether Redis and the transcript consumer are usable. 200 when
+        both are `ok`, 503 when either is `error`. The body is the standard
+        envelope in both cases and always names the individual dependencies, so
+        a failing probe is diagnosable from the response alone — a 503 carries
+        `data`, not `error`, because the request itself succeeded.
+
+        Unauthenticated and deliberately unaudited: this is what the Kubernetes
+        readiness probe calls, it exposes no patient data, and CLAUDE.md exempts
+        health endpoints from the hipaa-logger requirement.
+      responses:
+        '200':
+          description: Readiness of Redis and the transcript consumer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: At least one dependency is unavailable. The body names which.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
   /sessions/start:
     post:
       tags: [sessions]
@@ -195,6 +226,46 @@ paths:
 
 components:
   schemas:
+    ComponentStatus:
+      type: string
+      enum: [ok, error]
+
+    HealthData:
+      type: object
+      required: [redis, transcript_consumer]
+      properties:
+        redis:
+          $ref: '#/components/schemas/ComponentStatus'
+          description: >-
+            Whether Redis answers. This service both publishes the session
+            lifecycle signals and consumes the transcript bus over it, so an
+            unreachable Redis means new sessions cannot be announced and no
+            transcript is accumulated.
+        transcript_consumer:
+          $ref: '#/components/schemas/ComponentStatus'
+          description: >-
+            Whether the transcript consumer is running and subscribed. When it
+            is not, no encounter on this instance accumulates a transcript and
+            none produces a SOAP note — a failure that otherwise surfaces only
+            as TASK-060 exhausting its retries, one warning per visit. The one
+            consumer serves the announcement, transcript and end channels
+            together, so there is no separate flag for the end signal: two
+            flags that cannot disagree would imply coverage that does not exist.
+
+    HealthResponse:
+      type: object
+      description: The standard envelope, carrying health flags.
+      required: [data, error]
+      properties:
+        data:
+          oneOf:
+            - $ref: '#/components/schemas/HealthData'
+            - type: 'null'
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/Error'
+            - type: 'null'
+
     StartSessionRequest:
       type: object
       additionalProperties: false
