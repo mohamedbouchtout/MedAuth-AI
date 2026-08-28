@@ -20,21 +20,37 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from api_envelope import install_error_handlers
-from track_a_clinical.api.dependencies import close_redis
+from track_a_clinical.api.dependencies import close_redis, get_redis
+from track_a_clinical.api.health import router as health_router
 from track_a_clinical.api.sessions import router as sessions_router
+from track_a_clinical.bedrock import reset_clients
+from track_a_clinical.consumer import TranscriptConsumer
 from track_a_clinical.db import dispose_engine
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Release the database pool and Redis client on shutdown.
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Start the transcript consumer, and release everything on shutdown.
 
-    Nothing is opened on startup: both connect lazily on first use, so the
-    service starts even when a backing store is briefly unreachable.
+    The database pool and the Redis client are still opened lazily on first use,
+    so the service starts even when a backing store is briefly unreachable — the
+    consumer's own read loop reconnects rather than failing startup.
+
+    The consumer is stashed on ``app.state`` rather than in a module global so
+    ``GET /health`` can reach the instance this app owns, and so a test app
+    built without this lifespan simply has none.
     """
+    consumer = TranscriptConsumer(await get_redis())
+    consumer.start()
+    app.state.transcript_consumer = consumer
     yield
+    # Before the Redis client closes: the consumer holds a pub/sub connection on
+    # it, and any generation still running is cancelled here rather than left to
+    # write into a closing pool.
+    await consumer.stop()
     await dispose_engine()
     await close_redis()
+    reset_clients()
 
 
 def create_app() -> FastAPI:
@@ -49,6 +65,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     install_error_handlers(app)
+    app.include_router(health_router)
     app.include_router(sessions_router)
     return app
 
