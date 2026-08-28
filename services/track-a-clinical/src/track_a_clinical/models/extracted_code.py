@@ -4,8 +4,9 @@ Not a mapped class — a Pydantic model for what goes *inside* two JSONB columns
 on :class:`~track_a_clinical.models.clinical_note.ClinicalNote`. It lives beside
 the mapped classes for the reason CLAUDE.md gives for those: four consumers read
 or write this shape and the alternative is each of them re-deriving it from the
-column. TASK-030 writes it, TASK-031 fills in the validation half, TASK-060
-reads ``icd10_codes`` as a bundle's diagnoses, and TASK-072 renders both.
+column. TASK-030 writes it — both the LLM's codes and the ones only
+Comprehend Medical found — TASK-031 fills in the validation half, TASK-060 reads
+``icd10_codes`` as a bundle's diagnoses, and TASK-072 renders both.
 
 The contract is fixed in CLAUDE.md "Extracted clinical codes — one JSON shape";
 this module is the executable half of it. Two of its rules are enforced here
@@ -21,6 +22,12 @@ rather than left to call sites:
   make it identical to a code written before TASK-031 existed — the same
   distinction CLAUDE.md draws between a payer's silence and a payer's negative
   determination.
+* **A ``comprehend-medical`` entry is a suggestion, not a stated diagnosis.**
+  Nobody in the encounter said it and no note asserted it; Comprehend read it
+  out of the transcript. It carries a real score and is surfaced for provider
+  review, and it is not a diagnosis a prior-auth bundle may claim on the
+  provider's behalf. See :meth:`ExtractedCode.from_comprehend` and CLAUDE.md's
+  shape contract for what each consumer owes it.
 
 Nothing here is PHI on its own: a diagnosis code attached to an encounter is,
 which is why the rows carrying it are audited, but the model is just a shape.
@@ -164,6 +171,38 @@ class ExtractedCode(BaseModel):
     def from_llm(cls, code: str, display: str | None = None) -> ExtractedCode:
         """Build the entry TASK-030's Haiku pass writes: unscored and unvalidated."""
         return cls(code=code, display=display, source=SOURCE_LLM_EXTRACTION)
+
+    @classmethod
+    def from_comprehend(
+        cls,
+        code: str,
+        display: str | None,
+        confidence: float,
+    ) -> ExtractedCode:
+        """Build an entry Comprehend Medical proposed on its own.
+
+        Used for a code the LLM pass never proposed. It carries a real
+        ``confidence`` — Comprehend's own ``ICD10CMConcept.Score`` — which is
+        the field an ``llm-extraction`` entry structurally cannot have, so the
+        two kinds of entry stay distinguishable by more than a label.
+
+        **``validation`` stays ``None`` on these entries permanently, and that
+        is not the same "not checked yet" a fresh LLM entry carries.** There is
+        nothing left to check it against: asking Comprehend to validate a code
+        Comprehend proposed measures self-consistency, the same circularity that
+        stops the validation pass from being handed the generated note instead
+        of the transcript. The honest reading of the field here is "no
+        independent source has weighed in", which is exactly what ``None`` says.
+
+        ``display`` is Comprehend's own ``Description`` and is never invented to
+        fill the field, per CLAUDE.md's shape contract.
+        """
+        return cls(
+            code=code,
+            display=display,
+            source=SOURCE_COMPREHEND_MEDICAL,
+            confidence=confidence,
+        )
 
 
 def dump_codes(codes: list[ExtractedCode]) -> list[dict[str, Any]]:

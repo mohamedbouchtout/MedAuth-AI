@@ -185,3 +185,37 @@ def test_the_matching_key_is_case_and_whitespace_insensitive() -> None:
 def test_a_blank_code_is_still_rejected() -> None:
     with pytest.raises(ValueError, match="must not be blank"):
         ExtractedCode.from_llm("   ")
+
+
+# --- codes Comprehend proposed on its own (TASK-030) -------------------------
+
+
+def test_a_comprehend_proposal_carries_a_real_score_and_no_validation() -> None:
+    """The score is Comprehend's own; nothing independent has weighed in on it.
+
+    ``validation`` stays ``None`` permanently on these entries — validating a
+    code against the source that proposed it is the same circularity that keeps
+    the validation pass reading the transcript rather than the generated note.
+    """
+    code = ExtractedCode.from_comprehend("M1711", "Synthetic knee description", 0.93)
+
+    assert code.code == "M17.11"
+    assert code.display == "Synthetic knee description"
+    assert code.source == SOURCE_COMPREHEND_MEDICAL
+    assert code.confidence == pytest.approx(0.93)
+    assert code.validation is None
+
+
+def test_a_comprehend_proposal_with_no_description_keeps_none() -> None:
+    """``display`` is the source's own words or nothing — never invented."""
+    assert ExtractedCode.from_comprehend("I10", None, 0.97).display is None
+
+
+def test_a_comprehend_proposal_is_distinguishable_from_an_llm_one() -> None:
+    """More than a label: an llm-extraction entry cannot structurally hold a score."""
+    proposed = ExtractedCode.from_comprehend("I10", None, 0.97)
+    extracted = ExtractedCode.from_llm("I10")
+
+    assert proposed.source != extracted.source
+    assert proposed.confidence is not None
+    assert extracted.confidence is None

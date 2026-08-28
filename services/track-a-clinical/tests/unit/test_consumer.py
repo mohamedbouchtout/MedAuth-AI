@@ -30,7 +30,12 @@ from track_a_clinical.consumer import (
     session_ended_channel,
     transcription_channel,
 )
-from track_a_clinical.models import SOURCE_LLM_EXTRACTION, CodeValidation, ExtractedCode
+from track_a_clinical.models import (
+    SOURCE_COMPREHEND_MEDICAL,
+    SOURCE_LLM_EXTRACTION,
+    CodeValidation,
+    ExtractedCode,
+)
 from track_a_clinical.soap import GeneratedNote, SoapSections
 
 SESSION_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -144,7 +149,7 @@ def stored(monkeypatch: pytest.MonkeyPatch) -> list[uuid.UUID]:
     return written
 
 
-async def _no_validation(codes: list[ExtractedCode], transcript: str) -> list[ExtractedCode]:
+async def _no_reconciliation(codes: list[ExtractedCode], transcript: str) -> list[ExtractedCode]:
     """Stand in for the Comprehend pass, which these tests are not about.
 
     Injected rather than left to the default, so no test in this module can
@@ -156,14 +161,14 @@ async def _no_validation(codes: list[ExtractedCode], transcript: str) -> list[Ex
 
 def build(
     generate: Recorder,
-    validate_icd10: Any = _no_validation,
+    reconcile_icd10: Any = _no_reconciliation,
 ) -> tuple[TranscriptConsumer, FakePubSub]:
     """Return a consumer wired to a fake subscription and a stubbed generator."""
     consumer = TranscriptConsumer(
         redis=None,  # type: ignore[arg-type]
         session_factory=session_factory(),
         generate=generate,
-        validate_icd10=validate_icd10,
+        reconcile_icd10=reconcile_icd10,
     )
     return consumer, FakePubSub()
 
@@ -748,17 +753,113 @@ async def test_cpt_codes_are_never_sent_for_validation(stored: list[Any]) -> Non
 
 
 @pytest.mark.asyncio
-async def test_a_note_with_no_codes_skips_validation(stored: list[Any]) -> None:
-    """Nothing to check means no request is made."""
-    called: list[int] = []
+async def test_a_note_with_no_codes_is_still_reconciled(
+    stored: list[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The extraction pass finding nothing is where discovery is worth the most.
 
-    async def validate(codes: list[ExtractedCode], transcript: str) -> list[ExtractedCode]:
-        called.append(1)
-        return codes
+    So there is deliberately no short circuit on an empty code list: skipping
+    the call to save a round trip would drop the finding in the one case it
+    matters most. The reconciled codes reach the stored row, not just the
+    in-memory note.
+    """
+    written: list[Any] = []
+    called: list[str] = []
 
-    consumer, pubsub = build(Recorder(NOTE), validate)
+    async def reconcile(codes: list[ExtractedCode], transcript: str) -> list[ExtractedCode]:
+        called.append(transcript)
+        return [*codes, ExtractedCode.from_comprehend("I10", "Essential hypertension", 0.97)]
+
+    async def store_note(session: Any, *, encounter: Any, note: Any) -> uuid.UUID:
+        written.append(note)
+        return encounter.id
+
+    from track_a_clinical import notes
+
+    monkeypatch.setattr(notes, "store_note", store_note)
+
+    consumer, pubsub = build(Recorder(NOTE), reconcile)
     await consumer.handle_message(pubsub, started(SESSION_ID))
+    await consumer.handle_message(pubsub, segment(SESSION_ID, "blood pressure is stable"))
+    await consumer.handle_message(pubsub, ended(SESSION_ID))
+    await drain(consumer)
+
+    assert called == ["blood pressure is stable"]
+    assert [code.code for code in written[0].icd10_codes] == ["I10"]
+    assert written[0].icd10_codes[0].source == SOURCE_COMPREHEND_MEDICAL
+    assert written[0].icd10_codes[0].confidence == pytest.approx(0.97)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_extraction_is_left_undetermined(
+    stored: list[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``None`` means the pass never answered, and suggestions must not fill it in.
+
+    ``[]`` and ``None`` are different facts on this column — ran and found
+    nothing, against never determined. Writing Comprehend's suggestions into
+    the second would present a partial answer as the answer.
+    """
+    written: list[Any] = []
+    called: list[str] = []
+
+    async def reconcile(codes: list[ExtractedCode], transcript: str) -> list[ExtractedCode]:
+        called.append(transcript)
+        return [ExtractedCode.from_comprehend("I10", None, 0.97)]
+
+    async def store_note(session: Any, *, encounter: Any, note: Any) -> uuid.UUID:
+        written.append(note)
+        return encounter.id
+
+    from track_a_clinical import notes
+
+    monkeypatch.setattr(notes, "store_note", store_note)
+
+    note = GeneratedNote(
+        sections=SoapSections(subjective="s", objective="o", assessment="a", plan="p"),
+        icd10_codes=None,
+        cpt_codes=None,
+    )
+    consumer, pubsub = build(Recorder(note), reconcile)
+    await consumer.handle_message(pubsub, started(SESSION_ID))
+    await consumer.handle_message(pubsub, segment(SESSION_ID, "blood pressure is stable"))
     await consumer.handle_message(pubsub, ended(SESSION_ID))
     await drain(consumer)
 
     assert called == []
+    assert written[0].icd10_codes is None
+
+
+@pytest.mark.asyncio
+async def test_a_discovered_code_is_appended_after_the_llm_ones(
+    stored: list[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A suggestion never displaces or reorders what the extraction pass proposed."""
+    written: list[Any] = []
+
+    async def reconcile(codes: list[ExtractedCode], transcript: str) -> list[ExtractedCode]:
+        return [*codes, ExtractedCode.from_comprehend("I10", None, 0.97)]
+
+    async def store_note(session: Any, *, encounter: Any, note: Any) -> uuid.UUID:
+        written.append(note)
+        return encounter.id
+
+    from track_a_clinical import notes
+
+    monkeypatch.setattr(notes, "store_note", store_note)
+
+    note = GeneratedNote(
+        sections=SoapSections(subjective="s", objective="o", assessment="a", plan="p"),
+        icd10_codes=[ExtractedCode.from_llm("M17.11")],
+        cpt_codes=[],
+    )
+    consumer, pubsub = build(Recorder(note), reconcile)
+    await consumer.handle_message(pubsub, started(SESSION_ID))
+    await consumer.handle_message(pubsub, ended(SESSION_ID))
+    await drain(consumer)
+
+    assert [code.code for code in written[0].icd10_codes] == ["M17.11", "I10"]
+    assert [code.source for code in written[0].icd10_codes] == [
+        SOURCE_LLM_EXTRACTION,
+        SOURCE_COMPREHEND_MEDICAL,
+    ]

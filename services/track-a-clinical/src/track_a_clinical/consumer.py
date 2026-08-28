@@ -158,9 +158,9 @@ class TranscriptConsumer:
         *,
         session_factory: SessionFactory | None = None,
         generate: Callable[..., Awaitable[soap.GeneratedNote | None]] = soap.generate,
-        validate_icd10: Callable[
+        reconcile_icd10: Callable[
             [list[ExtractedCode], str], Awaitable[list[ExtractedCode]]
-        ] = comprehend.validate_icd10,
+        ] = comprehend.reconcile_icd10,
     ) -> None:
         """Build a consumer.
 
@@ -169,13 +169,14 @@ class TranscriptConsumer:
             session_factory: Opens the database session each generation writes
                 through. Defaults to the service's own sessionmaker.
             generate: The SOAP generation seam. Defaults to the real one.
-            validate_icd10: The Comprehend Medical validation seam (TASK-031).
-                Defaults to the real one.
+            reconcile_icd10: The Comprehend Medical seam (TASK-031) — it
+                validates the LLM's ICD-10 codes and appends the ones only
+                Comprehend found. Defaults to the real one.
         """
         self._redis = redis
         self._session_factory = session_factory or _default_session_factory
         self._generate = generate
-        self._validate_icd10 = validate_icd10
+        self._reconcile_icd10 = reconcile_icd10
         self._buffers: dict[uuid.UUID, TranscriptBuffer] = {}
         self._task: asyncio.Task[None] | None = None
         #: Keyed by session so a second end signal for a session already being
@@ -386,13 +387,18 @@ class TranscriptConsumer:
         self._generations[session_id] = task
         task.add_done_callback(lambda _: self._generations.pop(session_id, None))
 
-    async def _validate_codes(
+    async def _reconcile_codes(
         self,
         note: soap.GeneratedNote,
         transcript: str,
         session_id: uuid.UUID,
     ) -> soap.GeneratedNote:
-        """Return `note` with its ICD-10 codes validated, or unchanged on failure.
+        """Return `note` with its ICD-10 codes reconciled, or unchanged on failure.
+
+        Reconciling is two things from one Comprehend Medical request: each
+        LLM-extracted code gets its ``validation``, and a code only Comprehend
+        found is appended as a ``comprehend-medical`` entry. So the note can
+        come back with more ICD-10 codes than it was generated with.
 
         **Runs before the insert, deliberately.** ``store_note`` is
         ``ON CONFLICT DO NOTHING`` and has no idempotent update path, so a
@@ -401,28 +407,44 @@ class TranscriptConsumer:
         written already validated, in one write, with no second transaction to
         get half-applied.
 
-        **Never fatal.** Any failure leaves every ``validation`` at ``None`` and
-        the note is stored as it stands — the same independence TASK-030 gives
-        the Sonnet and Haiku passes, with the note as the higher-priority
-        artifact and validation as metadata about it. ``None`` already reads as
-        "not checked yet", so nothing further is needed to represent it
-        honestly.
+        **Never fatal.** Any failure leaves every ``validation`` at ``None``,
+        appends nothing, and the note is stored as it stands — the same
+        independence TASK-030 gives the Sonnet and Haiku passes, with the note
+        as the higher-priority artifact and validation as metadata about it.
+        ``None`` already reads as "not checked yet", so nothing further is
+        needed to represent it honestly.
+
+        **An empty code list is still reconciled; a missing one is not**, and
+        the difference is the one ``GeneratedNote`` already draws. ``[]`` means
+        the extraction pass ran and found no diagnosis — exactly where a code
+        only Comprehend read is worth surfacing, so skipping the call to save a
+        round trip would drop the finding in the case it matters most.
+        ``None`` means the pass never produced an answer at all, and the
+        column's NULL records precisely that; writing Comprehend's suggestions
+        into it would replace "not determined" with a list that reads as
+        determined, the same collapse ``validation: None`` exists to avoid one
+        level down.
 
         ``cpt_codes`` are not touched: Comprehend Medical has no CPT inference,
         so those entries keep ``validation: None`` permanently by design.
         """
-        if not note.icd10_codes:
+        if note.icd10_codes is None:
+            logger.info(
+                "No codes were extracted for session %s; leaving them undetermined "
+                "rather than filling the column with suggestions",
+                session_id,
+            )
             return note
         try:
-            validated = await self._validate_icd10(note.icd10_codes, transcript)
+            reconciled = await self._reconcile_icd10(note.icd10_codes, transcript)
         except Exception:
             logger.warning(
-                "ICD-10 validation failed for session %s; storing the note unvalidated",
+                "ICD-10 reconciliation failed for session %s; storing the note unvalidated",
                 session_id,
                 exc_info=True,
             )
             return note
-        return replace(note, icd10_codes=validated)
+        return replace(note, icd10_codes=reconciled)
 
     async def _generate_and_store(self, session_id: uuid.UUID, buffer: TranscriptBuffer) -> None:
         """Generate the note for one ended session and store it, then free the buffer.
@@ -441,7 +463,7 @@ class TranscriptConsumer:
                 # stays; nothing here can improve on the attempt.
                 return
 
-            note = await self._validate_codes(note, transcript, session_id)
+            note = await self._reconcile_codes(note, transcript, session_id)
 
             async with self._session_factory() as session:
                 encounter = await notes.load_encounter(session, session_id)
