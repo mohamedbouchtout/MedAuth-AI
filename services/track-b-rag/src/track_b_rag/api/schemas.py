@@ -35,6 +35,7 @@ from pydantic import (
 
 from payer_vocab import normalize_payer
 from track_b_rag.documents import DEFAULT_CONTENT_TYPE, ContentType
+from track_b_rag.policy_rules import RulesSource
 
 
 def _empty_to_none(value: object) -> object:
@@ -270,9 +271,23 @@ class PolicyQueryData(BaseModel):
 
     The first four fields describe the payer's policy and are the half that is
     cached; the middle three describe this encounter's documentation and are
-    recomputed on every call. The response does not say which half came from
-    where — a caller that behaved differently on a cache hit would be reading
-    something into it that is not there.
+    recomputed on every call.
+
+    ``source`` reports which tier answered, and there is exactly one thing a
+    caller may branch on: whether it is ``fallback``. That is not a
+    which-cache-did-it-come-from detail but the difference between an answer and
+    the absence of one — a fallback means the payer's rules could not be
+    established at all, so ``auth_criteria`` is empty because nothing is known
+    rather than because nothing is required. TASK-040's emitter needs it to
+    withhold the haptic escalation on an answer the system could not verify,
+    and it is surfaced here rather than inferred downstream because
+    "high risk with no criteria" is a guess at this field, not a reading of it.
+
+    Behaving differently on ``cache`` versus ``rag`` versus ``crd`` is still
+    reading something into the response that is not there: those distinguish how
+    an established answer was reached, and an established answer is an
+    established answer. They are here for the operational trace and for
+    recording a nudge's provenance, not as a branch condition.
     """
 
     requires_auth: bool = Field(
@@ -301,4 +316,12 @@ class PolicyQueryData(BaseModel):
     )
     step_therapy_details: str | None = Field(
         description="What the step therapy requirement is, when there is one.",
+    )
+    source: RulesSource = Field(
+        description=(
+            "Which tier established the payer's rules. Branch only on "
+            "'fallback', which means they could not be established at all and "
+            "the empty auth_criteria therefore means 'unknown', not 'none'. The "
+            "rest is provenance for logs and nudge records."
+        ),
     )

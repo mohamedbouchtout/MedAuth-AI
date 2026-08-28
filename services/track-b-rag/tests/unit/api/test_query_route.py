@@ -18,7 +18,7 @@ import pytest
 from httpx import AsyncClient
 
 from track_b_rag.api import query as query_route
-from track_b_rag.query import PolicyQueryAnswer
+from track_b_rag.query import PolicyQueryAnswer, fallback_answer
 
 SESSION_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
 PROVIDER_ID = "9c858901-8a57-4791-81fe-4c455b099bc9"
@@ -92,21 +92,53 @@ async def test_a_query_returns_the_standard_envelope(
             "nudge_message": "Prior authorization required for knee MRI.",
             "step_therapy_required": False,
             "step_therapy_details": None,
+            "source": "rag",
         },
         "error": None,
     }
 
 
-async def test_the_response_does_not_say_which_path_answered(
+async def test_the_response_says_which_tier_answered(
     client: AsyncClient, recorder: Recorder
 ) -> None:
-    """A caller branching on that would be reading something that is not a contract.
+    """TASK-040 reverses this deliberately, and only for one distinction.
 
-    TASK-015 adds a third path — Da Vinci CRD — in front of the same response.
+    This test previously asserted `"source" not in data`, on the grounds that a
+    caller branching on the answering path would be reading something that is
+    not a contract. That reasoning still holds for cache vs rag vs crd, and the
+    field's own description says so.
+
+    What it got wrong is that `fallback` is not one of those. It is the
+    difference between an answer and the absence of one: the empty
+    `auth_criteria` means "unknown", not "none". TASK-040's emitter has to know,
+    so it can withhold the haptic escalation on an answer nothing verified, and
+    the alternative was inferring it from "high risk and no criteria" — a guess
+    at this field rather than a reading of it, and a fourth place deriving a
+    decision this work is busy reducing to one.
     """
     response = await client.post("/policies/query", json=body())
 
-    assert "source" not in response.json()["data"]
+    assert response.json()["data"]["source"] == "rag"
+
+
+async def test_a_fallback_answer_says_it_is_a_fallback(
+    client: AsyncClient, recorder: Recorder
+) -> None:
+    """The one distinction a caller may act on, over the wire.
+
+    TASK-040's emitter reads this to keep an unverifiable answer from firing the
+    haptic escalation. Asserted at the route rather than only on
+    ``PolicyQueryAnswer`` because the emitter is an HTTP client: a ``source``
+    that stopped crossing the boundary would leave it silently inferring again.
+    """
+    recorder.answer = fallback_answer()
+
+    response = await client.post("/policies/query", json=body())
+
+    data = response.json()["data"]
+    assert data["source"] == "fallback"
+    assert data["denial_risk"] == "high"
+    assert data["auth_criteria"] == []
 
 
 async def test_every_field_reaches_the_pipeline(client: AsyncClient, recorder: Recorder) -> None:

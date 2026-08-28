@@ -64,6 +64,7 @@ ANSWER = {
     "nudge_message": "Document conservative therapy before ordering.",
     "step_therapy_required": False,
     "step_therapy_details": None,
+    "source": "rag",
 }
 
 

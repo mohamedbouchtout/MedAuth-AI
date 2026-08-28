@@ -145,5 +145,6 @@ async def query_policies(
             nudge_message=answer.nudge_message,
             step_therapy_required=answer.step_therapy_required,
             step_therapy_details=answer.step_therapy_details,
+            source=answer.source,
         )
     )
