@@ -2510,9 +2510,53 @@ The insurance policy RAG is the technical core. Build and validate before other 
     the clinical writing
   - Store result in `clinical_notes` table. The `icd10_codes` and `cpt_codes`
     JSONB columns take the object shape fixed in CLAUDE.md "Extracted clinical
-    codes — one JSON shape": every entry written here is `source:
+    codes — one JSON shape": every entry the Haiku pass writes is `source:
     "llm-extraction"` with `confidence: null` and `validation: null`, and
     TASK-031 fills the validation half in place. Do not write bare code strings.
+  - **Codes only Comprehend Medical found are written here too, from the same
+    request TASK-031 already makes.** `InferICD10CM` returns every ICD-10-CM
+    concept it reads in the transcript, so its response answers two questions at
+    once: whether each code Haiku proposed holds up, and what Haiku missed. The
+    second half was briefly its own task (TASK-031b) and is folded back in
+    because it is not a second call, a second seam or a second pass — it is the
+    other half of one response, and splitting it would have meant a second round
+    trip to AWS to learn what the first already said.
+    - Written as their own entries with `source: "comprehend-medical"` and a
+      real `confidence` — the `ICD10CMConcept.Score`, the field an
+      `llm-extraction` entry structurally cannot carry — appended after the
+      LLM's own entries so a suggestion never displaces or reorders what the
+      extraction pass proposed.
+    - **The product question this was gated on is settled in CLAUDE.md**, in the
+      shape contract, because it binds TASK-060 and TASK-072 rather than this
+      task alone: such an entry is a *suggestion*, not a stated diagnosis.
+      TASK-072 renders it as one, and TASK-060 does not claim it in a
+      prior-auth bundle — a bundle asserts to a payer what the provider
+      documented, and a code nobody stated is not that. It becomes claimable
+      the ordinary way, by a provider accepting it through TASK-032's edit.
+    - **A proposal threshold, separate from TASK-031's confirmation
+      threshold**, and provisional in the same way and for the same reason.
+      `InferICD10CM` returns several candidate concepts per detected entity and
+      most are wrong, so a bar is what keeps a clinical note from becoming a
+      candidate list. The two constants hold the same value today and are
+      deliberately not one name: asserting a code nothing in the documentation
+      asserted is a stronger claim than confirming one a second source already
+      proposed, and they are expected to diverge once a real distribution of
+      scores exists.
+    - **One diagnosis is one entry.** Nothing is appended alongside a code
+      already in the list, whatever its source, and the comparison goes through
+      the dotless matching key — otherwise `M1711` from Comprehend and `M17.11`
+      from Haiku become two entries for one diagnosis, which is the payer-slug
+      failure arriving from the other direction.
+    - **`[]` is reconciled; `null` is not.** An extraction pass that ran and
+      found nothing is exactly where a code only Comprehend read is worth
+      surfacing. An extraction pass that never answered leaves `null`, and
+      filling that with suggestions would replace "not determined" with a list
+      that reads as determined — the collapse `validation: null` exists to
+      avoid, one level up.
+    - **Test:** a transcript naming a diagnosis the LLM pass missed yields an
+      entry sourced to comprehend-medical with its score; a weakly-linked
+      candidate yields none; a code the LLM already proposed is never
+      duplicated, in either spelling.
   - **Ordering on the end signal, in this order and for this reason.**
     Unsubscribe from the session's channels first, so no segment arrives during
     generation and no second end signal is processed. Then keep the in-memory
@@ -2608,6 +2652,17 @@ The insurance policy RAG is the technical core. Build and validate before other 
       `detect-changed-members.sh`, with a case in its test. The `test` matrix is
       generated from that array, so no new job was needed and `ci-passed`'s
       `needs` is unchanged.
+    - **The discovery half landed later, with TASK-031's branch**, once the
+      Comprehend Medical request existed to carry it. It is one function with
+      the validation pass — `comprehend.reconcile_icd10`, named for doing both
+      rather than for the half it started as — because both answers come out of
+      one `InferICD10CM` response and a second seam would have meant a second
+      round trip to learn what the first already said. The consumer takes it as
+      one injected seam, so no test in `test_consumer.py` can reach AWS. The
+      UNVERIFIED note on TASK-031 covers this half too: the deduplication that
+      stops one diagnosis becoming two entries runs through the same
+      `matching_key`, so it is correct under either spelling and closes with the
+      same live call.
 
 - [x] **TASK-031:** Comprehend Medical validation layer
   - Prerequisite: TASK-030 (writes the entries this validates)
@@ -2621,15 +2676,11 @@ The insurance policy RAG is the technical core. Build and validate before other 
     and has no CPT inference of any kind, so `cpt_codes` entries keep
     `validation: null` indefinitely. That is the designed outcome, not a gap this
     task should paper over.
-  - **Scope: this validates LLM-extracted codes only.** Comprehend will surface
-    ICD-10 codes the LLM never proposed, and adding them is deliberately out of
-    scope here — the `ExtractedCode` shape already supports a
-    `source: "comprehend-medical"` entry carrying a real confidence, so the
-    column can hold them whenever a task decides they should be written. Opened
-    as **TASK-031b** rather than folded in, the same way TASK-024b split off
-    from TASK-024: proposing new diagnoses is a different product question from
-    checking the ones already proposed, and it needs a decision about whether a
-    code no clinician stated belongs in a note at all.
+  - **Scope: this task fills in the `validation` half only.** Codes Comprehend
+    surfaced that the LLM never proposed are written by TASK-030's discovery
+    half, from the same response, and the two are one function — see TASK-030.
+    They were briefly split off as TASK-031b before that was folded back in;
+    that task no longer exists.
   - **Runs before the insert, not as an update after it.** `store_note` is
     `ON CONFLICT DO NOTHING` and has no idempotent update path, so a validation
     pass running after the write would have nothing to update on the retry of a
@@ -2763,25 +2814,6 @@ The insurance policy RAG is the technical core. Build and validate before other 
     - CI needed no change — `track-a-clinical` already has a job and no package
       was added.
 
-
-- [ ] **TASK-031b:** Record ICD-10 codes Comprehend found that the LLM missed
-  - Prerequisite: TASK-031 (the validation pass this extends)
-  - Service: `services/track-a-clinical`
-  - **The gap.** TASK-031 sends the transcript to `InferICD10CM` and uses the
-    response only to confirm or fail the codes Haiku already proposed. Every
-    concept Comprehend found that the LLM did not is discarded, including a
-    diagnosis stated plainly in the encounter and missed by the extraction pass.
-  - **What this would add.** Those concepts written as their own entries with
-    `source: "comprehend-medical"` and a real `confidence` — a combination the
-    `ExtractedCode` model already permits and nothing currently writes.
-  - **The product question this is gated on**, and the reason it is not folded
-    into TASK-031: a code no clinician stated and no LLM proposed appearing in a
-    note is a different claim from a code being checked. It affects what
-    TASK-060 puts in a prior-auth bundle as diagnoses and what TASK-072's review
-    screen shows a provider signing. Decide whether such entries are surfaced
-    for review rather than stored as equals, and settle it before writing them.
-  - **Test:** a transcript naming a diagnosis the LLM pass missed yields an
-    entry sourced to comprehend-medical with its score
 
 - [ ] **TASK-032:** SOAP note review endpoint
   - `GET /notes/{encounter_id}` — return generated SOAP note for provider review
