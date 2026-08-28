@@ -2815,7 +2815,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
       was added.
 
 
-- [ ] **TASK-032:** SOAP note review endpoint
+- [x] **TASK-032:** SOAP note review endpoint
   - Prerequisite: TASK-030 (writes the `clinical_notes` row these routes read)
   - Service: `services/track-a-clinical`
   - **Keyed on `session_id`, not `encounter_id`.** Earlier drafts of this task
@@ -2889,6 +2889,47 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **Test:** unknown `session_id` → 404 `session_not_found`; encounter with no
     note → 404 `note_not_generated`
   - **Test:** both routes write their audit row on the request's transaction
+  - Built (319 tests, 100% coverage). Decisions worth knowing before touching this:
+    - **Four of this task's decisions are in CLAUDE.md, not here**, because each
+      binds another task: the `session_id` keying and the v1 no-credential rule
+      are in the Session Lifecycle section, and the `provider-accepted` source
+      and the three-state PATCH are in the shape contract. TASK-060 and TASK-071
+      both depend on them. Read them there rather than inferring from the code.
+    - **The tri-state is implemented as `model_fields_set`, not as a `None`
+      default.** `UpdateNoteRequest.edited_fields()` returns only the keys the
+      request actually carried, so an omitted field never reaches the update at
+      all. A `None` default cannot express this: it makes "omitted" and
+      "explicitly null" the same value, and the direction that fails is the
+      dangerous one — a text edit silently clearing an encounter's diagnoses.
+      `tests/integration/test_notes_api.py` proves it through the JSONB column
+      rather than through an in-memory object, which is the only place a NULL
+      and a `[]` are genuinely distinguishable.
+    - **`provider_edited` is set on a real change, not on the arrival of a
+      PATCH.** A client re-sending the text it was given has edited nothing, and
+      a flag that says otherwise stops meaning anything. It is never cleared: a
+      note that was edited stays edited even if the original wording is restored.
+    - **A PATCH audits even when nothing changed.** The row was opened on a
+      request, which is the access an audit is asked about. Only the 404 paths
+      audit nothing — there was no note to access.
+    - **`ExtractedCode` gained a second model validator rather than a branch in
+      the existing one.** `provider-accepted` refuses a `validation` outright,
+      which is its own rule; it shares the no-confidence check with
+      `llm-extraction` because that rule is identical even though the arguments
+      for the two are opposite — a model's self-rating is not a measurement, a
+      human's decision is not a probability. The error message names whichever
+      applies.
+    - **The route tests use a two-step fake session** that answers the encounter
+      query and then the note query in order. That mirrors
+      `_load_encounter_and_note` and would need revisiting if the handler ever
+      loads them in one statement.
+    - No migration, no new environment variable, no new Redis key, and no CI
+      change — `track-a-clinical` already has a job, and the spec edit selects it
+      by the `docs/api/<service-name>.yaml` convention.
+    - Deferred deliberately: no optimistic concurrency on the PATCH. Two
+      providers editing one note concurrently would have the second overwrite
+      the first, silently. Nothing in the product puts two people on one note
+      today, and the fix is an `If-Match`/version column that belongs with real
+      provider authentication in Phase 5 rather than ahead of it.
 
 ---
 
