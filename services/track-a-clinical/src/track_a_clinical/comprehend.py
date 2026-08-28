@@ -14,7 +14,7 @@ of the transcript. It is written into the same column because that is where a
 provider will review it, and it stays distinguishable there by ``source`` and
 by carrying a ``confidence`` an ``llm-extraction`` entry structurally cannot
 have. What each consumer owes such an entry is fixed in CLAUDE.md, not decided
-here: TASK-072 shows it as a suggestion, and TASK-060 does not claim it in a
+here: TASK-071 shows it as a suggestion, and TASK-060 does not claim it in a
 prior-auth bundle as a diagnosis the provider stated.
 
 **The transcript is the input, never the generated note.** Validating the LLM's

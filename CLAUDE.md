@@ -464,6 +464,38 @@ neither re-derives it.
   and visit lifetime are independent, and conflating them is what produced the
   question in the first place.
 
+**Session-scoped routes are keyed on `session_id`, and the note routes carry no
+credential in v1.** Settled here rather than inside TASK-032 because it is the
+answer Known Constraints #8 asks for — the rule that nothing invents a parallel
+auth mechanism only works if the real answer is written down where the next task
+will look for it.
+
+- **`session_id` is the only identifier this service exposes to clients.**
+  `POST /sessions/start` returns `{session_id, jwt}` and nothing hands out
+  `encounters.id`, so `GET`/`PATCH /notes/{session_id}` (TASK-032) key on the
+  session like every route and every Redis channel here. Surfacing the encounter
+  primary key for one route would give clients two names for one visit and
+  guarantee they eventually disagree about which to send.
+- **Those two routes take no session token in v1, and `actor_id` comes from the
+  `encounters` row.** That matches the strength of everything around them:
+  `POST /sessions/start` accepts `provider_id` as an unauthenticated body field,
+  `validate_token()` proves possession only, and no provider-authentication
+  mechanism exists in this repository before SMART on FHIR in Phase 5. The
+  provider recorded on the encounter is the actor, never a claim presented by
+  the caller — the same rule the re-mint endpoint follows.
+- **`validate_remint_credential` is deliberately *not* reused here, and the
+  reason is structural rather than stylistic.** It answers 409 for an encounter
+  whose status is `completed`, because a finished visit must not be able to
+  reopen an audio socket. But note review happens *only* on completed
+  encounters — TASK-030 generates the note from the `session:ended` signal — so
+  requiring that credential would make every note unreadable by construction.
+  Do not "fix" the note routes by adding it. A real credential for them arrives
+  with provider authentication in Phase 5, and it will have to treat a completed
+  encounter as the normal case rather than as the error one.
+- **Note access is still PHI and is still audited**, as `READ_NOTE` and
+  `UPDATE_NOTE` from the action vocabulary below. Absent authentication is a
+  reason the audit trail matters more, not less.
+
 **How the JWT reaches a WebSocket endpoint — either carrier, never both
 required.** A WebSocket endpoint accepts the session token in *either* of two
 places, and one is enough:
@@ -615,10 +647,11 @@ model ID string.
 TASK-005 fixed the columns without fixing what goes inside them. Four consumers
 have to agree: TASK-030's Haiku pass writes them, TASK-031 validates the ICD-10
 half against Comprehend Medical and needs somewhere to record what it found,
-TASK-060 reads `icd10_codes` as a bundle's diagnoses, and TASK-072's review
-screen renders both. A bare list of code strings would have to break every one
-of them the moment TASK-031 lands, so the shape is fixed here before the first
-row is written rather than migrated afterwards.
+TASK-060 reads `icd10_codes` as a bundle's diagnoses, and TASK-071's review
+screen renders both and edits them through TASK-032's `PATCH`. A bare list of
+code strings would have to break every one of them the moment TASK-031 lands, so
+the shape is fixed here before the first row is written rather than migrated
+afterwards.
 
 Both columns hold a **JSON array of objects**, the same shape in each:
 
@@ -652,8 +685,8 @@ what TASK-060 puts in a bundle, and comparison between sources goes through a
 dotless key derived from it. Neither side of a comparison may normalise
 independently — one function produces the key, and every consumer calls it.
 | `display` | `str \| None` | The source's own description, never one invented to fill the field. |
-| `source` | `"llm-extraction" \| "comprehend-medical"` | Which pass proposed this code. A `comprehend-medical` entry is one the LLM never proposed — a suggestion rather than a stated diagnosis; see below. |
-| `confidence` | `float \| None`, 0.0–1.0 | The proposing source's own score. **`None` for every `llm-extraction` entry** — Haiku is not asked to rate itself, because a number a model invents about its own output is not a measurement and would be indistinguishable from Comprehend's calibrated score once both sit in the same column. |
+| `source` | `"llm-extraction" \| "comprehend-medical" \| "provider-accepted"` | Which pass proposed this code, or that a human did. A `comprehend-medical` entry is one the LLM never proposed — a suggestion rather than a stated diagnosis; see below. A `provider-accepted` entry is one a provider put there deliberately through TASK-032's edit. |
+| `confidence` | `float \| None`, 0.0–1.0 | The proposing source's own score. **`None` for every `llm-extraction` entry** — Haiku is not asked to rate itself, because a number a model invents about its own output is not a measurement and would be indistinguishable from Comprehend's calibrated score once both sit in the same column. **`None` for every `provider-accepted` entry too**, for a different reason: a human acceptance is a fact, not a probability. |
 | `validation` | object \| `None` | Written by TASK-031; absent until it runs. |
 | `validation.source` | `"comprehend-medical"` | The validating pass. |
 | `validation.confidence` | `float \| None` | Comprehend's **`ICD10CMConcept.Score`** for the matching code, or `None` when it returned no such concept at all. Not the entity-level `Score` — see below. |
@@ -696,18 +729,53 @@ cannot have. What that obliges:
   Comprehend to validate a code Comprehend proposed measures self-consistency,
   which is the circularity that already stops the validating pass from being
   handed the generated note instead of the transcript.
-- **TASK-072 renders them as suggestions**, visibly attributed to the machine
+- **TASK-071 renders them as suggestions**, visibly attributed to the machine
   that proposed them, and never mixed indistinguishably into the list a
   provider is signing.
 - **TASK-060 does not put one in a prior-auth bundle as a diagnosis.** A bundle
   asserts to a payer what the provider documented; a code nobody stated and no
   note asserted is not that. It becomes claimable the ordinary way — a provider
-  accepts it through TASK-032's note edit, which writes it as documentation.
+  accepts it through TASK-032's note edit, which writes it as documentation and
+  changes its `source` to `provider-accepted`, below.
 - **A code is one entry, whichever pass found it.** Nothing is ever appended
   alongside a code already present in the column, and the comparison goes
   through the dotless matching key above rather than raw string equality, so
   `M1711` from one source and `M17.11` from another cannot become two entries
   for one diagnosis.
+
+**`provider-accepted` is the third source, and it is what a human acceptance
+looks like.** The two bullets above leave one thing unrepresentable: a provider
+who reads a `comprehend-medical` suggestion and decides it belongs in the note
+has no way to say so. Rewriting the entry as `llm-extraction` would assert that
+a model proposed it, which is false and would also collide with that source's
+"no confidence" rule the moment the entry carries Comprehend's score. Leaving it
+as `comprehend-medical` keeps TASK-060 refusing to claim a code the provider has
+now documented. So the acceptance is its own source value, fixed here rather than
+in TASK-032 alone, because TASK-060 and TASK-071 both branch on it.
+
+- **Only TASK-032's `PATCH /notes/{session_id}` writes it.** No extraction pass
+  ever produces a `provider-accepted` entry, and no automated path may promote
+  one. The value's entire meaning is that a person decided.
+- **`confidence` is always `None`**, enforced the same way the `llm-extraction`
+  rule is. A human acceptance is a fact, not a probability, and Comprehend's
+  score measured its own linkage, not the provider's judgement. Carrying that
+  number forward would attach a machine's uncertainty to a human's decision, and
+  a later reader could not tell which of the two the number described. The score
+  is not preserved elsewhere either: what the provider accepted is the code, and
+  the suggestion's own audit trail is the note's edit history, not a stale float.
+- **`validation` is always `None`**, permanently, and for the same reason a
+  `comprehend-medical` entry's is. There is nothing independent left to check a
+  provider's own documentation against, and TASK-031's validation pass runs
+  against the transcript before the note is stored — it never revisits a row a
+  provider has since edited.
+- **TASK-060 treats it exactly as it treats `llm-extraction`**: a diagnosis the
+  provider documented, claimable in a bundle. That is the whole point of the
+  value — it is the mechanism by which a suggestion becomes claimable.
+- **TASK-071 renders it as an accepted code, not as a suggestion**, so a
+  provider can see what they have already acted on.
+- **A code is still one entry.** Accepting a suggestion mutates the existing
+  entry's `source` in place; it never appends a second entry for a code the
+  column already holds, under the dotless matching key as always.
 
 **`null` and `[]` are different answers on these columns.** `[]` means the
 extraction pass ran and found no code; `null` means it never produced an answer
@@ -717,6 +785,16 @@ Comprehend read is worth the most, and does **not** run on `null`: filling that
 column with suggestions would replace "not determined" with a list that reads
 as determined, which is the same collapse `validation: null` exists to avoid one
 level down.
+
+**So an editing endpoint needs three states, not two.** TASK-032's `PATCH`
+accepts partial bodies, and "the client did not mention `icd10_codes`" has to
+stay distinct from "the client set `icd10_codes` to `null`" and from "the client
+sent a list". Reading an absent field as `[]` would let a provider correcting one
+SOAP section silently declare that an encounter has no diagnoses — the exact
+collapse this whole section exists to prevent, arriving through a request body
+rather than through an extraction pass. Use Pydantic's `exclude_unset` (or an
+equivalent sentinel) rather than a `None` default, which cannot tell the two
+apart, and test the omitted-field case specifically.
 
 The Pydantic model for this shape lives beside the mapped classes in
 `services/track-a-clinical/src/track_a_clinical/models/`, for the reason that
