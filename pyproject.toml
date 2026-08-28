@@ -17,6 +17,7 @@ exclude = ["packages/audio-wire"]
 
 [tool.uv.sources]
 medauth-api-envelope = { workspace = true }
+medauth-bedrock-client = { workspace = true }
 medauth-hipaa-logger = { workspace = true }
 medauth-crypto-utils = { workspace = true }
 medauth-fhir-types = { workspace = true }
@@ -51,6 +52,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "T20"]  # T20 bans print() — see 
 # in with third-party imports.
 known-first-party = [
     "api_envelope",
+    "bedrock_client",
     "hipaa_logger",
     "crypto_utils",
     "fhir_types",

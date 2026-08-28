@@ -41,7 +41,7 @@ ALL_SERVICES=(
   nudge-service
   policy-scraper
 )
-ALL_PACKAGES=(api-envelope hipaa-logger crypto-utils fhir-types payer-vocab)
+ALL_PACKAGES=(api-envelope hipaa-logger crypto-utils fhir-types payer-vocab bedrock-client)
 
 
 # Return 0 when any changed path matches the given extended regular expression.
