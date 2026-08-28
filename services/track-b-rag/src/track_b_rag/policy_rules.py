@@ -54,6 +54,7 @@ from qdrant_client import QdrantClient
 from redis.asyncio import Redis
 from starlette.concurrency import run_in_threadpool
 
+from bedrock_client import first_json_object
 from track_b_rag import bedrock, cache, crd, retrieval
 from track_b_rag.config import get_settings
 
@@ -493,7 +494,7 @@ def parse_rules(answer: str) -> PolicyRules | None:
     document of the wrong shape: that is what the retry and then the fallback
     exist for.
     """
-    document = _first_json_object(answer)
+    document = first_json_object(answer)
     if document is None:
         return None
     try:
@@ -507,38 +508,3 @@ def parse_rules(answer: str) -> PolicyRules | None:
         # object at all — model_validate raises a ValidationError, which is a
         # ValueError, for either.
         return None
-
-
-def _first_json_object(text: str) -> str | None:
-    """Return the first balanced ``{...}`` span in `text`, or None if there is none.
-
-    Brace counting rather than a regular expression, because criteria strings can
-    contain braces and quotes; the scan tracks string literals and their escapes,
-    so a brace inside one does not close the object.
-    """
-    start = text.find("{")
-    if start == -1:
-        return None
-
-    depth = 0
-    in_string = False
-    escaped = False
-    for index in range(start, len(text)):
-        char = text[index]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : index + 1]
-    return None
