@@ -13,6 +13,7 @@ members = [
     "medauth-api-envelope",
     "medauth-audio-ingestion",
     "medauth-bedrock-client",
+    "medauth-cors-policy",
     "medauth-crypto-utils",
     "medauth-fhir-integration",
     "medauth-fhir-types",
@@ -1680,6 +1681,21 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.43.77" },
     { name = "langchain-aws", specifier = ">=0.2" },
     { name = "langchain-core", specifier = ">=0.3" },
+]
+
+[[package]]
+name = "medauth-cors-policy"
+version = "0.1.0"
+source = { editable = "packages/cors-policy" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "pydantic-settings" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "pydantic-settings", specifier = ">=2.6" },
 ]
 
 [[package]]
