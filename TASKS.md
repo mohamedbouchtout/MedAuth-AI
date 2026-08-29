@@ -3461,13 +3461,78 @@ The insurance policy RAG is the technical core. Build and validate before other 
 
 - [ ] **TASK-042:** Nudge UI component (web)
   - App: `apps/web`
-  - `<NudgeOverlay sessionId={...} />` — subscribes to nudge WebSocket
+  - Prerequisite: TASK-041 (the socket), TASK-041b (the acknowledge route),
+    TASK-041c (the CORS answer that makes that route reachable from a browser),
+    TASK-006b (the re-mint endpoint this component's token freshness depends on)
+  - `<NudgeOverlay sessionId={...} jwt={...} />` — subscribes to the nudge
+    WebSocket and renders each nudge it receives.
+  - **The component takes the session JWT alongside `sessionId`, and an earlier
+    draft of this task listing only `sessionId` could not have worked.**
+    `WebSocket /ws/nudges/{session_id}` validates a session token before it
+    completes the handshake (TASK-041, `_authenticate` ahead of `accept()`), so
+    a component holding no token opens no socket. The prop list mirrors
+    `UseAudioCaptureOptions` in `apps/web/src/hooks/useAudioCapture.ts` —
+    `{ sessionId, jwt, baseUrl }` as an options object, with injected
+    collaborators optional and defaulted — so the two hooks in this app are
+    called the same way rather than each inventing a shape.
+  - The token rides in the subprotocol list as
+    `['medauth.session.v1', 'medauth.jwt.<jwt>']`, never the query string. A
+    browser has no header carrier; CLAUDE.md, "How the JWT reaches a WebSocket
+    endpoint" is why there are two carriers and why the server echoes only the
+    first.
+  - **Both halves of the freshness rule are required here, not optional
+    hardening.** CLAUDE.md's "Refresh proactively and reactively" bullets apply
+    to every new socket, and this is the socket they were written about: the
+    nudge socket opens *later* than the audio socket in an encounter, and
+    `SESSION_TTL_SECONDS` is 15 minutes, so a near-expired token is the expected
+    case for any visit of meaningful length rather than an edge case.
+    - **Proactively:** before opening the socket, if the held token is near
+      `exp`, call `POST /sessions/{session_id}/token` (TASK-006b) and open with
+      what comes back.
+    - **Reactively:** a socket that fails to open is TASK-041's rejection —
+      validation precedes the handshake, so there is no frame to carry the 4401
+      and the browser sees a failed upgrade. Re-mint and retry once, rather than
+      reopening with the token that was just refused.
+    - Never `POST /sessions/start` to obtain a token. That forks one visit into
+      two encounters, silently, and CLAUDE.md's "Re-mint for the same
+      `session_id`" bullet lists what breaks.
+    - A **409** from the re-mint means the encounter is already completed and
+      the visit really is over — surface that rather than retrying. A 401, 404
+      or network failure is reported as a failure to connect; the overlay must
+      not sit silently rendering nothing while a provider believes it is live.
+    - At most one proactive refresh per connection attempt, so a token that
+      arrives already near `exp` cannot loop. TASK-025 hit this on mobile and
+      the same guard applies.
+  - **`packages/session-client` — extract, do not copy.** TASK-025 built token
+    freshness (`isNearExpiry`, `expiresAtMs`) and the session HTTP client
+    (`startVisit`/`remintToken`/`endVisit`, the `ApiResult`/`ApiFailure` types)
+    in `apps/mobile/src/api/`. This task is the second consumer, which is the
+    moment this repository extracts rather than duplicates — the same trigger
+    that produced `packages/api-envelope` at TASK-010, `packages/session-auth`
+    at TASK-041 and `packages/cors-policy` at TASK-041c. Two hand-maintained
+    copies of a credential-refresh path is the specific hazard Known
+    Constraints #8 names, arriving in a second language. Move both modules and
+    their tests into a new TypeScript package alongside `packages/audio-wire`,
+    which is the precedent for a package both apps compile from source; each app
+    keeps only the line binding its own base URL (`VITE_API_BASE_URL` /
+    `EXPO_PUBLIC_API_BASE_URL`). Per CLAUDE.md's packages rule the new package
+    ships its own path-filter entry, its own CI job, its place in `ci-passed`'s
+    `needs`, a case in `.github/scripts/detect-changed-members.test.sh`, and the
+    same 80% gate — and, like `audio-wire`, a change to it selects the `web` and
+    `mobile` jobs, because both apps compile its source into themselves.
   - Payload shape: CLAUDE.md, "The nudge payload — one shape". Note `cpt_code`
     is nullable there — TASK-044 emits nudges without one, so the component must
     render a nudge that names no code rather than assuming a string.
+  - **A payload the component cannot read is dropped, and nothing about it is
+    logged.** TASK-041 relays anything UTF-8 verbatim rather than parsing it, so
+    a malformed message can reach the browser; rendering a half-empty banner
+    would be worse than dropping it, and the payload is PHI, so the drop is
+    silent and the socket stays open.
   - High-contrast banner, color-coded by denial_risk (yellow/orange/red)
   - Dismiss button calls `PATCH /nudges/{nudge_id}/acknowledge` (TASK-041b)
-    using the `nudge_id` included in the WebSocket payload
+    using the `nudge_id` included in the WebSocket payload, with body
+    `{"acknowledged": true}` — not an empty PATCH. The response carries
+    `already_acknowledged`; a repeat is a 200 and not an error.
   - **That call carries no credential in v1** — CLAUDE.md, "A route keyed on a
     resource rather than a session follows the same v1 rule". Do not attach the
     session JWT to it on the assumption that a PHI-touching route must want one;
@@ -3480,9 +3545,27 @@ The insurance policy RAG is the technical core. Build and validate before other 
     request before the service sees it, which looks like a broken endpoint
     rather than a missing variable. Cite CLAUDE.md, "CORS and browser
     reachability"; do not re-derive anything about origins here.
+  - `VITE_NUDGE_WS_URL` and `VITE_API_BASE_URL` are both already in
+    `.env.example` and unused, so this task adds no new variable — it adds the
+    two exports to `apps/web/src/config.ts` beside the audio origin. They are
+    not interchangeable: one is a `ws://`/`wss://` origin the hook appends
+    `/ws/nudges/{session_id}` to, the other an HTTP origin for REST paths.
   - Accessible (ARIA role=alert, focus management)
+  - **Not verifiable end to end until TASK-052b**, the same caveat every task on
+    this path carries: nothing publishes to `nudges:{session_id}` for a real
+    encounter until that task supplies the payer columns TASK-040's emitter
+    needs. Verify against a mock WebSocket in the suite and, by hand, a manual
+    Redis `PUBLISH` against the running stack. Report it that way when the task
+    is done rather than implying a live path was exercised.
   - **Test:** render with mock WebSocket, verify alert appears on message
   - **Test:** click dismiss, verify acknowledge endpoint is called with correct nudge_id
+  - **Test:** a payload with `cpt_code: null` renders without naming a code
+  - **Test:** a malformed payload is dropped and the socket stays open
+  - **Test:** a token near `exp` re-mints before the socket is opened, and the
+    socket is opened with the token that came back
+  - **Test:** a socket that fails to open re-mints once and retries, and never
+    calls `POST /sessions/start`
+  - **Test:** a 409 from the re-mint reports the visit as over and does not retry
 
 - [ ] **TASK-043:** Haptic nudge (mobile)
   - App: `apps/mobile`
@@ -3493,6 +3576,16 @@ The insurance policy RAG is the technical core. Build and validate before other 
     the buzz from the risk level reinstates exactly the behaviour that rule
     exists to prevent: an infrastructure outage buzzing a physician's device
     once per procedure until they stop trusting the alert.
+  - **This socket needs a JWT and the same freshness handling as TASK-042's**,
+    for the same reason: `/ws/nudges/{session_id}` validates before the
+    handshake completes, and the nudge socket opens later in an encounter than
+    the audio one. Take the token as a prop, refresh proactively when it is near
+    `exp` and reactively on a refused upgrade, through
+    `POST /sessions/{session_id}/token` — never `POST /sessions/start`.
+    `packages/session-client` (extracted in TASK-042 from this app's own
+    `src/api/`) holds `isNearExpiry` and `remintToken`; TASK-025's screen is the
+    working precedent for wiring them, including the one-refresh-per-attempt
+    guard.
   - Same visual alert as web, same dismiss-calls-acknowledge behavior (TASK-041b),
     and the same absence of a credential on that call — CLAUDE.md, "A route keyed
     on a resource rather than a session follows the same v1 rule". Both clients
