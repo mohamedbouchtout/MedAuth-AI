@@ -3388,24 +3388,37 @@ The insurance policy RAG is the technical core. Build and validate before other 
     to the same-origin policy. That is why this is deliberate rather than
     urgent — and why TASK-043 working on a phone proves nothing about TASK-042
     working in a browser.
-  - **Decide where the policy lives, once:** per-service `CORSMiddleware`, or a
-    single ingress in front of every service. Both are defensible; choosing
-    per service is not.
-  - Allowed origins come from configuration per environment — never a hardcoded
-    literal, and never `*` on a service that answers with PHI. The allowed
-    methods and headers, and whether credentials are permitted, are part of the
-    same decision rather than left to each route.
-  - **WebSocket handshakes are a separate question, settled at the same time.**
-    Browsers do not apply CORS to a WebSocket upgrade, so the nudge socket
-    (TASK-041) and the audio socket (TASK-020) are unaffected by whatever is
-    chosen here. The corollary is that nothing checks their `Origin` today, and
-    assuming CORS covered them would be wrong — decide it while the subject is
-    open.
+  - **Decided: per-service `CORSMiddleware`, installed from one new shared
+    package.** The reasoning is in CLAUDE.md, "CORS and browser reachability" —
+    including why an ingress was rejected, why the gateway is deferred rather
+    than declared unnecessary, and why this forecloses nothing about where
+    authentication eventually lands. Do not re-derive any of it here, and do not
+    read the gateway's deferral as a rejection of gateways.
+  - **The package is new, not an addition to `api-envelope`** — that package's
+    locked scope note excludes middleware. It gets its own path-filter entry,
+    its own CI job and the same 80% coverage gate, per the packages rule.
+  - **Two services install it in this task:** `track-b-rag` (TASK-041b's
+    acknowledge route) and `track-a-clinical` (`GET`/`PATCH /notes/{session_id}`).
+    `audio-ingestion` and `nudge-service` expose only WebSocket surfaces plus
+    `/health`, where CORS does not apply, so they get nothing here.
+  - Allowed origins come from configuration per environment — a new
+    `CORS_ALLOWED_ORIGINS` in `.env.example` — never a hardcoded literal, and
+    never `*` on a service that answers with PHI. The allowed methods and
+    headers, and whether credentials are permitted, are part of the same
+    decision rather than left to each route.
+  - **WebSocket handshakes are outside CORS, and the `Origin` check this task
+    adds to them is defence in depth rather than a fix.** Both halves of that
+    are written out in the CLAUDE.md section, and the code comment at the check
+    must carry the distinction: the absence of a check was not a hole, because
+    no ambient credential exists for a hostile page to ride — the session JWT
+    travels in a header or the `medauth.jwt.` subprotocol, never a cookie. A
+    future reader must not conclude the check closed a vulnerability, or that
+    removing it would reopen one. The condition that would change this is the
+    credential moving to a cookie.
   - **Test:** a preflight `OPTIONS` from a configured origin is answered with
     the route's methods
   - **Test:** an origin outside the configured list is not granted
   - **Test:** the allowed origins come from configuration, not a literal
-
 - [ ] **TASK-042:** Nudge UI component (web)
   - App: `apps/web`
   - `<NudgeOverlay sessionId={...} />` — subscribes to nudge WebSocket
@@ -3420,11 +3433,13 @@ The insurance policy RAG is the technical core. Build and validate before other 
     session JWT to it on the assumption that a PHI-touching route must want one;
     the endpoint does not validate it, and sending a bearer token to a route
     that ignores it is how a client comes to believe it is authenticated.
-  - **Blocked on TASK-041c.** The dismiss is cross-origin and preflighted, and
-    no service in this repository answers CORS today, so this component cannot
-    be verified end to end against a running service until that lands. The
-    WebSocket subscription is unaffected — browsers do not apply CORS to a
-    WebSocket upgrade — so the alert half of this task can be built first.
+  - **Blocked on TASK-041c.** The dismiss is cross-origin and preflighted, so
+    this component cannot be verified end to end against a running service until
+    that task installs the middleware. The policy itself is already decided —
+    CLAUDE.md, "CORS and browser reachability" — so cite it rather than
+    re-deriving anything about origins here. The WebSocket subscription is
+    unaffected: browsers do not apply CORS to a WebSocket upgrade, so the alert
+    half of this task can be built first.
   - Accessible (ARIA role=alert, focus management)
   - **Test:** render with mock WebSocket, verify alert appears on message
   - **Test:** click dismiss, verify acknowledge endpoint is called with correct nudge_id
@@ -3444,8 +3459,10 @@ The insurance policy RAG is the technical core. Build and validate before other 
     cite that section rather than each deciding it, which is why it is written
     there and not in either task.
   - Unlike TASK-042 this is not blocked on TASK-041c: React Native's fetch is
-    not subject to the same-origin policy, so no preflight is involved. Do not
-    read a working dismiss here as evidence that the web dismiss works.
+    not subject to the same-origin policy, so no preflight is involved — see
+    CLAUDE.md, "CORS and browser reachability", which settles the policy for
+    both clients so neither re-derives it. Do not read a working dismiss here as
+    evidence that the web dismiss works.
   - **Test:** mock WebSocket message, verify Haptics mock called
 
 - [ ] **TASK-044:** Keyword-only nudge for procedures that resolve no CPT code
