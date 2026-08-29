@@ -44,6 +44,7 @@ jobs:
       mobile: ${{ steps.detect.outputs.mobile }}
       fhir_types: ${{ steps.detect.outputs.fhir_types }}
       audio_wire: ${{ steps.detect.outputs.audio_wire }}
+      audit_vocab: ${{ steps.detect.outputs.audit_vocab }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -343,6 +344,42 @@ jobs:
         run: npm run test --workspace @medauth/audio-wire
 
   # ---------------------------------------------------------------------------
+  # Audit action vocabulary — TASK-045.
+  #
+  # CLAUDE.md's action table is declared authoritative and has drifted from the
+  # services' ACTION_* constants three times, in both directions, each time
+  # caught by someone working on something else. This job is that check.
+  #
+  # It is its own job rather than a member of the `test` matrix because the
+  # suite tests a root document against every service and belongs to no member:
+  # the matrix runs pytest inside a member directory with --cov=src, and the
+  # repository root has no src to cover.
+  #
+  # `uv sync` without --all-packages is deliberate. The test parses each
+  # audit.py with `ast` rather than importing it — several services still
+  # install a top-level `src` into the shared virtualenv, so two of them could
+  # not be imported in one process anyway — so it needs pytest and the standard
+  # library and no service dependency at all.
+  # ---------------------------------------------------------------------------
+  audit-vocab:
+    name: Audit action vocabulary (CLAUDE.md vs services)
+    needs: changes
+    if: needs.changes.outputs.audit_vocab == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+
+      - run: uv sync
+
+      - name: pytest tests/
+        run: uv run pytest tests
+
+  # ---------------------------------------------------------------------------
   # Frontends — only when the app actually changed and has a package.json.
   # ---------------------------------------------------------------------------
   web:
@@ -416,8 +453,18 @@ jobs:
     # audio-wire and detect-logic were both missing here. A job absent from this
     # list can fail without blocking a merge, which is the same silent-hole
     # failure the detector rules guard against, one layer up: the job runs, goes
-    # red, and nothing stops the pull request.
-    needs: [lint, typecheck, test, fhir-types, audio-wire, web, mobile, detect-logic]
+    # red, and nothing stops the pull request. Adding a job means adding it here
+    # in the same change — audit-vocab arrived with TASK-045.
+    needs:
+      - lint
+      - typecheck
+      - test
+      - fhir-types
+      - audio-wire
+      - audit-vocab
+      - web
+      - mobile
+      - detect-logic
     if: always()
     runs-on: ubuntu-latest
     steps:

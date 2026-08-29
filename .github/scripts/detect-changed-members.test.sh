@@ -160,6 +160,33 @@ assert_key 'audio_wire reacts to the npm lockfile' \
 assert_key 'audio_wire ignores the uv lockfile' \
   audio_wire 'uv.lock' 'false'
 
+section 'audit_vocab — TASK-045, and both halves of the contract select it'
+assert_key 'audit_vocab reacts to CLAUDE.md, which holds the table' \
+  audit_vocab 'CLAUDE.md' 'true'
+assert_key 'audit_vocab reacts to a service audit.py under a named package' \
+  audit_vocab 'services/track-b-rag/src/track_b_rag/audit.py' 'true'
+# The services that still install a top-level `src` put audit.py one level
+# shallower. The rule is anchored on the filename, not on a path shape, so both
+# layouts select it — a rule that missed one of them would leave that service's
+# constants unchecked exactly as if the test did not exist.
+assert_key 'audit_vocab reacts to a service audit.py under a bare src' \
+  audit_vocab 'services/audio-ingestion/src/audit.py' 'true'
+assert_key 'audit_vocab reacts to the root test suite itself' \
+  audit_vocab 'tests/test_audit_vocabulary.py' 'true'
+assert_key 'audit_vocab reacts to the detector, which decides whether it runs' \
+  audit_vocab '.github/scripts/detect-changed-members.sh' 'true'
+# The anchors again. A file that merely mentions auditing is not the contract,
+# and neither is a service's own test for its audit writes — those live under
+# tests/ inside the member and are run by that member's job.
+assert_key 'audit_vocab ignores an unrelated service source file' \
+  audit_vocab 'services/track-b-rag/src/track_b_rag/query.py' 'false'
+assert_key 'audit_vocab ignores a lookalike filename' \
+  audit_vocab 'services/track-b-rag/src/track_b_rag/audit_helpers.py' 'false'
+assert_key 'audit_vocab ignores a nested CLAUDE.md' \
+  audit_vocab 'docs/CLAUDE.md' 'false'
+assert_key 'audit_vocab is false when nothing relevant moved' \
+  audit_vocab 'README.md' 'false'
+
 section 'the conventions the rules are derived from must hold in the repo'
 # The docs/api rule maps a spec to a job by filename alone. If a spec is named
 # for something that is not a service directory it silently gets no job — the

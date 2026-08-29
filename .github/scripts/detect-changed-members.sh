@@ -2,10 +2,10 @@
 #
 # Decide which CI jobs a change needs to run.
 #
-# Reads changed file paths on stdin, one per line, and writes the six outputs
+# Reads changed file paths on stdin, one per line, and writes the seven outputs
 # the `changes` job publishes — members, any_python, web, mobile, fhir_types,
-# audio_wire — to stdout as `key=value` lines. The workflow redirects that into
-# $GITHUB_OUTPUT.
+# audio_wire, audit_vocab — to stdout as `key=value` lines. The workflow
+# redirects that into $GITHUB_OUTPUT.
 #
 # **Why this is a script rather than inline `run:` bash.** These rules decide
 # whether anything is tested at all, and their failure mode is silent
@@ -183,6 +183,25 @@ main() {
     echo "audio_wire=true"
   else
     echo "audio_wire=false"
+  fi
+
+  # TASK-045's drift test: CLAUDE.md's audit action vocabulary table against the
+  # ACTION_* constants the services declare. It belongs to no one member — it
+  # tests a root document against every service — so it gets its own flag and
+  # its own job rather than a place in ALL_SERVICES or ALL_PACKAGES, whose
+  # matrix runs `pytest tests --cov=src` inside a member directory the root
+  # suite does not have.
+  #
+  # Both halves of the contract select it: the document, and any audit.py in the
+  # tree. That is the same "a test that guards two things must re-run when
+  # either of them moves" rule that pairs the OpenAPI specs with their services
+  # — and here it is the whole point, since either half can drift alone and has,
+  # three times.
+  if changed_matches '^(CLAUDE\.md$|tests/|\.github/workflows/ci\.yml$|\.github/scripts/)' \
+    || changed_matches '(^|/)audit\.py$'; then
+    echo "audit_vocab=true"
+  else
+    echo "audit_vocab=false"
   fi
 }
 
