@@ -82,19 +82,27 @@ assert_members 'nothing changed selects nothing' '' '[]'
 section 'service and package selection'
 assert_members 'a service selects only itself' \
   'services/track-b-rag/src/x.py' '["services/track-b-rag"]'
-# Three couplings at once: the JWT contract test in audio-ingestion, and the
-# shared SQLAlchemy models that track-b-rag and policy-scraper import from this
-# service rather than mapping their own.
+# Three couplings at once: the JWT contract test in packages/session-auth, and
+# the shared SQLAlchemy models that track-b-rag and policy-scraper import from
+# this service rather than mapping their own.
 assert_members 'track-a-clinical src selects its dependents' \
   'services/track-a-clinical/src/x.py' \
-  '["services/audio-ingestion","services/policy-scraper","services/track-a-clinical","services/track-b-rag"]'
+  '["packages/session-auth","services/policy-scraper","services/track-a-clinical","services/track-b-rag"]'
 
 # The model dependents hang off src/ specifically. A migration or a test is not
 # code those services import, so it selects the JWT pairing and no more — the
-# rule stays as narrow as the coupling it stands for.
+# rule stays as narrow as the coupling it stands for. Note what it must NOT
+# select: the issuer changing is a reason to re-run the contract test, not a
+# reason to re-test every service the way an edit to session-auth itself would.
 assert_members 'a track-a-clinical migration selects only the JWT pairing' \
   'services/track-a-clinical/migrations/versions/0005_x.py' \
-  '["services/audio-ingestion","services/track-a-clinical"]'
+  '["packages/session-auth","services/track-a-clinical"]'
+
+# session-auth is a package like any other: editing it re-tests every service,
+# because audio-ingestion and nudge-service both authenticate through it.
+assert_members 'session-auth selects itself and every service' \
+  'packages/session-auth/src/x.py' \
+  '["packages/session-auth","services/audio-ingestion","services/fhir-integration","services/nudge-service","services/policy-scraper","services/prior-auth","services/track-a-clinical","services/track-b-rag"]'
 assert_members 'a spec and its own service dedupe to one entry' \
   "$(printf 'docs/api/track-b-rag.yaml\nservices/track-b-rag/src/x.py')" \
   '["services/track-b-rag"]'
@@ -109,14 +117,14 @@ assert_members 'a package plus a spec still dedupes' \
 section 'roots that must test everything'
 for root in pyproject.toml uv.lock .github/workflows/ci.yml; do
   assert_members "$root selects every member" "$root" \
-    '["packages/api-envelope","packages/bedrock-client","packages/crypto-utils","packages/fhir-types","packages/hipaa-logger","packages/payer-vocab","services/audio-ingestion","services/fhir-integration","services/nudge-service","services/policy-scraper","services/prior-auth","services/track-a-clinical","services/track-b-rag"]'
+    '["packages/api-envelope","packages/bedrock-client","packages/crypto-utils","packages/fhir-types","packages/hipaa-logger","packages/payer-vocab","packages/session-auth","services/audio-ingestion","services/fhir-integration","services/nudge-service","services/policy-scraper","services/prior-auth","services/track-a-clinical","services/track-b-rag"]'
 done
 # The selection logic cannot be trusted to select its own blast radius, so a
 # change to it runs everything. Without this a bug in the detector would be
 # merged by a run that tested nothing — the exact failure this suite guards.
 assert_members 'a change to the detector itself selects every member' \
   '.github/scripts/detect-changed-members.sh' \
-  '["packages/api-envelope","packages/bedrock-client","packages/crypto-utils","packages/fhir-types","packages/hipaa-logger","packages/payer-vocab","services/audio-ingestion","services/fhir-integration","services/nudge-service","services/policy-scraper","services/prior-auth","services/track-a-clinical","services/track-b-rag"]'
+  '["packages/api-envelope","packages/bedrock-client","packages/crypto-utils","packages/fhir-types","packages/hipaa-logger","packages/payer-vocab","packages/session-auth","services/audio-ingestion","services/fhir-integration","services/nudge-service","services/policy-scraper","services/prior-auth","services/track-a-clinical","services/track-b-rag"]'
 
 section 'any_python gates the lint, typecheck and test jobs'
 assert_key 'any_python is false when nothing python-ish moved' \
@@ -183,6 +191,35 @@ else
   printf 'FAIL  ALL_SERVICES does not match services/ — a service missing from\n'
   printf '      the array gets no CI job at all\n'
   diff <(printf '%s\n' "$declared_services") <(printf '%s\n' "$actual_services") \
+    | sed 's/^/      /' || true
+fi
+
+# The same gap one directory over, and the one this suite did not cover until
+# TASK-041 added packages/session-auth and noticed. CLAUDE.md's ci.yml section
+# requires every directory under packages/ to have its own test job; a package
+# missing from ALL_PACKAGES silently has none, and its own suite never runs —
+# which is exactly how packages/hipaa-logger went untested for a while.
+#
+# Compared against the Python packages specifically: packages/audio-wire is
+# TypeScript-only, has its own job in ci.yml, and is excluded from the uv
+# workspace in the root pyproject.toml. A pyproject.toml is what makes a package
+# a member of the Python matrix, so that is the test — not the directory listing,
+# which would demand audio-wire join an array it does not belong in.
+declared_packages="$(sed -n 's/^ALL_PACKAGES=(\(.*\))$/\1/p' "$DETECT" | tr ' ' '\n' | sort)"
+actual_packages="$(
+  for dir in "$REPO_ROOT"/packages/*/; do
+    [ -f "$dir/pyproject.toml" ] || continue
+    basename "$dir"
+  done | sort
+)"
+if [ "$declared_packages" = "$actual_packages" ]; then
+  passed=$((passed + 1))
+  printf 'PASS  ALL_PACKAGES matches the Python packages under packages/\n'
+else
+  failed=$((failed + 1))
+  printf 'FAIL  ALL_PACKAGES does not match packages/ — a package missing from\n'
+  printf '      the array gets no test job, so its own suite never runs\n'
+  diff <(printf '%s\n' "$declared_packages") <(printf '%s\n' "$actual_packages") \
     | sed 's/^/      /' || true
 fi
 

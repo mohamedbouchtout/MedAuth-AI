@@ -21,6 +21,7 @@ members = [
     "medauth-payer-vocab",
     "medauth-policy-scraper",
     "medauth-prior-auth",
+    "medauth-session-auth",
     "medauth-track-a-clinical",
     "medauth-track-b-rag",
 ]
@@ -1638,17 +1639,13 @@ dependencies = [
     { name = "fastapi" },
     { name = "medauth-api-envelope" },
     { name = "medauth-hipaa-logger" },
+    { name = "medauth-session-auth" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyjwt" },
     { name = "redis" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "websockets" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "medauth-track-a-clinical" },
 ]
 
 [package.metadata]
@@ -1659,6 +1656,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "medauth-api-envelope", editable = "packages/api-envelope" },
     { name = "medauth-hipaa-logger", editable = "packages/hipaa-logger" },
+    { name = "medauth-session-auth", editable = "packages/session-auth" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "pyjwt", specifier = ">=2.13.0" },
@@ -1666,9 +1664,6 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.4" },
     { name = "websockets", specifier = ">=13.1" },
 ]
-
-[package.metadata.requires-dev]
-dev = [{ name = "medauth-track-a-clinical", editable = "services/track-a-clinical" }]
 
 [[package]]
 name = "medauth-bedrock-client"
@@ -1850,6 +1845,25 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.52" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.4" },
 ]
+
+[[package]]
+name = "medauth-session-auth"
+version = "0.1.0"
+source = { editable = "packages/session-auth" }
+dependencies = [
+    { name = "pyjwt" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "medauth-track-a-clinical" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pyjwt", specifier = ">=2.13.0" }]
+
+[package.metadata.requires-dev]
+dev = [{ name = "medauth-track-a-clinical", editable = "services/track-a-clinical" }]
 
 [[package]]
 name = "medauth-track-a-clinical"
