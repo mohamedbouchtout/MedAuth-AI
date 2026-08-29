@@ -3158,14 +3158,56 @@ The insurance policy RAG is the technical core. Build and validate before other 
     `Sec-WebSocket-Protocol` entry. See CLAUDE.md, "How the JWT reaches a
     WebSocket endpoint" — `apps/web` opens this socket too and can only use the
     subprotocol form.
+  - **"Same as TASK-020" is an extraction, not a second implementation.** That
+    validation already exists, in `services/audio-ingestion/src/auth.py`, and
+    this task is its second real consumer — the exact condition that produced
+    `packages/api-envelope` in TASK-010, where track-b-rag's copy of
+    track-a-clinical's envelope was extracted rather than maintained twice.
+    Known Constraint 8 forbids a parallel session-auth mechanism, and two
+    hand-maintained copies of one validator is how a parallel mechanism arrives
+    without anyone deciding to build one. So:
+    - Extract the carriers, the token validation and the 4401 close code into
+      **`packages/session-auth`**, in this task, before the relay is written.
+    - Migrate `audio-ingestion` onto the package in the same PR. Its existing
+      suite is the regression evidence that the extraction preserved behaviour,
+      so it must pass unchanged apart from import paths — do not adjust an
+      assertion to accommodate the move.
+    - The package gets its own path-filter entry and CI job, per the packages
+      rule in CLAUDE.md's ci.yml section. A package without its own job is the
+      silent hole that rule exists to close.
+    - The package validates and never mints. `POST /sessions/start` stays the
+      only issuer, per Known Constraint 8.
   - Subscribe to `nudges:{session_id}`
   - Forward each nudge event to connected client in real time — verbatim. The
     relay does not reshape, filter or enrich the payload; CLAUDE.md's "The nudge
     payload — one shape" is the contract, and a relay that edits it becomes a
     second definition of it.
+  - **Relay the raw payload string; do not deserialize or model it here.**
+    Parsing to JSON and re-serializing would satisfy the letter of "verbatim"
+    while reintroducing what it forbids — a Pydantic model of the nudge in this
+    service is a second definition of TASK-040's shape, free to drift from the
+    one that writes it. The relay needs to know the channel name, not the
+    message.
   - On client disconnect: unsubscribe from Redis channel
+  - **The relay audits, as `RELAY_NUDGES`.** A nudge names a procedure and the
+    payer criteria still undocumented for an identified encounter, so opening
+    the stream is a PHI access by the Known Constraint 6 test, and this is the
+    only record that the access happened. One row per accepted connection, not
+    per relayed message — the same judgement TASK-020 made for a connection that
+    carries hundreds of segments. A refused connection writes none: no PHI was
+    reached, and it logs at WARNING instead. `actor_id` is the `provider_id`
+    claim from the validated token; this service reads no tables.
+  - `GET /health` reports Redis, fatal rather than advisory: a relay that cannot
+    reach the bus delivers nothing, and a silent visit is indistinguishable from
+    a visit with nothing to flag. Unaudited, per Known Constraint 6.
+  - `docs/api/nudge-service.yaml` with a drift test, following
+    `docs/api/audio-ingestion.yaml` — the WebSocket goes under
+    `x-websocket-endpoints` because OpenAPI 3.1 cannot describe one.
   - **Test:** publish nudge to Redis, verify it appears at WebSocket client
   - **Test:** connect with invalid JWT, verify 4401 close
+  - **Test:** a payload the relay cannot parse still reaches the client
+    unaltered — the property "verbatim" actually means
+  - **Test:** audio-ingestion's suite passes on the extracted package
 
 - [ ] **TASK-041b:** Nudge acknowledge endpoint
   - Service: `services/track-b-rag` (owns the clinical_nudges write from TASK-040)
@@ -3254,6 +3296,40 @@ The insurance policy RAG is the technical core. Build and validate before other 
     nudge and no policy query
   - **Test:** a biologic or a referral produces no nudge of any kind
   - **Test:** nothing on this path writes a `rag:` cache entry
+
+- [ ] **TASK-045:** Test that the audit action vocabulary matches the code
+  - Prerequisite: none. Small, and deliberately not folded into TASK-041, which
+    is where the need was noticed.
+  - **Why.** CLAUDE.md's action vocabulary table is declared authoritative and
+    has now drifted from the code three times, in both directions: `WRITE_NOTE`
+    was cited by a task while no service defined it, `QUERY_POLICY` shipped in
+    `track_b_rag/audit.py` while the list had never carried it, and
+    `STREAM_AUDIO` did the same from `audio-ingestion/src/audit.py`. Each was
+    found by someone working on something else. Three times is enough to say
+    that noticing is not a control.
+  - **What to build.** A test that collects every action constant the services
+    actually declare — the `ACTION_*` names in each service's `audit.py` —
+    parses the action column out of the table in CLAUDE.md, and asserts the two
+    agree. Both directions: a constant missing from the table fails, and a table
+    row naming a service that declares no such constant fails.
+  - **The reverse direction needs a carve-out and it should be explicit.** The
+    table legitimately carries actions for work not yet built — `READ_PATIENT`
+    (Phase 5), `SUBMIT_PRIOR_AUTH` (TASK-061). Those rows have no constant and
+    must not fail the test. Key the exemption on the row's own "Written by"
+    column naming a service that has no `audit.py` yet, rather than on a
+    hand-maintained ignore list, which would be one more thing to drift.
+  - **Where it lives.** It tests a document at the repository root against every
+    service, so it belongs to no one service. Put it under `tests/` at the root
+    with its own CI job, selected by a change to `CLAUDE.md` or to any
+    `**/audit.py`.
+  - **Note what this does not do.** It cannot check that a row's *meaning* is
+    right, or that a service audits when it should — Known Constraint 6 is still
+    a judgement. It checks that the two lists of names agree, which is the part
+    that has actually failed three times.
+  - **Test:** a service constant absent from the table fails the check
+  - **Test:** a table row for a service that has an `audit.py` without that
+    constant fails the check
+  - **Test:** a row for an unbuilt service passes
 
 ---
 
