@@ -4,11 +4,13 @@ version = "0.1.0"
 description = "Redis pub/sub to WebSocket relay for live clinical nudges."
 requires-python = ">=3.12"
 dependencies = [
+    "anyio>=4.6",
     "fastapi>=0.115",
+    "medauth-api-envelope",
     "medauth-hipaa-logger",
+    "medauth-session-auth",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
-    "pyjwt>=2.13.0",
     "redis>=8.1.0",
     "uvicorn[standard]>=0.52.4",
     "websockets>=13.1",
