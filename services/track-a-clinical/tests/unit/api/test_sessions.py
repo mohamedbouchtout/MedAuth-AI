@@ -9,8 +9,8 @@ import jwt
 import pytest
 from httpx import AsyncClient
 
+from hipaa_logger import AuditAction
 from tests.unit.api.conftest import FakeRedis, FakeSession, RecordedAudit, make_encounter
-from track_a_clinical import audit
 from track_a_clinical.api.dependencies import get_redis
 from track_a_clinical.api.sessions import (
     ERROR_CODE_SESSION_NOT_FOUND,
@@ -77,7 +77,7 @@ async def test_start_audits_the_phi_access(
 ) -> None:
     response = await client.post("/sessions/start", json=START_BODY)
 
-    assert recorded_audit.actions == [audit.ACTION_START_SESSION]
+    assert recorded_audit.actions == [AuditAction.START_SESSION]
     call = recorded_audit.calls[0]
     assert call["encounter_id"] is not None
     assert str(call["session_id"]) == response.json()["data"]["session_id"]
@@ -147,7 +147,7 @@ async def test_end_completes_the_encounter_and_publishes_the_signal(
     assert body["data"]["already_ended"] is False
     assert body["data"]["ended_at"].startswith("2026-08-18T12:30:00")
     assert fake_redis.published == [(session_ended_channel(session_id), "")]
-    assert recorded_audit.actions == [audit.ACTION_END_SESSION]
+    assert recorded_audit.actions == [AuditAction.END_SESSION]
 
 
 async def test_end_is_idempotent_and_does_not_republish(
@@ -168,7 +168,7 @@ async def test_end_is_idempotent_and_does_not_republish(
     assert second.json()["data"]["already_ended"] is True
     assert len(fake_redis.published) == 1
     # The repeat still touched the row, so it is still an auditable PHI read.
-    assert recorded_audit.actions == [audit.ACTION_END_SESSION, audit.ACTION_READ_ENCOUNTER]
+    assert recorded_audit.actions == [AuditAction.END_SESSION, AuditAction.READ_ENCOUNTER]
 
 
 async def test_end_returns_404_for_an_unknown_session(client: AsyncClient) -> None:

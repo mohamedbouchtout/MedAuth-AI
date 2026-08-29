@@ -17,27 +17,14 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from hipaa_logger import audit_log
+from hipaa_logger import AuditAction, audit_log
 from track_a_clinical.db import raw_asyncpg_connection
 
-#: Actions this service records. Values are the audit vocabulary from CLAUDE.md's
-#: audit_log schema comment, not free text invented per call site.
-ACTION_START_SESSION = "START_SESSION"
-ACTION_END_SESSION = "END_SESSION"
-ACTION_READ_ENCOUNTER = "READ_ENCOUNTER"
-#: A re-mint (TASK-006b) reads an encounter and issues a credential for it. Kept
-#: distinct from START_SESSION so an audit can tell "a visit was opened" from "a
-#: visit's token was refreshed" — they are different events with the same actor.
-ACTION_REMINT_SESSION_TOKEN = "REMINT_SESSION_TOKEN"
-#: A generated SOAP note was stored (TASK-030). Written by a Redis consumer with
-#: no request behind it, which is why the actor comes from the encounter row —
-#: see CLAUDE.md "Auditing work that no request triggered".
-ACTION_WRITE_NOTE = "WRITE_NOTE"
-#: A stored note was read for review (TASK-032).
-ACTION_READ_NOTE = "READ_NOTE"
-#: A provider edited a stored note (TASK-032).
-ACTION_UPDATE_NOTE = "UPDATE_NOTE"
-
+#: The actions this service records are ``AuditAction`` members, imported from
+#: hipaa-logger rather than re-declared here: START_SESSION, END_SESSION,
+#: READ_ENCOUNTER, REMINT_SESSION_TOKEN, WRITE_NOTE, READ_NOTE, UPDATE_NOTE.
+#: A local constant per service is what let the vocabulary drift from its own
+#: definition three times — see ``hipaa_logger.actions``.
 SERVICE_NAME = "track-a-clinical"
 RESOURCE_TYPE_ENCOUNTER = "Encounter"
 RESOURCE_TYPE_CLINICAL_NOTE = "ClinicalNote"
@@ -46,7 +33,7 @@ RESOURCE_TYPE_CLINICAL_NOTE = "ClinicalNote"
 async def audit_encounter_access(
     session: AsyncSession,
     *,
-    action: str,
+    action: AuditAction,
     encounter_id: uuid.UUID,
     session_id: uuid.UUID,
     provider_id: uuid.UUID | None,
@@ -57,7 +44,7 @@ async def audit_encounter_access(
 
     Args:
         session: The active session whose transaction the audit row joins.
-        action: One of the ``ACTION_*`` constants in this module.
+        action: The encounter-scoped ``AuditAction`` this access records.
         encounter_id: Primary key of the encounter touched.
         session_id: The encounter's session identifier, for trace correlation.
         provider_id: The acting provider, or None when the caller is anonymous.
@@ -107,7 +94,7 @@ async def audit_note_write(
     """
     await audit_log(
         actor_id=str(provider_id) if provider_id else None,
-        action=ACTION_WRITE_NOTE,
+        action=AuditAction.WRITE_NOTE,
         resource_type=RESOURCE_TYPE_CLINICAL_NOTE,
         resource_id=str(note_id),
         session_id=str(session_id),
@@ -119,7 +106,7 @@ async def audit_note_write(
 async def audit_note_access(
     session: AsyncSession,
     *,
-    action: str,
+    action: AuditAction,
     note_id: uuid.UUID,
     session_id: uuid.UUID,
     provider_id: uuid.UUID | None,
@@ -142,7 +129,7 @@ async def audit_note_access(
 
     Args:
         session: The active session whose transaction the audit row joins.
-        action: :data:`ACTION_READ_NOTE` or :data:`ACTION_UPDATE_NOTE`.
+        action: ``AuditAction.READ_NOTE`` or ``AuditAction.UPDATE_NOTE``.
         note_id: Primary key of the ``clinical_notes`` row touched.
         session_id: The encounter's session identifier, for trace correlation.
         provider_id: The provider from the encounter row.

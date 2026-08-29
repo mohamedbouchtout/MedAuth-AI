@@ -17,7 +17,7 @@ from pathlib import Path
 import asyncpg
 import pytest
 
-from hipaa_logger import audit_log, close_pool, configure
+from hipaa_logger import AuditAction, audit_log, close_pool, configure
 from hipaa_logger.db import normalize_dsn
 
 pytestmark = [
@@ -82,7 +82,7 @@ async def test_audit_row_lands_with_every_column_populated(
 
     await audit_log(
         actor_id=str(actor_id),
-        action="READ_PATIENT",
+        action=AuditAction.READ_PATIENT,
         resource_type="Patient",
         resource_id=resource_id,
         session_id=str(session_id),
@@ -114,7 +114,7 @@ async def test_nullable_columns_accept_none(connection: asyncpg.Connection) -> N
 
     await audit_log(
         actor_id=None,
-        action="SYSTEM_SWEEP",
+        action=AuditAction.WRITE_PRIOR_AUTH,
         resource_type=None,
         resource_id=resource_id,
         session_id=None,
@@ -144,7 +144,7 @@ async def test_caller_transaction_rollback_discards_the_audit_row(
     await transaction.start()
     await audit_log(
         actor_id=None,
-        action="WRITE_NOTE",
+        action=AuditAction.WRITE_NOTE,
         resource_type="ClinicalNote",
         resource_id=resource_id,
         session_id=None,

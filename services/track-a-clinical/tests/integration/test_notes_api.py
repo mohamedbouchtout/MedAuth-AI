@@ -22,8 +22,7 @@ import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from hipaa_logger import close_pool, configure
-from track_a_clinical import audit
+from hipaa_logger import AuditAction, close_pool, configure
 from track_a_clinical.api.dependencies import get_db_session
 from track_a_clinical.db import database_url
 from track_a_clinical.main import create_app
@@ -180,7 +179,7 @@ async def test_a_read_writes_one_audit_row(
 
     await client.get(f"/notes/{encounter.session_id}")
 
-    assert await audit_actions(sessions, encounter.session_id) == [audit.ACTION_READ_NOTE]
+    assert await audit_actions(sessions, encounter.session_id) == [AuditAction.READ_NOTE]
 
 
 async def test_a_text_edit_leaves_an_undetermined_code_column_null(
@@ -265,7 +264,7 @@ async def test_an_edit_writes_one_audit_row(
 
     await client.patch(f"/notes/{encounter.session_id}", json={"soap_plan": "Revised."})
 
-    assert await audit_actions(sessions, encounter.session_id) == [audit.ACTION_UPDATE_NOTE]
+    assert await audit_actions(sessions, encounter.session_id) == [AuditAction.UPDATE_NOTE]
 
 
 async def test_an_encounter_without_a_note_is_distinguishable_from_an_unknown_one(

@@ -43,25 +43,19 @@ from typing import Final
 
 import asyncpg
 
-from hipaa_logger import audit_log
+from hipaa_logger import AuditAction, audit_log
 
-#: The audit vocabulary from CLAUDE.md's action table, not free text invented
-#: per call site. Both of these are listed there — ``QUERY_POLICY`` only as of
-#: TASK-040, which is the change that noticed TASK-012 had shipped it as a
-#: constant citing a list that had never carried it.
-ACTION_QUERY_POLICY: Final = "QUERY_POLICY"
-ACTION_WRITE_NUDGE: Final = "WRITE_NUDGE"
-
-#: The acknowledge route's pair (TASK-041b). Which one is written depends on
-#: whether the row actually changed, exactly as an idempotent
-#: ``POST /sessions/{id}/end`` audits as ``READ_ENCOUNTER`` rather than
-#: ``END_SESSION``: a repeat dismissal read a row it did not move, and recording
-#: it as a state change would make the trail claim something that did not
-#: happen. ``READ_NUDGE`` is prior-auth's constant too — the table's "Written
-#: by" column names both services.
-ACTION_ACKNOWLEDGE_NUDGE: Final = "ACKNOWLEDGE_NUDGE"
-ACTION_READ_NUDGE: Final = "READ_NUDGE"
-
+#: The actions this service records are ``AuditAction`` members, imported from
+#: hipaa-logger: QUERY_POLICY, WRITE_NUDGE, ACKNOWLEDGE_NUDGE and READ_NUDGE.
+#: ``QUERY_POLICY`` is the reason this comment exists — TASK-012 shipped it as a
+#: local constant citing a vocabulary list that had never carried it, and nobody
+#: noticed until TASK-040. There is now one definition to cite.
+#:
+#: The acknowledge route writes one of a pair (TASK-041b), chosen by whether the
+#: row actually changed, exactly as an idempotent ``POST /sessions/{id}/end``
+#: audits as ``READ_ENCOUNTER`` rather than ``END_SESSION``: a repeat dismissal
+#: read a row it did not move, and recording it as a state change would make the
+#: trail claim something that did not happen.
 SERVICE_NAME: Final = "track-b-rag"
 
 #: The encounter is the resource being read: a policy query is answered from
@@ -96,7 +90,7 @@ async def audit_policy_query(
     """
     await audit_log(
         actor_id=str(provider_id),
-        action=ACTION_QUERY_POLICY,
+        action=AuditAction.QUERY_POLICY,
         resource_type=RESOURCE_TYPE_ENCOUNTER,
         resource_id=str(session_id),
         session_id=str(session_id),
@@ -134,7 +128,7 @@ async def audit_nudge_write(
     """
     await audit_log(
         actor_id=str(provider_id),
-        action=ACTION_WRITE_NUDGE,
+        action=AuditAction.WRITE_NUDGE,
         resource_type=RESOURCE_TYPE_NUDGE,
         resource_id=str(nudge_id),
         session_id=str(session_id),
@@ -184,7 +178,7 @@ async def audit_nudge_acknowledge(
     """
     await audit_log(
         actor_id=str(provider_id),
-        action=ACTION_ACKNOWLEDGE_NUDGE if changed else ACTION_READ_NUDGE,
+        action=AuditAction.ACKNOWLEDGE_NUDGE if changed else AuditAction.READ_NUDGE,
         resource_type=RESOURCE_TYPE_NUDGE,
         resource_id=str(nudge_id),
         session_id=str(session_id),

@@ -17,6 +17,7 @@ import asyncpg
 # Imported as a module, not by value: callers and tests replace attributes on
 # hipaa_logger.db, and a by-value import would bind past those replacements.
 from . import db
+from .actions import AuditAction
 from .db import AuditLogError
 
 _INSERT_AUDIT_EVENT: Final[str] = """
@@ -44,6 +45,26 @@ def _as_uuid(value: str | uuid.UUID | None, field: str) -> uuid.UUID | None:
         raise InvalidAuditFieldError(f"{field} is not a valid UUID: {value!r}") from exc
 
 
+def _as_action(value: AuditAction | str) -> AuditAction:
+    """Coerce the action field to a member of the vocabulary, or refuse the write.
+
+    The signature of :func:`audit_log` asks for an :class:`AuditAction`, so mypy
+    catches an invented action at the call site. This is the same check at
+    runtime, for the callers static typing does not reach — a test passing a
+    literal, or any future untyped path. The column itself is free text and
+    would accept anything, which is exactly why the refusal has to happen here.
+    """
+    if isinstance(value, AuditAction):
+        return value
+    try:
+        return AuditAction(value)
+    except ValueError:
+        raise InvalidAuditFieldError(
+            f"action {value!r} is not in the audit action vocabulary. Add it to "
+            "hipaa_logger.AuditAction in the same change as the code that writes it."
+        ) from None
+
+
 def _as_ip(
     value: str | ipaddress.IPv4Address | ipaddress.IPv6Address | None,
 ) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
@@ -60,7 +81,7 @@ def _as_ip(
 
 async def audit_log(
     actor_id: str | None,
-    action: str,
+    action: AuditAction,
     resource_type: str | None,
     resource_id: str | None,
     session_id: str | None,
@@ -75,7 +96,8 @@ async def audit_log(
     Args:
         actor_id: UUID of the provider or service account responsible. None only
             for unauthenticated paths that still touch PHI.
-        action: What was done, e.g. ``READ_PATIENT``, ``WRITE_NOTE``.
+        action: What was done, as a member of :class:`~hipaa_logger.AuditAction`.
+            A string outside that vocabulary is refused rather than written.
         resource_type: FHIR or domain resource kind, e.g. ``Patient``.
         resource_id: Identifier of the resource. An identifier only — never content.
         session_id: UUID of the encounter session, when one is in scope.
@@ -87,18 +109,21 @@ async def audit_log(
             the audit write inside the caller's transaction.
 
     Raises:
-        InvalidAuditFieldError: A UUID or IP field could not be coerced.
+        InvalidAuditFieldError: A UUID or IP field could not be coerced, or the
+            action is not in the vocabulary.
         AuditLogError: The database write failed. Never suppressed — an audit
             failure has to stop the operation it was recording.
     """
-    if not action:
-        raise InvalidAuditFieldError("action is required")
+    checked_action = _as_action(action)
     if not service_name:
         raise InvalidAuditFieldError("service_name is required")
 
     params = (
         _as_uuid(actor_id, "actor_id"),
-        action,
+        # str(), so what reaches asyncpg is an ordinary string rather than an
+        # enum member. The column is text and reads back as text; nothing
+        # downstream should have to know the vocabulary is an enum.
+        str(checked_action),
         resource_type,
         resource_id,
         _as_uuid(session_id, "session_id"),
@@ -120,5 +145,5 @@ async def audit_log(
         raise
     except Exception as exc:  # noqa: BLE001 — every failure mode surfaces as AuditLogError
         raise AuditLogError(
-            f"Failed to write audit event {action!r} from {service_name!r}: {exc}"
+            f"Failed to write audit event {str(checked_action)!r} from {service_name!r}: {exc}"
         ) from exc

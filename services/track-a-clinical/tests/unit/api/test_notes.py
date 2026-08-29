@@ -27,6 +27,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
+from hipaa_logger import AuditAction
 from track_a_clinical import audit
 from track_a_clinical.api.dependencies import get_db_session
 from track_a_clinical.api.notes import (
@@ -220,7 +221,7 @@ async def test_reading_a_note_audits_the_access_with_its_client(
 ) -> None:
     await client.get(f"/notes/{session_id}", headers={"user-agent": "medauth-web/1.0"})
 
-    assert recorded_audit.actions == [audit.ACTION_READ_NOTE]
+    assert recorded_audit.actions == [AuditAction.READ_NOTE]
     call = recorded_audit.calls[0]
     assert call["note_id"] == note.id
     # From the encounter row, never from anything the caller sent — these routes
@@ -391,7 +392,7 @@ async def test_an_edit_audits_as_an_update(
 ) -> None:
     await client.patch(f"/notes/{session_id}", json={"soap_plan": "Revised."})
 
-    assert recorded_audit.actions == [audit.ACTION_UPDATE_NOTE]
+    assert recorded_audit.actions == [AuditAction.UPDATE_NOTE]
     assert recorded_audit.calls[0]["provider_id"] == encounter.provider_id
 
 

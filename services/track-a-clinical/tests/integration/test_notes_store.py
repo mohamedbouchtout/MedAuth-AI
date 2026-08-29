@@ -19,8 +19,8 @@ import pytest_asyncio
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from hipaa_logger import close_pool, configure
-from track_a_clinical import audit, notes
+from hipaa_logger import AuditAction, close_pool, configure
+from track_a_clinical import notes
 from track_a_clinical.db import database_url
 from track_a_clinical.models import (
     ENCOUNTER_STATUS_ACTIVE,
@@ -114,7 +114,7 @@ async def count_audit_rows(
     )
     async with sessions() as session:
         return int(
-            await session.scalar(statement, {"sid": session_id, "action": audit.ACTION_WRITE_NOTE})
+            await session.scalar(statement, {"sid": session_id, "action": AuditAction.WRITE_NOTE})
             or 0
         )
 

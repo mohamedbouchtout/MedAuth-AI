@@ -16,7 +16,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import hipaa_logger.db as db_module
-from hipaa_logger import AuditLogError, InvalidAuditFieldError, audit_log, set_connection
+from hipaa_logger import (
+    AuditAction,
+    AuditLogError,
+    InvalidAuditFieldError,
+    audit_log,
+    set_connection,
+)
 
 ACTOR_ID = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
 SESSION_ID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
@@ -58,7 +64,7 @@ async def test_writes_through_the_pool_when_no_connection_is_supplied(
 
     await audit_log(
         actor_id=ACTOR_ID,
-        action="READ_PATIENT",
+        action=AuditAction.READ_PATIENT,
         resource_type="Patient",
         resource_id="patient-123",
         session_id=SESSION_ID,
@@ -75,7 +81,7 @@ async def test_supplied_connection_bypasses_the_pool(monkeypatch: pytest.MonkeyP
 
     await audit_log(
         actor_id=None,
-        action="WRITE_NOTE",
+        action=AuditAction.WRITE_NOTE,
         resource_type="ClinicalNote",
         resource_id="note-1",
         session_id=None,
@@ -97,7 +103,7 @@ async def test_set_connection_is_used_when_no_conn_argument_is_passed(
 
     await audit_log(
         actor_id=None,
-        action="READ_COVERAGE",
+        action=AuditAction.READ_ENCOUNTER,
         resource_type="Coverage",
         resource_id="cov-1",
         session_id=None,
@@ -113,7 +119,7 @@ async def test_parameters_are_bound_in_column_order() -> None:
 
     await audit_log(
         actor_id=ACTOR_ID,
-        action="SUBMIT_PRIOR_AUTH",
+        action=AuditAction.SUBMIT_PRIOR_AUTH,
         resource_type="Claim",
         resource_id="claim-9",
         session_id=SESSION_ID,
@@ -143,7 +149,7 @@ async def test_optional_fields_default_to_none() -> None:
 
     await audit_log(
         actor_id=None,
-        action="READ_PATIENT",
+        action=AuditAction.READ_PATIENT,
         resource_type=None,
         resource_id=None,
         session_id=None,
@@ -160,7 +166,7 @@ async def test_ipv6_address_is_accepted() -> None:
 
     await audit_log(
         actor_id=None,
-        action="READ_PATIENT",
+        action=AuditAction.READ_PATIENT,
         resource_type="Patient",
         resource_id="p-1",
         session_id=None,
@@ -180,7 +186,7 @@ async def test_database_failure_is_raised_never_swallowed() -> None:
     with pytest.raises(AuditLogError, match="Failed to write audit event"):
         await audit_log(
             actor_id=None,
-            action="READ_PATIENT",
+            action=AuditAction.READ_PATIENT,
             resource_type="Patient",
             resource_id="p-1",
             session_id=None,
@@ -197,7 +203,7 @@ async def test_original_exception_is_preserved_as_the_cause() -> None:
     with pytest.raises(AuditLogError) as excinfo:
         await audit_log(
             actor_id=None,
-            action="READ_PATIENT",
+            action=AuditAction.READ_PATIENT,
             resource_type="Patient",
             resource_id="p-1",
             session_id=None,
@@ -213,7 +219,7 @@ async def test_malformed_uuid_raises_before_any_write(field: str) -> None:
     conn = make_connection()
     kwargs: dict[str, Any] = {
         "actor_id": None,
-        "action": "READ_PATIENT",
+        "action": AuditAction.READ_PATIENT,
         "resource_type": "Patient",
         "resource_id": "p-1",
         "session_id": None,
@@ -234,7 +240,7 @@ async def test_malformed_ip_raises_before_any_write() -> None:
     with pytest.raises(InvalidAuditFieldError, match="ip_address"):
         await audit_log(
             actor_id=None,
-            action="READ_PATIENT",
+            action=AuditAction.READ_PATIENT,
             resource_type="Patient",
             resource_id="p-1",
             session_id=None,
@@ -246,22 +252,77 @@ async def test_malformed_ip_raises_before_any_write() -> None:
     conn.execute.assert_not_awaited()
 
 
-@pytest.mark.parametrize(("action", "service_name"), [("", "track-b-rag"), ("READ", "")])
-async def test_required_fields_must_be_present(action: str, service_name: str) -> None:
+async def test_service_name_is_required() -> None:
+    """Split out from a parametrized pair that also covered an empty action.
+
+    An empty action is now refused by the vocabulary check, which raises before
+    service_name is ever looked at — so the old case would have passed for a
+    reason that had nothing to do with what it was named for.
+    """
     conn = make_connection()
 
-    with pytest.raises(InvalidAuditFieldError):
+    with pytest.raises(InvalidAuditFieldError, match="service_name"):
         await audit_log(
             actor_id=None,
-            action=action,
+            action=AuditAction.READ_PATIENT,
             resource_type="Patient",
             resource_id="p-1",
             session_id=None,
-            service_name=service_name,
+            service_name="",
             conn=conn,
         )
 
     conn.execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize("action", ["", "READ", "POLICY_QUERY", "read_patient"])
+async def test_an_action_outside_the_vocabulary_is_refused(action: str) -> None:
+    """The runtime half of the single-source rule.
+
+    mypy rejects these at the call site; this is the backstop for callers static
+    typing does not reach. ``POLICY_QUERY`` is the case that matters: a
+    transposition of a real member, which the free-text column would have
+    accepted happily and which would then have to be known about forever by
+    anyone querying the trail.
+    """
+    conn = make_connection()
+
+    with pytest.raises(InvalidAuditFieldError, match="vocabulary"):
+        await audit_log(
+            actor_id=None,
+            action=action,  # type: ignore[arg-type]  # the point of the test
+            resource_type="Patient",
+            resource_id="p-1",
+            session_id=None,
+            service_name="track-b-rag",
+            conn=conn,
+        )
+
+    conn.execute.assert_not_awaited()
+
+
+async def test_a_vocabulary_member_reaches_the_database_as_plain_text() -> None:
+    """Nothing downstream should have to know the vocabulary is an enum.
+
+    The column is text and reads back as text — an audit query, a report, or a
+    future consumer compares against ``"READ_PATIENT"``, not against a Python
+    type. A string spelling a real member is accepted for the same reason.
+    """
+    conn = make_connection()
+
+    await audit_log(
+        actor_id=None,
+        action="READ_PATIENT",  # type: ignore[arg-type]  # accepted, then coerced
+        resource_type="Patient",
+        resource_id="p-1",
+        session_id=None,
+        service_name="track-b-rag",
+        conn=conn,
+    )
+
+    written = conn.execute.await_args.args[2]
+    assert written == "READ_PATIENT"
+    assert type(written) is str
 
 
 async def test_uuid_objects_are_accepted_as_well_as_strings() -> None:
@@ -270,7 +331,7 @@ async def test_uuid_objects_are_accepted_as_well_as_strings() -> None:
 
     await audit_log(
         actor_id=actor,  # type: ignore[arg-type]  # documented convenience
-        action="READ_PATIENT",
+        action=AuditAction.READ_PATIENT,
         resource_type="Patient",
         resource_id="p-1",
         session_id=None,

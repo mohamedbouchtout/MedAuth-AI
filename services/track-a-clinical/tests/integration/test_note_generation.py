@@ -27,8 +27,7 @@ import sqlalchemy as sa
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from hipaa_logger import close_pool, configure
-from track_a_clinical import audit
+from hipaa_logger import AuditAction, close_pool, configure
 from track_a_clinical.consumer import TranscriptConsumer
 from track_a_clinical.db import database_url
 from track_a_clinical.models import (
@@ -301,12 +300,12 @@ async def test_the_note_is_audited_as_a_phi_write(
     await wait_until(lambda: generator.calls == 1)
     await wait_until(lambda: not running.watched_sessions)
 
-    assert await count_audit_rows(sessions, encounter.session_id, audit.ACTION_WRITE_NOTE) == 1
+    assert await count_audit_rows(sessions, encounter.session_id, AuditAction.WRITE_NOTE) == 1
 
     async with sessions() as session:
         actor = await session.scalar(
             sa.text("SELECT actor_id FROM audit_log WHERE session_id = :sid AND action = :action"),
-            {"sid": encounter.session_id, "action": audit.ACTION_WRITE_NOTE},
+            {"sid": encounter.session_id, "action": AuditAction.WRITE_NOTE},
         )
     assert actor == encounter.provider_id
 
@@ -333,7 +332,7 @@ async def test_a_repeated_end_signal_writes_one_note_and_runs_one_generation(
 
     assert generator.calls == 1
     assert await count_notes(sessions, encounter.id) == 1
-    assert await count_audit_rows(sessions, encounter.session_id, audit.ACTION_WRITE_NOTE) == 1
+    assert await count_audit_rows(sessions, encounter.session_id, AuditAction.WRITE_NOTE) == 1
 
 
 async def test_the_codes_land_in_the_documented_shape(

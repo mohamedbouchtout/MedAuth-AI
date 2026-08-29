@@ -19,7 +19,6 @@ from starlette.websockets import WebSocketDisconnect
 
 from session_auth import SESSION_SUBPROTOCOL
 from src.api.websocket import WS_CLOSE_UNAUTHORIZED
-from src.audit import ACTION_RELAY_NUDGES
 from tests.unit.api.conftest import (
     SIGNING_KEY,
     FakeRedis,
@@ -249,11 +248,6 @@ def test_the_audit_row_names_the_provider_from_the_token(
         pass
 
     assert recorded_audit.calls[0]["provider_id"] == provider_id
-
-
-def test_the_action_constant_is_the_one_in_the_vocabulary() -> None:
-    """CLAUDE.md's action vocabulary carries RELAY_NUDGES for this service."""
-    assert ACTION_RELAY_NUDGES == "RELAY_NUDGES"
 
 
 def test_an_undecodable_payload_is_skipped_and_the_next_one_still_arrives(
