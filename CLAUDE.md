@@ -1370,7 +1370,7 @@ and being able to trace it to a specific request is worth the two extra columns.
 ```python
 async def audit_log(
     actor_id: str | None,
-    action: str,
+    action: AuditAction,  # the vocabulary, never a bare string — see below
     resource_type: str | None,
     resource_id: str | None,
     session_id: str | None,
@@ -1384,6 +1384,9 @@ async def audit_log(
 `ip_address` and `user_agent` are optional and default to None until a request-context
 mechanism (likely FastAPI middleware) populates them automatically in a later task.
 Ship them as real parameters, not permanently-empty columns silently filled with NULL.
+
+`action` is typed as `AuditAction` rather than `str` deliberately — see "The
+action vocabulary" below for what that buys and why it must not be widened.
 
 ### Auditing work that no request triggered (cross-cutting — every consumer)
 Every rule about `audit_log()` above this line is written for a route. Known
@@ -1426,45 +1429,49 @@ disagreeing.
   for routes. A note that exists with no audit row, and an audit row for a note
   that rolled back, are both worse than the write failing outright.
 
-**The action vocabulary is this list, and it is authoritative.** Each service's
-`audit.py` declares constants only from here, and a task needing an action that
-is not listed adds it to this list in the same PR — the same rule the Redis key
-list carries, for the same reason. Until now this vocabulary existed only as
-three examples in a comment on the `audit_log` schema above, which is how
-`WRITE_NOTE` came to be cited by a task while no service defined it. The same
-drift ran the other way with `QUERY_POLICY`: TASK-012 shipped it as a constant in
-`track_b_rag/audit.py`, under a comment claiming it came from this vocabulary,
-while this list had never carried it. `STREAM_AUDIO` is the third instance and
-ran the same way as `QUERY_POLICY`: TASK-020 shipped it in
-`audio-ingestion/src/audit.py` and named it in `docs/api/audio-ingestion.yaml`,
-and this list had never carried it either. All three are the same failure — the
-list and the code each look authoritative on their own — and all three are
-corrected below.
+**The action vocabulary is `hipaa_logger.AuditAction`, and it is the only
+definition.** Services import members from it; none declares its own action
+string, and there is no list in this document to keep in step with the code.
+`audit_log()` takes an `AuditAction` rather than a `str`, so mypy rejects an
+invented action at the call site and the function rejects one again at runtime
+for callers static typing does not reach.
 
-Three hand-caught instances is enough evidence that reading carefully is not a
-working control, so the check is being automated rather than repeated: **TASK-045
-adds a test that collects every action constant the services actually declare and
-asserts each one appears in this table**, in both directions. Until it lands, the
-rule above is enforced by whoever happens to notice.
+That arrangement is TASK-045, and the history is why it is shaped this way. The
+vocabulary used to live here, as a table, with each service declaring its own
+string constants against it — and the two drifted three times, in both
+directions. `WRITE_NOTE` was cited by a task while no service defined it.
+`QUERY_POLICY` shipped in `track_b_rag/audit.py` under a comment claiming it came
+from this document, while the table had never carried it. `STREAM_AUDIO` did the
+same from `audio-ingestion/src/audit.py`, and was named in
+`docs/api/audio-ingestion.yaml` too. Each was found by someone working on
+something else, because the table and the code each looked authoritative on their
+own.
 
-| Action | Written by | Meaning |
-|---|---|---|
-| `START_SESSION` | track-a-clinical (TASK-006) | An encounter was opened |
-| `END_SESSION` | track-a-clinical (TASK-006) | An encounter was closed |
-| `READ_ENCOUNTER` | track-a-clinical (TASK-006) | An `encounters` row was read |
-| `REMINT_SESSION_TOKEN` | track-a-clinical (TASK-006b) | A session's token was refreshed |
-| `STREAM_AUDIO` | audio-ingestion (TASK-020) | Encounter audio was streamed through transcription under one session |
-| `WRITE_NOTE` | track-a-clinical (TASK-030) | A SOAP note was generated and stored |
-| `READ_NOTE` | track-a-clinical (TASK-032), prior-auth (TASK-060) | A `clinical_notes` row was read |
-| `UPDATE_NOTE` | track-a-clinical (TASK-032) | A provider edited a stored note |
-| `QUERY_POLICY` | track-b-rag (TASK-012) | An encounter's clinical context was read to answer a policy query |
-| `WRITE_NUDGE` | track-b-rag (TASK-040) | A nudge was raised and stored against an encounter |
-| `RELAY_NUDGES` | nudge-service (TASK-041) | An encounter's nudge stream was opened to a client |
-| `ACKNOWLEDGE_NUDGE` | track-b-rag (TASK-041b) | A provider dismissed a nudge, and the row changed |
-| `READ_NUDGE` | prior-auth (TASK-060), track-b-rag (TASK-041b) | An encounter's `clinical_nudges` rows were read — including a repeat acknowledge, which reads a row it does not change |
-| `WRITE_PRIOR_AUTH` | prior-auth (TASK-060) | A prior-auth bundle was assembled and stored |
-| `SUBMIT_PRIOR_AUTH` | prior-auth (TASK-061) | A bundle was transmitted to a payer |
-| `READ_PATIENT` | fhir-integration (Phase 5) | Patient context was read from an EHR |
+TASK-045 was originally specified as a CI test comparing the table against the
+constants. That would have detected a fourth instance rather than preventing one,
+and it would have left two definitions in place plus a third thing to maintain.
+The vocabulary belongs in `hipaa-logger` because that package already owns the
+`audit_log` table and its migration, `action` is a column of that table, and
+every service that audits already depends on the package — so nothing new is
+coupled by it. **Prefer collapsing a duplication to detecting its drift**, here
+and generally.
+
+What follows from that, and is easy to undo by accident:
+
+- **Adding an action means adding a member to `AuditAction`**, in the same change
+  as the code that writes it. Not a row in this document — there is no longer a
+  row to add.
+- **Members for unbuilt work are expected**, not a carve-out. `READ_PATIENT`
+  waits on Phase 5 and `SUBMIT_PRIOR_AUTH` on TASK-061; an unused member is
+  inert, unlike a documented row with nothing behind it.
+- **Which service writes which action is deliberately not written down.** It was
+  a column of the old table and the half that rotted fastest. With one symbol per
+  action it is `grep -rn "AuditAction.READ_NUDGE"`, which cannot go stale.
+- **The meanings live on the members**, as comments in
+  `packages/hipaa-logger/src/hipaa_logger/actions.py`. Read them there.
+- **Do not widen `audit_log`'s parameter back to `str`** for a caller's
+  convenience. The column is `VARCHAR(100)` and constrains nothing; the type is
+  the only thing standing between one vocabulary and two spellings of it.
 
 `resource_type` is the resource name the row is about — `Encounter`,
 `ClinicalNote`, `ClinicalNudge`, `PriorAuthRequest`, `Patient` — and
