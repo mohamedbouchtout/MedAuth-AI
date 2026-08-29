@@ -20,11 +20,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from api_envelope import install_error_handlers
+from cors_policy import install_cors
 from track_a_clinical.api.dependencies import close_redis, get_redis
 from track_a_clinical.api.health import router as health_router
 from track_a_clinical.api.notes import router as notes_router
 from track_a_clinical.api.sessions import router as sessions_router
 from track_a_clinical.bedrock import reset_clients
+from track_a_clinical.config import get_settings
 from track_a_clinical.consumer import TranscriptConsumer
 from track_a_clinical.db import dispose_engine
 
@@ -66,6 +68,10 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     install_error_handlers(app)
+    # TASK-041c. apps/web calls POST /sessions/start and the note routes from a
+    # browser; the policy is settled repo-wide in CLAUDE.md, "CORS and browser
+    # reachability", and configured per environment.
+    install_cors(app, get_settings().cors_allowed_origins)
     app.include_router(health_router)
     app.include_router(sessions_router)
     app.include_router(notes_router)
