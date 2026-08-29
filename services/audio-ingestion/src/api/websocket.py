@@ -35,6 +35,7 @@ import anyio
 from fastapi import APIRouter, Depends, WebSocket
 from redis.asyncio import Redis
 
+from cors_policy import ORIGIN_REFUSED_REASON, is_allowed_origin
 from session_auth import (
     WS_CLOSE_UNAUTHORIZED,
     SessionAuthError,
@@ -130,6 +131,30 @@ async def audio_stream(
     ``medauth.jwt.<jwt>`` entry in the subprotocol list, and must carry the same
     ``session_id`` as the URL.
     """
+    # TASK-041c. Browsers apply no CORS to a WebSocket upgrade, so the policy
+    # installed on the HTTP services does not reach this handshake and the
+    # origin is checked here instead.
+    #
+    # **This is defence in depth, not the fix for a vulnerability.** The absence
+    # of this check was not a cross-site WebSocket hijacking hole: that attack
+    # works by riding ambient credentials, and this repository has none — the
+    # session JWT travels in an ``Authorization`` header or the ``medauth.jwt.``
+    # subprotocol, never a cookie, so a page that does not already hold a token
+    # cannot open a socket by pointing a browser at one. Do not read the check
+    # as evidence that it once could, and do not treat removing it as reopening
+    # a hole. What would change that: the credential moving to a cookie. See
+    # CLAUDE.md, "CORS and browser reachability".
+    #
+    # A refused origin closes with 4401 rather than a code of its own. The
+    # client-visible outcome is identical either way — a connection refused
+    # before the handshake completes has no frame to carry a code in — so a
+    # second code would add surface without telling a client anything. The
+    # operational trace is where the two are distinguished, by the fixed label.
+    if not is_allowed_origin(websocket.headers.get("origin"), settings.cors_allowed_origins):
+        logger.warning("Refused audio connection: %s", ORIGIN_REFUSED_REASON)
+        await websocket.close(code=WS_CLOSE_UNAUTHORIZED)
+        return
+
     try:
         identity = _authenticate(websocket, session_id, settings)
     except SessionAuthError as exc:
