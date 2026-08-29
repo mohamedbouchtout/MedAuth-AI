@@ -22,6 +22,7 @@ module.exports = {
   testMatch: ['**/*.test.ts', '**/*.test.tsx'],
   moduleNameMapper: {
     '^@medauth/audio-wire$': '<rootDir>/../../packages/audio-wire/src/index.ts',
+    '^@medauth/session-client$': '<rootDir>/../../packages/session-client/src/index.ts',
   },
   collectCoverage: true,
   collectCoverageFrom: ['src/**/*.{ts,tsx}'],

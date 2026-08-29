@@ -36,6 +36,7 @@ medauth-ai/
 │   ├── hipaa-logger/     # Shared audit logging — every service imports this
 │   ├── fhir-types/       # Shared FHIR R4 type definitions (Python + TypeScript)
 │   ├── audio-wire/       # Encounter-audio wire format — both frontends (TypeScript)
+│   ├── session-client/   # Session lifecycle client + token freshness — both frontends (TypeScript)
 │   ├── session-auth/     # Session-token validation for every real-time endpoint
 │   └── crypto-utils/     # AES-256 helpers used across services
 ├── infrastructure/
@@ -1616,6 +1617,11 @@ Path filter groups (each maps to a test job):
   --noEmit` and Vitest rather than joining the Python matrix. A change here also
   sets the `web` and `mobile` filters, because the package ships source that
   both apps compile into themselves rather than a built artifact.
+- `session-client`: packages/session-client/** — TypeScript only, on the same
+  terms as `audio-wire` above, and it sets `web` and `mobile` for the same
+  reason. It holds the only client that may re-mint a session token, so a change
+  here that ran no tests would change how a credential is refreshed in both apps
+  at once.
 - `track-b-rag`: services/track-b-rag/** or packages/**
 - `track-a-clinical`: services/track-a-clinical/** or packages/**
 - `audio-ingestion`: services/audio-ingestion/** or packages/**

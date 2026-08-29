@@ -44,6 +44,7 @@ jobs:
       mobile: ${{ steps.detect.outputs.mobile }}
       fhir_types: ${{ steps.detect.outputs.fhir_types }}
       audio_wire: ${{ steps.detect.outputs.audio_wire }}
+      session_client: ${{ steps.detect.outputs.session_client }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -342,6 +343,32 @@ jobs:
       - name: vitest — 80% coverage gate, same as services/ and packages/
         run: npm run test --workspace @medauth/audio-wire
 
+  session-client:
+    name: Session client (packages/session-client)
+    needs: changes
+    if: needs.changes.outputs.session_client == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          # .nvmrc is the only place the Node version is written. Reading it here
+          # rather than repeating a number means a contributor's nvm/fnm and CI
+          # cannot drift apart — the failure that pattern produces is a build
+          # that passes on a laptop and fails in a pull request for reasons the
+          # diff does not show. The floor in package.json's `engines` is a
+          # separate thing: a minimum that npm enforces, not a second pin.
+          node-version-file: .nvmrc
+
+      - run: npm ci
+
+      - name: tsc --noEmit
+        run: npm run typecheck --workspace @medauth/session-client
+
+      - name: vitest — 80% coverage gate, same as services/ and packages/
+        run: npm run test --workspace @medauth/session-client
+
   # ---------------------------------------------------------------------------
   # Frontends — only when the app actually changed and has a package.json.
   # ---------------------------------------------------------------------------
@@ -417,7 +444,8 @@ jobs:
     # list can fail without blocking a merge, which is the same silent-hole
     # failure the detector rules guard against, one layer up: the job runs, goes
     # red, and nothing stops the pull request.
-    needs: [lint, typecheck, test, fhir-types, audio-wire, web, mobile, detect-logic]
+    needs:
+      [lint, typecheck, test, fhir-types, audio-wire, session-client, web, mobile, detect-logic]
     if: always()
     runs-on: ubuntu-latest
     steps:

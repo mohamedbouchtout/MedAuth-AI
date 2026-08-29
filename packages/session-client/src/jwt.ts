@@ -12,8 +12,10 @@
  *   about whether a token is *acceptable* may be made from it. The server is the
  *   only thing that validates a session token; this is a scheduling hint.
  * - **It does not log.** The decoded payload is the contents of a credential.
- * - **It does not use `atob`.** Hermes does not guarantee it, and a base64
- *   decoder is fifteen lines. Failing to decode is handled, never thrown.
+ * - **It does not use `atob`.** Hermes does not guarantee it, so the mobile app
+ *   could not rely on it; a browser has it, but one decoder shared by both
+ *   consumers is worth more than a runtime check that picks between two. A
+ *   base64 decoder is fifteen lines. Failing to decode is handled, never thrown.
  */
 
 /** Standard base64 alphabet; base64url's two substitutions are mapped on the way in. */

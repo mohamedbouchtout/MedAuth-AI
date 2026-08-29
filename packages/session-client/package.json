@@ -1,0 +1,24 @@
+{
+  "name": "@medauth/session-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The session lifecycle client shared by apps/web and apps/mobile — start, re-mint and end a visit, and the token-freshness check that decides when to re-mint.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.11",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

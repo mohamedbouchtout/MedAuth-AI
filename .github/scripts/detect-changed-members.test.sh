@@ -159,6 +159,20 @@ assert_key 'audio_wire reacts to the npm lockfile' \
   audio_wire 'package-lock.json' 'true'
 assert_key 'audio_wire ignores the uv lockfile' \
   audio_wire 'uv.lock' 'false'
+assert_key 'session_client reacts to its own package' \
+  session_client 'packages/session-client/src/jwt.ts' 'true'
+assert_key 'session_client reacts to the npm lockfile' \
+  session_client 'package-lock.json' 'true'
+assert_key 'session_client ignores the uv lockfile' \
+  session_client 'uv.lock' 'false'
+assert_key 'session_client ignores audio-wire' \
+  session_client 'packages/audio-wire/src/frame.ts' 'false'
+# Both apps compile this package's source into themselves, so a change to the
+# only client that may re-mint a session token has to re-run both app suites.
+assert_key 'web reacts to session-client, which ships as source' \
+  web 'packages/session-client/src/sessions.ts' 'true'
+assert_key 'mobile reacts to session-client' \
+  mobile 'packages/session-client/src/sessions.ts' 'true'
 
 section 'the conventions the rules are derived from must hold in the repo'
 # The docs/api rule maps a spec to a job by filename alone. If a spec is named
@@ -226,6 +240,45 @@ else
   diff <(printf '%s\n' "$declared_packages") <(printf '%s\n' "$actual_packages") \
     | sed 's/^/      /' || true
 fi
+
+# The TypeScript-only packages are the half ALL_PACKAGES cannot cover, and until
+# TASK-042 nothing asserted them at all: `packages/audio-wire` had explicit cases
+# because someone wrote them, and a second TS package could have landed with no
+# job and no failing test — the same silent gap, in the one place the array check
+# above is deliberately blind to.
+#
+# The rule these are held to is the naming convention the two existing jobs
+# already follow: a TS package's output key is its directory name with hyphens
+# replaced by underscores. Asserting the convention rather than a list means a
+# third package is covered the moment it exists.
+for dir in "$REPO_ROOT"/packages/*/; do
+  [ -d "$dir" ] || continue
+  [ -f "$dir/pyproject.toml" ] && continue
+  name="$(basename "$dir")"
+  key="${name//-/_}"
+  got="$(detect_key "$key" "packages/$name/src/x.ts")"
+  if [ "$got" = "true" ]; then
+    passed=$((passed + 1))
+    printf 'PASS  packages/%s selects the %s job\n' "$name" "$key"
+  else
+    failed=$((failed + 1))
+    printf 'FAIL  packages/%s selects no job — a TypeScript-only package needs an\n' "$name"
+    printf '      output named %s in the detector and a job in ci.yml, or its\n' "$key"
+    printf '      suite never runs\n'
+  fi
+  # The uv workspace globs packages/*, so a TypeScript-only package must also be
+  # excluded there or `uv run` fails outright for every Python service — not just
+  # in CI, but on any developer's machine, with an error naming a missing
+  # pyproject.toml rather than the glob that claimed the directory.
+  if grep -q "packages/$name" "$REPO_ROOT/pyproject.toml"; then
+    passed=$((passed + 1))
+    printf 'PASS  packages/%s is excluded from the uv workspace\n' "$name"
+  else
+    failed=$((failed + 1))
+    printf 'FAIL  packages/%s has no pyproject.toml and is not in the uv\n' "$name"
+    printf "      workspace's exclude list — uv sync fails for every service\n"
+  fi
+done
 
 printf '\n%d passed, %d failed\n' "$passed" "$failed"
 [ "$failed" -eq 0 ]
