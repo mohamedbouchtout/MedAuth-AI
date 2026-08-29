@@ -3257,7 +3257,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
       TASK-045, kept out of here because it tests every service against a root
       document and has nothing to do with relaying nudges.
 
-- [ ] **TASK-041b:** Nudge acknowledge endpoint
+- [x] **TASK-041b:** Nudge acknowledge endpoint
   - Service: `services/track-b-rag` (owns the clinical_nudges write from TASK-040)
   - Prerequisite: TASK-040, which writes the row and puts its `nudge_id` in the
     published payload. Blocks TASK-042 and TASK-043, whose dismiss buttons call
@@ -3341,6 +3341,35 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **Test:** the audit row names the encounter's `provider_id` as actor and
     carries no procedure, code or criteria text
   - **Test:** `{"acknowledged": false}` is rejected rather than un-acknowledging
+  - Built (746 tests in track-b-rag, 100% coverage; 21 of them new, six against
+    a real PostgreSQL). Decisions worth knowing before touching this:
+    - **The join is asserted twice, in two different ways, on purpose.** The
+      integration test soft-deletes an encounter and checks the 404; the unit
+      test compiles the statement and asserts `join encounters` and
+      `encounters.deleted_at is null` appear in it. A fake `execute` returns
+      whatever the test handed it whatever the statement said, so without the
+      compiled-SQL assertion a route that dropped the join would pass the entire
+      unit file. Without the integration test, the compiled-SQL assertion would
+      only prove the string is there.
+    - **The repeat writes an audit row too, and it is a `READ_NUDGE`.** A second
+      dismissal still reached the nudge, so Known Constraints #6 still applies;
+      what it did not do is change anything, which is why it is not recorded as
+      a state change. Two calls leave two rows, and their actions differ.
+    - **`acknowledged_at` falls back to `fired_at` in the response.** Nothing in
+      this repository writes `acknowledged=true` with a null timestamp, and the
+      response model must not depend on that staying true — the same call
+      TASK-006 makes with `ended_at or started_at`. There is a test for it.
+    - **`Literal[True]` is what rejects `false`**, so the refusal is a 422 from
+      the shared validation handler rather than a hand-written branch, and the
+      published spec carries `const: true` where a reader will see it.
+    - **The response is 200 and the route creates nothing**, unlike
+      `/sessions/start`'s 201. A dismissal changes an existing row.
+    - **A drive-by fix landed as its own commit:** the spec's `Error` enum still
+      named `invalid_pdf`, which `policies.py` renamed to `invalid_document`
+      when HTML ingestion landed. The drift test cannot catch that half of the
+      enum, since those codes have no generated counterpart to compare against.
+    - **Still not reachable from a browser.** TASK-041c is the gate, and nothing
+      here installs CORS middleware to get around it.
 
 - [ ] **TASK-041c:** CORS policy for browser-facing routes
   - Prerequisite: none. Blocks TASK-042 and every browser-facing route after it.
