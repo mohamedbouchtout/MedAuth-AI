@@ -41,7 +41,7 @@ ALL_SERVICES=(
   nudge-service
   policy-scraper
 )
-ALL_PACKAGES=(api-envelope hipaa-logger crypto-utils fhir-types payer-vocab bedrock-client)
+ALL_PACKAGES=(api-envelope hipaa-logger crypto-utils fhir-types payer-vocab bedrock-client session-auth)
 
 
 # Return 0 when any changed path matches the given extended regular expression.
@@ -80,12 +80,15 @@ main() {
         fi
       done
 
-      # audio-ingestion validates the session JWT that track-a-clinical mints,
-      # and tests/unit/test_remint_token_contract.py proves the two agree by
+      # packages/session-auth validates the session JWT that track-a-clinical
+      # mints, and tests/unit/test_issuer_contract.py proves the two agree by
       # calling the real issuer. That test is decorative unless a change to the
-      # issuer re-runs it, so select the validator's job too.
+      # issuer re-runs it, so select the validator's job too. It moved here from
+      # services/audio-ingestion in TASK-041, along with the validator itself —
+      # the coupling is to whoever owns the validation, not to one of its
+      # consumers.
       if changed_matches '^services/track-a-clinical/'; then
-        selected+=("services/audio-ingestion")
+        selected+=("packages/session-auth")
       fi
 
       # track-a-clinical also ships the shared SQLAlchemy models (CLAUDE.md,
