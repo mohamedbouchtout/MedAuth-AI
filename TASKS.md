@@ -3261,7 +3261,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - Service: `services/track-b-rag` (owns the clinical_nudges write from TASK-040)
   - Prerequisite: TASK-040, which writes the row and puts its `nudge_id` in the
     published payload. Blocks TASK-042 and TASK-043, whose dismiss buttons call
-    this. Not actually reachable from `apps/web` until TASK-041c settles CORS.
+    this. Reachable from `apps/web` since TASK-041c installed the CORS policy.
   - `PATCH /nudges/{nudge_id}/acknowledge` — sets `acknowledged=true`,
     `acknowledged_at=NOW()`. This is what TASK-042's dismiss button calls —
     it was referenced by the UI task but never specified as its own endpoint
@@ -3368,10 +3368,11 @@ The insurance policy RAG is the technical core. Build and validate before other 
       named `invalid_pdf`, which `policies.py` renamed to `invalid_document`
       when HTML ingestion landed. The drift test cannot catch that half of the
       enum, since those codes have no generated counterpart to compare against.
-    - **Still not reachable from a browser.** TASK-041c is the gate, and nothing
-      here installs CORS middleware to get around it.
+    - **Reachable from a browser since TASK-041c.** Nothing here installs CORS
+      middleware, and nothing here should: the policy is one shared package
+      applied in `main.py`, so this router is unaware of it by design.
 
-- [ ] **TASK-041c:** CORS policy for browser-facing routes
+- [x] **TASK-041c:** CORS policy for browser-facing routes
   - Prerequisite: none. Blocks TASK-042 and every browser-facing route after it.
   - **The gap.** No service in this repository installs `CORSMiddleware`, and
     nothing in front of them supplies it either — there is no ingress or gateway
@@ -3419,6 +3420,44 @@ The insurance policy RAG is the technical core. Build and validate before other 
     the route's methods
   - **Test:** an origin outside the configured list is not granted
   - **Test:** the allowed origins come from configuration, not a literal
+  - Built (`packages/cors-policy`, 25 tests at 100%; four services wired, all
+    suites green). Decisions worth knowing before touching this:
+    - **`pydantic-settings` JSON-decodes a `tuple[str, ...]` env value before
+      any validator runs**, so a comma-separated `CORS_ALLOWED_ORIGINS` raises
+      `SettingsError` and the service does not start. `NoDecode` is what stops
+      that, and the shared `AllowedOrigins` annotation exists so four services
+      cannot each rediscover it. Verified against pydantic-settings 2.15.0;
+      there is a regression test naming the failure.
+    - **A request with no `Origin` header is allowed, deliberately.** Every
+      caller of both WebSocket endpoints today sends none, so a check that
+      refused them would look right in review and break the whole service —
+      while stopping nothing, since a non-browser client can send any origin it
+      likes. CORS constrains browsers on behalf of their users; it is not an
+      access control on the server.
+    - **The default is no origins, not localhost.** A baked-in dev origin would
+      ship to production the first time the variable was forgotten, so
+      `.env.example` documents the local value in a comment instead — that file
+      ships all 74 of its keys empty, and this one is no exception.
+    - **`create_app()` now reads `Settings`, which made importing
+      `track_a_clinical.main` require `JWT_SIGNING_KEY`** — its one field with
+      no default — because that module builds its app at import. Failing at
+      startup with the variable named is the right production behaviour, so the
+      fix is `services/track-a-clinical/tests/conftest.py` supplying a
+      placeholder rather than giving the key a default. `test_config.py` still
+      asserts the refusal, since `monkeypatch.delenv` unsets it either way.
+    - **One existing test needed updating deliberately.**
+      `test_the_configured_collection_is_used` set `QDRANT_COLLECTION` and
+      relied on `get_settings` being cold; the `client` fixture now warms the
+      cache through `create_app()`, so without a `cache_clear()` the test
+      asserted against the value the app was built with and would have passed
+      for a reason unrelated to its name.
+    - **A refused origin closes with 4401 rather than a code of its own.** A
+      connection refused before the handshake completes has no frame to carry a
+      code in, so the client-visible outcome is identical either way; the two
+      refusals are distinguished in the operational log by a fixed label.
+    - **No OpenAPI change.** CORS middleware adds no routes, so the committed
+      specs and their drift tests are untouched.
+
 - [ ] **TASK-042:** Nudge UI component (web)
   - App: `apps/web`
   - `<NudgeOverlay sessionId={...} />` — subscribes to nudge WebSocket
@@ -3433,13 +3472,13 @@ The insurance policy RAG is the technical core. Build and validate before other 
     session JWT to it on the assumption that a PHI-touching route must want one;
     the endpoint does not validate it, and sending a bearer token to a route
     that ignores it is how a client comes to believe it is authenticated.
-  - **Blocked on TASK-041c.** The dismiss is cross-origin and preflighted, so
-    this component cannot be verified end to end against a running service until
-    that task installs the middleware. The policy itself is already decided —
-    CLAUDE.md, "CORS and browser reachability" — so cite it rather than
-    re-deriving anything about origins here. The WebSocket subscription is
-    unaffected: browsers do not apply CORS to a WebSocket upgrade, so the alert
-    half of this task can be built first.
+  - **No longer blocked: TASK-041c has landed.** The dismiss is cross-origin
+    and preflighted, and `track-b-rag` now answers that preflight for the
+    origins its environment configures. Set `CORS_ALLOWED_ORIGINS` to the Vite
+    dev origin locally — `.env.example` names it — or the browser refuses the
+    request before the service sees it, which looks like a broken endpoint
+    rather than a missing variable. Cite CLAUDE.md, "CORS and browser
+    reachability"; do not re-derive anything about origins here.
   - Accessible (ARIA role=alert, focus management)
   - **Test:** render with mock WebSocket, verify alert appears on message
   - **Test:** click dismiss, verify acknowledge endpoint is called with correct nudge_id
