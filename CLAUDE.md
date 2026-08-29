@@ -533,10 +533,10 @@ and two clients each deciding it alone is how they end up disagreeing.
   Phase 5, whichever comes first. This is a judgement between two reasonable
   options rather than the only defensible one: v1 buys lower complexity, and the
   price is written down here instead of being discovered later.
-- **This settles credentials and says nothing about CORS.** No service in this
-  repository installs `CORSMiddleware` and no gateway supplies one, so a
-  browser-facing route is not actually reachable from `apps/web` until TASK-041c
-  decides that repo-wide. Two separate questions; neither answers the other.
+- **This settles credentials and says nothing about CORS.** Two separate
+  questions; neither answers the other. CORS is settled on its own terms in
+  "CORS and browser reachability" below, which is what actually makes a
+  browser-facing route reachable from `apps/web`.
 
 **How the JWT reaches a WebSocket endpoint — either carrier, never both
 required.** A WebSocket endpoint accepts the session token in *either* of two
@@ -590,6 +590,120 @@ sees a failed upgrade rather than an `onclose` with 4401. This is the correct
 trade: accepting an unauthenticated handshake purely so the rejection reads
 nicely is worse than the client having to distinguish a failed upgrade from a
 normal close.
+
+### CORS and browser reachability — decided once, in the services (cross-cutting)
+Settled by TASK-041c. `apps/web` is the first browser caller in this repository:
+every route before it was service-to-service, so nothing ever needed to answer a
+preflight, and nothing did. TASK-042 and TASK-043 cite this section rather than
+each deciding it, the same arrangement as the credential rule above and for the
+same reason — two clients deciding one cross-cutting question separately is how
+they come to disagree.
+
+**The policy is `CORSMiddleware` installed in each service from one shared
+package.** Not an ingress, not a gateway, and not per-service hand-rolled
+allow-lists. Allowed origins, methods, headers and whether credentials are
+permitted are all configuration read per environment from
+`CORS_ALLOWED_ORIGINS` — never a hardcoded literal, and never `*` on a service
+that answers with PHI.
+
+- **One shared package, imported — not middleware each service configures for
+  itself.** That is the same answer this repository has already given twice to
+  "how is a repo-wide concern solved once": `packages/api-envelope` for the
+  response envelope and error handlers, `packages/session-auth` for token
+  validation, each imported by every consumer rather than copied. A hand-written
+  allow-list per service is the thing TASK-041c explicitly refuses, because a
+  permissive middleware added in one service is exactly how a repo-wide policy
+  gets set by accident.
+- **It is a new package rather than an addition to `api-envelope`, and that is
+  not a stylistic choice.** That package's scope note is locked and says in
+  terms that it is not a place for shared routes, authentication, dependencies,
+  or middleware. Bolting CORS onto it would make it the shared web framework it
+  declares it is not. A separate package gets its own path-filter entry, its own
+  CI job and the same 80% gate, per the packages rule in GitHub Actions above.
+- **Only the services that answer HTTP to a browser install it.** Today that is
+  `track-b-rag` (TASK-041b's acknowledge route) and `track-a-clinical`
+  (`GET`/`PATCH /notes/{session_id}`). `audio-ingestion` and `nudge-service`
+  expose WebSocket surfaces plus `/health`, and a browser applies no CORS to a
+  WebSocket upgrade, so middleware there would protect nothing. Add it to a
+  service when that service grows a browser-facing HTTP route, not pre-emptively.
+- **The deciding argument against an ingress was the dev and CI environment, not
+  architectural taste.** Local development is `docker compose`, which runs no
+  proxy, and `apps/web` talks straight to service ports (`VITE_AUDIO_WS_URL`
+  defaults to `ws://localhost:8001`) with no Vite dev proxy configured. CI runs
+  that same compose stack. An ingress-only policy would therefore leave dev and
+  CI with no CORS answer at all, so TASK-042 could not be verified end to end
+  against a running service — which is the single thing TASK-041c exists to
+  unblock. Closing that would mean a second proxy in compose: one policy
+  implemented twice in two technologies, a worse fragmentation than the one the
+  task set out to prevent.
+- **The gateway question is deferred to Phase 6, not answered "unnecessary".**
+  An ingress is very likely the right eventual home for TLS termination,
+  routing, and rate limiting — "TLS everywhere" in Key Architectural Constraints
+  has no implementation anywhere in this tree today. What makes it a deferral
+  rather than a rejection is that its real justifications are those, not CORS;
+  and that as of TASK-041c `infrastructure/terraform/` is empty and
+  `infrastructure/kubernetes/` holds one CronJob, so there is no cluster for an
+  ingress to sit in. Standing all of that up for the first time to answer a
+  preflight is a disproportionate lift, and it is separately true that it would
+  still not answer one in local development.
+- **When a gateway does arrive, the middleware comes out in the same change.**
+  Two layers both setting CORS headers produce a duplicated
+  `Access-Control-Allow-Origin`, which browsers reject outright — so the failure
+  mode of a half-done migration is that every browser-facing route stops
+  working, not that the policy is merely stated twice. Recorded here now because
+  whoever adds the ingress will not otherwise have this reasoning, and the
+  removal is the easy half to forget.
+
+**Choosing per-service CORS forecloses nothing about where authentication
+lands.** This is the part of the decision most likely to be second-guessed
+later, so the reasoning is written down rather than left as an unexamined
+default. A gateway is the conventional home for CORS *and* authentication
+together, and the fair version of the objection is: if CORS goes in the services
+now and a gateway arrives later for auth, that is two repo-wide concerns solved
+in two places at two times.
+
+- **The check this repository actually needs cannot live in a gateway.** The
+  eventual fix named above — generalising `packages/session-auth` to validate a
+  token's claim against a *resolved* `session_id` — resolves
+  `nudge_id` → `clinical_nudges.encounter_id` → `encounters.provider_id`. That
+  is a join against domain tables. A gateway can only perform it by taking its
+  own database credentials or by making a subrequest back into the service, and
+  both are worse than the service doing a read it is already connected to make.
+  So the resource-relative half of authentication lands in the service whether
+  or not a gateway ever exists.
+- **A gateway could therefore only split authentication, never unify it.** It
+  could own the coarse half — signature and expiry — leaving the resolved-id
+  half in the service. That is the two-layer outcome the objection warns about,
+  and it is a property of introducing the gateway rather than a cost of
+  declining to.
+- **So the two questions are genuinely independent**, and this section decides
+  only CORS. Nothing here should be read as having pre-judged Phase 5's provider
+  authentication or the resolved-`session_id` work.
+
+**WebSocket handshakes are outside CORS, and the `Origin` check added here is
+defence in depth rather than a fix.** Browsers do not apply CORS to a WebSocket
+upgrade, so neither the nudge socket (TASK-041) nor the audio socket (TASK-020)
+is affected by anything above. Two separate facts follow, and a later reader
+needs both, because collapsing them turns a precaution into an implied history
+of a vulnerability that never existed:
+
+- **Why the absence of a check was not a hole.** The classic cross-site
+  WebSocket hijacking attack works because the browser attaches ambient
+  credentials — cookies — to an upgrade request a hostile page initiates. This
+  repository has none: the session JWT travels in an `Authorization` header or
+  the `medauth.jwt.` subprotocol, both of which a hostile page would have to
+  already possess in order to use. There is nothing ambient to ride, so a page
+  that does not hold a token cannot open a socket by pointing a browser at one.
+- **Why the check is added anyway.** It is nearly free once
+  `CORS_ALLOWED_ORIGINS` exists, and the nudge socket is the one surface in this
+  repository where a browser reaches a live stream of PHI. Defence in depth is
+  the entire justification, and it does not depend on the reasoning above being
+  wrong.
+- **What a future reader must not conclude.** That the check was added because
+  tokens were reachable some other way, or that removing it would restore a
+  vulnerability. What would change that: if the credential ever moves to a
+  cookie, the first bullet stops holding and this check stops being optional.
+  That is the condition to watch, and it is not true today.
 
 ### Redis Key Naming — Canonical List
 Every task below should use these exact patterns, not invent variants:
