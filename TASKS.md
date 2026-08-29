@@ -3459,7 +3459,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
     - **No OpenAPI change.** CORS middleware adds no routes, so the committed
       specs and their drift tests are untouched.
 
-- [ ] **TASK-042:** Nudge UI component (web)
+- [x] **TASK-042:** Nudge UI component (web)
   - App: `apps/web`
   - Prerequisite: TASK-041 (the socket), TASK-041b (the acknowledge route),
     TASK-041c (the CORS answer that makes that route reachable from a browser),
@@ -3545,11 +3545,18 @@ The insurance policy RAG is the technical core. Build and validate before other 
     request before the service sees it, which looks like a broken endpoint
     rather than a missing variable. Cite CLAUDE.md, "CORS and browser
     reachability"; do not re-derive anything about origins here.
-  - `VITE_NUDGE_WS_URL` and `VITE_API_BASE_URL` are both already in
-    `.env.example` and unused, so this task adds no new variable — it adds the
-    two exports to `apps/web/src/config.ts` beside the audio origin. They are
-    not interchangeable: one is a `ws://`/`wss://` origin the hook appends
-    `/ws/nudges/{session_id}` to, the other an HTTP origin for REST paths.
+  - **This task needs three origins and `.env.example` had two of them.**
+    `VITE_NUDGE_WS_URL` and `VITE_API_BASE_URL` were already there and unused;
+    both become exports in `apps/web/src/config.ts` beside the audio origin. The
+    third is new: `VITE_API_BASE_URL` addresses track-a-clinical, which owns the
+    re-mint endpoint, and the acknowledge route lives in **track-b-rag**, which
+    is a different service on a different port. `apps/mobile` never hit this
+    because it talks to one HTTP service. Add `VITE_TRACK_B_RAG_URL` rather than
+    pointing one variable at two services — a single base URL only becomes right
+    when something actually puts both behind one origin, which is the Phase 6
+    gateway CLAUDE.md defers under "CORS and browser reachability". None of the
+    three are interchangeable: two are `ws://`/`wss://` origins that a hook
+    appends its own path to, and two are HTTP origins for different services.
   - Accessible (ARIA role=alert, focus management)
   - **Not verifiable end to end until TASK-052b**, the same caveat every task on
     this path carries: nothing publishes to `nudges:{session_id}` for a real
@@ -3566,6 +3573,65 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **Test:** a socket that fails to open re-mints once and retries, and never
     calls `POST /sessions/start`
   - **Test:** a 409 from the re-mint reports the visit as over and does not retry
+  - Built (apps/web: 72 tests, 94.9% coverage against the 80% gate;
+    packages/session-client: 26 tests, 93.5%; apps/mobile still green at 107
+    after the extraction). Decisions worth knowing before touching this:
+    - **The token prop was the blocker and the freshness handling is most of the
+      hook.** `useNudgeStream` holds the token as state rather than reading the
+      prop directly, because a re-mint replaces it; an `attempt` counter is what
+      re-enters the effect, since a bumped counter always changes and a
+      replacement token might not. This is TASK-025's arrangement on mobile,
+      arrived at for the same reason and deliberately copied rather than
+      re-derived.
+    - **The refresh guard is reset inside the effect, not during render.** The
+      React lint rules reject writing a ref during render, and the effect re-runs
+      on every identity change anyway. Resetting `token`/`nudges`/`state` for a
+      new session *is* done during render, which is React's documented pattern
+      for state that follows a prop — via an effect it would open one socket with
+      the previous encounter's token first.
+    - **A dropped socket is reported, not swallowed.** A silent overlay is
+      exactly what "nothing to flag" looks like, so a stream that fails after
+      opening renders a status line and a reconnect affordance. Only a 409 from
+      the re-mint removes that affordance: the encounter is genuinely over.
+    - **A failed acknowledge leaves the banner up.** A provider who clicked
+      dismiss and watched the alert vanish would believe it was recorded as seen,
+      and the audit row that stands in for a credential on that route would not
+      exist.
+    - **Focus management is about removal.** `role="alert"` announces without
+      moving focus, which is right for something appearing unbidden during a
+      consultation; what needed handling was the dismissed node taking keyboard
+      focus to `document.body` with it. Focus moves to the next banner's button,
+      or to the region.
+    - **`apps/web` had no test cleanup at all, and this task is what found it.**
+      React Testing Library registers its own `afterEach(cleanup)` only when
+      `afterEach` is a global, which needs `globals: true`; this project imports
+      its test functions. Nothing was unmounting, so a component test read a DOM
+      still holding earlier tests' renders — which presents as duplicate alerts
+      and stale banners, i.e. as a component bug. Fixed once in `tests/setup.ts`.
+      No existing test was affected, because until now nothing rendered a
+      component.
+    - **A TypeScript-only package has to be excluded from the uv workspace too**,
+      and forgetting it breaks `uv run` for every Python service with an error
+      naming a missing `pyproject.toml` rather than the `packages/*` glob that
+      claimed the directory. Found by running the service, not by CI. The
+      detector suite now asserts the exclusion for every such package, alongside
+      the job-selection check, so the next one cannot repeat it.
+    - `sessionSubprotocols` moved into `packages/session-client` from
+      `useAudioCapture`: two hooks in one app were enough to make a second copy
+      possible, and the rule it enforces — the token is never the first entry, so
+      the server has something safe to echo — is a property of the token rather
+      than of either hook. `apps/mobile` is unaffected; React Native's
+      `WebSocket` takes headers, so it uses the other carrier.
+    - **Verified end to end against the running stack, within the limits
+      TASK-052b sets.** With `docker compose` up and `nudge-service` on 8005, a
+      client opening `/ws/nudges/{session_id}` with the subprotocol carrier was
+      accepted, the server selected `medauth.session.v1` and not the token, and a
+      real `PUBLISH` to `nudges:{session_id}` arrived relayed verbatim —
+      including a `cpt_code` of null, TASK-044's case. An audit row was written
+      as `RELAY_NUDGES`. What is *not* verified, and cannot be until TASK-052b:
+      a nudge raised by a real encounter, since nothing publishes to that channel
+      for one yet. The browser rendering and the dismiss are covered by the suite
+      against a fake socket and a fake client, not against a live service.
 
 - [ ] **TASK-043:** Haptic nudge (mobile)
   - App: `apps/mobile`
