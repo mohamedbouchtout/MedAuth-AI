@@ -3259,11 +3259,123 @@ The insurance policy RAG is the technical core. Build and validate before other 
 
 - [ ] **TASK-041b:** Nudge acknowledge endpoint
   - Service: `services/track-b-rag` (owns the clinical_nudges write from TASK-040)
+  - Prerequisite: TASK-040, which writes the row and puts its `nudge_id` in the
+    published payload. Blocks TASK-042 and TASK-043, whose dismiss buttons call
+    this. Not actually reachable from `apps/web` until TASK-041c settles CORS.
   - `PATCH /nudges/{nudge_id}/acknowledge` — sets `acknowledged=true`,
     `acknowledged_at=NOW()`. This is what TASK-042's dismiss button calls —
     it was referenced by the UI task but never specified as its own endpoint
     until now.
+  - **The body is `{"acknowledged": true}`, not an empty PATCH — and that is
+    the default shape for a PATCH-as-state-transition route in this repository,
+    not a decision local to this endpoint.** A transition carrying no parameters
+    could take no body at all, and the call is genuinely marginal. The explicit
+    field wins on three small things at once: it satisfies Known Constraints #6's
+    request-model requirement in spirit rather than by argument, it makes the
+    request self-describing in `docs/api/track-b-rag.yaml` instead of an empty
+    box a reader has to infer meaning for, and it leaves room to extend the
+    endpoint later — a reason code, say — without turning an empty body into a
+    populated one, which is a breaking change for anyone who hardcoded the
+    former. Reject `false` rather than reading it as an un-acknowledge: this
+    endpoint sets the flag, the reverse transition is not specified, and
+    inventing it here would put a compliance-relevant flag under a caller's
+    control in both directions.
+  - **Repeat acknowledge copies TASK-006's idempotent `/sessions/{id}/end`
+    exactly.** 200, the *original* `acknowledged_at` rather than a fresh one,
+    and an `already_acknowledged` flag telling the client which happened — the
+    counterpart of that endpoint's `already_ended`. The audit action reflects
+    whether the row actually changed: `ACKNOWLEDGE_NUDGE` when it did,
+    `READ_NUDGE` when it did not, which is the same distinction that makes an
+    idempotent session-end audit as `READ_ENCOUNTER` rather than `END_SESSION`.
+    Copy that precedent rather than re-deriving a near-identical variant of it:
+    two endpoints answering the same question in slightly different shapes is
+    worse for a client than either shape alone.
+  - **`ACKNOWLEDGE_NUDGE` is a new action and goes into CLAUDE.md's vocabulary
+    table in the same PR**, per that table's own rule; `READ_NUDGE` already
+    exists and its "Written by" column gains track-b-rag alongside prior-auth.
+    TASK-045's drift test is not built yet, so nothing mechanical catches this
+    being skipped — it would be the fourth instance of exactly the drift that
+    task exists to stop.
+  - **404 for an unknown `nudge_id`, and 404 for a nudge whose encounter is
+    soft-deleted.** `clinical_nudges` has no `deleted_at` of its own —
+    deliberately, since a nudge records what a provider was told at a point in
+    time — so the second case is visible *only* through an explicit join to
+    `encounters.deleted_at`. An implementation that checks the nudge row alone
+    passes every other test here while leaving a retired encounter's nudges
+    mutable, which the session routes' "unknown or soft-deleted → 404" rule
+    already forbids one table over. Perform the join; test that case by name.
+  - **The route touches PHI and audits.** A nudge names a procedure and the
+    payer criteria an identified encounter has not documented — the same
+    judgement TASK-041 made in deciding that opening the relay is a PHI access.
+    `actor_id` is `encounters.provider_id`, reached through the join above and
+    never taken from the caller.
+  - **No credential in v1; the audit row is what stands in for one.** See
+    CLAUDE.md, "A route keyed on a resource rather than a session follows the
+    same v1 rule", which is where this was settled because TASK-042 and TASK-043
+    hit it identically. That section also records why `packages/session-auth`
+    does not fit a path with no `session_id` segment, and what the eventual fix
+    (validating against a *resolved* session id) looks like. Do not invent a
+    local check here — Known Constraints #8.
+  - **The audit write joins the route's transaction.** This route mutates a
+    domain row, unlike `/policies/query`, so it is `audit_nudge_write`'s case
+    rather than `audit_policy_query`'s: `db.raw_asyncpg_connection(session)` and
+    `audit_log(..., conn=...)`. An acknowledged nudge with no audit row, and an
+    audit row for an acknowledgement that rolled back, are both worse than the
+    write failing outright.
+  - New router module under `src/track_b_rag/api/` — this is the service's first
+    route outside the `/policies` prefix. Standard envelope from
+    `packages/api-envelope`, with `error_responses()` carrying 404 wording for
+    this route rather than the generic per-status default.
+  - `docs/api/track-b-rag.yaml` gains the route in the same change;
+    `tests/unit/api/test_openapi_contract.py` compares the committed spec
+    against the generated schema, and a spec-only edit selects this service's
+    CI job.
   - **Test:** acknowledge a nudge, verify row updated
+  - **Test:** acknowledge twice — the second call returns 200 with
+    `already_acknowledged` true and the original `acknowledged_at` unchanged
+  - **Test:** the first call audits as `ACKNOWLEDGE_NUDGE`, the second as
+    `READ_NUDGE`
+  - **Test:** unknown `nudge_id` returns 404
+  - **Test:** a nudge whose encounter is soft-deleted returns 404 and leaves the
+    row unchanged
+  - **Test:** the audit row names the encounter's `provider_id` as actor and
+    carries no procedure, code or criteria text
+  - **Test:** `{"acknowledged": false}` is rejected rather than un-acknowledging
+
+- [ ] **TASK-041c:** CORS policy for browser-facing routes
+  - Prerequisite: none. Blocks TASK-042 and every browser-facing route after it.
+  - **The gap.** No service in this repository installs `CORSMiddleware`, and
+    nothing in front of them supplies it either — there is no ingress or gateway
+    in the tree. That has been fine because every route built so far is
+    service-to-service, documented route by route as "access control is network
+    isolation only". TASK-042 is the first browser caller: `apps/web` dismissing
+    a nudge issues a cross-origin `PATCH` with a JSON content type, which
+    triggers a preflight, and with no CORS answer the browser refuses the
+    request before the service ever sees it. Found while specifying TASK-041b
+    and opened as its own task rather than solved inside it — one service
+    quietly growing a permissive middleware is how a repo-wide policy gets set
+    by accident.
+  - **`apps/mobile` is unaffected**, because React Native's fetch is not subject
+    to the same-origin policy. That is why this is deliberate rather than
+    urgent — and why TASK-043 working on a phone proves nothing about TASK-042
+    working in a browser.
+  - **Decide where the policy lives, once:** per-service `CORSMiddleware`, or a
+    single ingress in front of every service. Both are defensible; choosing
+    per service is not.
+  - Allowed origins come from configuration per environment — never a hardcoded
+    literal, and never `*` on a service that answers with PHI. The allowed
+    methods and headers, and whether credentials are permitted, are part of the
+    same decision rather than left to each route.
+  - **WebSocket handshakes are a separate question, settled at the same time.**
+    Browsers do not apply CORS to a WebSocket upgrade, so the nudge socket
+    (TASK-041) and the audio socket (TASK-020) are unaffected by whatever is
+    chosen here. The corollary is that nothing checks their `Origin` today, and
+    assuming CORS covered them would be wrong — decide it while the subject is
+    open.
+  - **Test:** a preflight `OPTIONS` from a configured origin is answered with
+    the route's methods
+  - **Test:** an origin outside the configured list is not granted
+  - **Test:** the allowed origins come from configuration, not a literal
 
 - [ ] **TASK-042:** Nudge UI component (web)
   - App: `apps/web`
@@ -3274,6 +3386,16 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - High-contrast banner, color-coded by denial_risk (yellow/orange/red)
   - Dismiss button calls `PATCH /nudges/{nudge_id}/acknowledge` (TASK-041b)
     using the `nudge_id` included in the WebSocket payload
+  - **That call carries no credential in v1** — CLAUDE.md, "A route keyed on a
+    resource rather than a session follows the same v1 rule". Do not attach the
+    session JWT to it on the assumption that a PHI-touching route must want one;
+    the endpoint does not validate it, and sending a bearer token to a route
+    that ignores it is how a client comes to believe it is authenticated.
+  - **Blocked on TASK-041c.** The dismiss is cross-origin and preflighted, and
+    no service in this repository answers CORS today, so this component cannot
+    be verified end to end against a running service until that lands. The
+    WebSocket subscription is unaffected — browsers do not apply CORS to a
+    WebSocket upgrade — so the alert half of this task can be built first.
   - Accessible (ARIA role=alert, focus management)
   - **Test:** render with mock WebSocket, verify alert appears on message
   - **Test:** click dismiss, verify acknowledge endpoint is called with correct nudge_id
@@ -3287,7 +3409,14 @@ The insurance policy RAG is the technical core. Build and validate before other 
     the buzz from the risk level reinstates exactly the behaviour that rule
     exists to prevent: an infrastructure outage buzzing a physician's device
     once per procedure until they stop trusting the alert.
-  - Same visual alert as web, same dismiss-calls-acknowledge behavior (TASK-041b)
+  - Same visual alert as web, same dismiss-calls-acknowledge behavior (TASK-041b),
+    and the same absence of a credential on that call — CLAUDE.md, "A route keyed
+    on a resource rather than a session follows the same v1 rule". Both clients
+    cite that section rather than each deciding it, which is why it is written
+    there and not in either task.
+  - Unlike TASK-042 this is not blocked on TASK-041c: React Native's fetch is
+    not subject to the same-origin policy, so no preflight is involved. Do not
+    read a working dismiss here as evidence that the web dismiss works.
   - **Test:** mock WebSocket message, verify Haptics mock called
 
 - [ ] **TASK-044:** Keyword-only nudge for procedures that resolve no CPT code
@@ -3370,6 +3499,12 @@ The insurance policy RAG is the technical core. Build and validate before other 
     service, so it belongs to no one service. Put it under `tests/` at the root
     with its own CI job, selected by a change to `CLAUDE.md` or to any
     `**/audit.py`.
+  - **A row can name more than one service, and the exemption is per service.**
+    `READ_NUDGE`'s "Written by" column names prior-auth (TASK-060, unbuilt) and
+    track-b-rag (TASK-041b) as of that task, so a parser treating the column as
+    a single service name either exempts the whole row — losing the check on the
+    half that is built — or fails on the half that is not. Split the column and
+    apply the carve-out to each service named in it.
   - **Note what this does not do.** It cannot check that a row's *meaning* is
     right, or that a service audits when it should — Known Constraint 6 is still
     a judgement. It checks that the two lists of names agree, which is the part
