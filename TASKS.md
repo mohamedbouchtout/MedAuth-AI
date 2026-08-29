@@ -3253,9 +3253,9 @@ The insurance policy RAG is the technical core. Build and validate before other 
       canonical channel reaches a real subscriber here.
     - Deferred deliberately: `PATCH /nudges/{nudge_id}/acknowledge` is
       TASK-041b's and lives in track-b-rag, which owns the `clinical_nudges`
-      write. The vocabulary-drift test this task's audit action prompted is
-      TASK-045, kept out of here because it tests every service against a root
-      document and has nothing to do with relaying nudges.
+      write. The vocabulary work this task's audit action prompted is TASK-045,
+      kept out of here because it spans every service and has nothing to do with
+      relaying nudges.
 
 - [x] **TASK-041b:** Nudge acknowledge endpoint
   - Service: `services/track-b-rag` (owns the clinical_nudges write from TASK-040)
@@ -3293,9 +3293,10 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **`ACKNOWLEDGE_NUDGE` is a new action and goes into CLAUDE.md's vocabulary
     table in the same PR**, per that table's own rule; `READ_NUDGE` already
     exists and its "Written by" column gains track-b-rag alongside prior-auth.
-    TASK-045's drift test is not built yet, so nothing mechanical catches this
-    being skipped — it would be the fourth instance of exactly the drift that
-    task exists to stop.
+    Skipping either would have been the fourth instance of exactly the drift
+    that prompted TASK-045, and at the time nothing mechanical would have caught
+    it. TASK-045 has since removed the table: both actions are now members of
+    `hipaa_logger.AuditAction`, and a service cannot write one that is not.
   - **404 for an unknown `nudge_id`, and 404 for a nudge whose encounter is
     soft-deleted.** `clinical_nudges` has no `deleted_at` of its own —
     deliberately, since a nudge records what a provider was told at a point in
@@ -3559,45 +3560,74 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **Test:** a biologic or a referral produces no nudge of any kind
   - **Test:** nothing on this path writes a `rag:` cache entry
 
-- [ ] **TASK-045:** Test that the audit action vocabulary matches the code
+- [x] **TASK-045:** One definition of the audit action vocabulary
   - Prerequisite: none. Small, and deliberately not folded into TASK-041, which
     is where the need was noticed.
-  - **Why.** CLAUDE.md's action vocabulary table is declared authoritative and
-    has now drifted from the code three times, in both directions: `WRITE_NOTE`
-    was cited by a task while no service defined it, `QUERY_POLICY` shipped in
+  - **Why.** CLAUDE.md's action vocabulary table was declared authoritative and
+    drifted from the code three times, in both directions: `WRITE_NOTE` was
+    cited by a task while no service defined it, `QUERY_POLICY` shipped in
     `track_b_rag/audit.py` while the list had never carried it, and
     `STREAM_AUDIO` did the same from `audio-ingestion/src/audit.py`. Each was
     found by someone working on something else. Three times is enough to say
     that noticing is not a control.
-  - **What to build.** A test that collects every action constant the services
-    actually declare — the `ACTION_*` names in each service's `audit.py` —
-    parses the action column out of the table in CLAUDE.md, and asserts the two
-    agree. Both directions: a constant missing from the table fails, and a table
-    row naming a service that declares no such constant fails.
-  - **The reverse direction needs a carve-out and it should be explicit.** The
-    table legitimately carries actions for work not yet built — `READ_PATIENT`
-    (Phase 5), `SUBMIT_PRIOR_AUTH` (TASK-061). Those rows have no constant and
-    must not fail the test. Key the exemption on the row's own "Written by"
-    column naming a service that has no `audit.py` yet, rather than on a
-    hand-maintained ignore list, which would be one more thing to drift.
-  - **Where it lives.** It tests a document at the repository root against every
-    service, so it belongs to no one service. Put it under `tests/` at the root
-    with its own CI job, selected by a change to `CLAUDE.md` or to any
-    `**/audit.py`.
-  - **A row can name more than one service, and the exemption is per service.**
-    `READ_NUDGE`'s "Written by" column names prior-auth (TASK-060, unbuilt) and
-    track-b-rag (TASK-041b) as of that task, so a parser treating the column as
-    a single service name either exempts the whole row — losing the check on the
-    half that is built — or fails on the half that is not. Split the column and
-    apply the carve-out to each service named in it.
-  - **Note what this does not do.** It cannot check that a row's *meaning* is
-    right, or that a service audits when it should — Known Constraint 6 is still
-    a judgement. It checks that the two lists of names agree, which is the part
-    that has actually failed three times.
-  - **Test:** a service constant absent from the table fails the check
-  - **Test:** a table row for a service that has an `audit.py` without that
-    constant fails the check
-  - **Test:** a row for an unbuilt service passes
+  - **This task was originally specified as a CI test** that collected the
+    services' `ACTION_*` constants, parsed the action column out of CLAUDE.md,
+    and asserted the two agreed in both directions, with a carve-out for rows
+    naming a service that had no `audit.py` yet. That was built and then
+    withdrawn before merge, because it answers the wrong question: it detects a
+    fourth instance rather than preventing one, it leaves two definitions of the
+    vocabulary in place and adds a third thing to maintain, and it can only
+    check that the two lists of *names* agree — never that either is right.
+  - **What was built instead: the vocabulary lives in code, once.**
+    `hipaa_logger.AuditAction` is a `StrEnum` holding every action; `audit_log()`
+    takes it rather than a `str`. Services import members and declare no action
+    constants of their own. mypy rejects an invented action at the call site,
+    and `audit_log` rejects one again at runtime for callers static typing does
+    not reach — the column is `VARCHAR(100)` and constrains nothing itself.
+  - **It belongs to hipaa-logger** because that package already owns the
+    `audit_log` table and its Alembic migration, `action` is a column of that
+    table, and all six services that audit already depend on the package. The
+    package's locked scope note excludes general application logging, not the
+    definition of a column it owns.
+  - **The document stops competing with the code.** CLAUDE.md's table is
+    removed; the section now points at the module and keeps the reasoning and
+    the drift history. The per-action meanings became comments on the enum
+    members.
+  - **Test:** an action outside the vocabulary is refused before any write
+  - **Test:** a vocabulary member reaches the database as plain text, so
+    consumers compare against `"READ_PATIENT"` and not against a Python type
+  - **Test:** the required-field check for `service_name` fails on
+    `service_name`, not incidentally on something else
+  - Built (`packages/hipaa-logger`, 35 tests; four service `audit.py` modules
+    and their call sites converted; 1,329 tests green across the five affected
+    members). Decisions worth knowing before touching this:
+    - **`StrEnum`, so a member compares equal to its own text.** Existing
+      assertions like `row["action"] == "READ_PATIENT"` keep working, and
+      `audit_log` writes `str(action)` so what reaches asyncpg and comes back
+      out of the column is an ordinary string. The type constrains what can be
+      *written*, and changes nothing about how a row reads.
+    - **A valid string is still accepted at runtime and coerced.** The signature
+      asks for the enum, which is what mypy enforces; the runtime coercion is a
+      backstop, not an invitation. A string outside the vocabulary raises
+      `InvalidAuditFieldError` naming the module to add the member to.
+    - **Members for unbuilt work are expected rather than exempted.**
+      `WRITE_PRIOR_AUTH`, `SUBMIT_PRIOR_AUTH` and `READ_PATIENT` are declared
+      and unused. This is where the withdrawn test's most intricate machinery
+      went: an unused enum member is inert, so the per-service carve-out, the
+      "Written by" column parser and the misspelled-service-name hole all cease
+      to exist rather than being handled.
+    - **Which service writes which action is no longer written down anywhere.**
+      It was a column of the old table and the half that rotted fastest. One
+      symbol per action makes it `grep -rn "AuditAction.READ_NUDGE"`.
+    - **One guard test was updated deliberately rather than left to pass by
+      coincidence.** `test_required_fields_must_be_present` was parametrized
+      over `("", "track-b-rag")` and `("READ", "")`; with the vocabulary check
+      the second case raises on the action before `service_name` is looked at,
+      so it would have passed for a reason unrelated to its name. It is now two
+      tests that each assert the field they are about.
+    - **hipaa-logger's own tests used invented actions** — `SYSTEM_SWEEP`,
+      `READ_COVERAGE` — which is the same looseness one layer down. They now use
+      real members.
 
 ---
 
