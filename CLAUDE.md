@@ -1230,9 +1230,18 @@ three examples in a comment on the `audit_log` schema above, which is how
 `WRITE_NOTE` came to be cited by a task while no service defined it. The same
 drift ran the other way with `QUERY_POLICY`: TASK-012 shipped it as a constant in
 `track_b_rag/audit.py`, under a comment claiming it came from this vocabulary,
-while this list had never carried it. Both directions are the same failure — the
-list and the code each look authoritative on their own — and both are corrected
-below.
+while this list had never carried it. `STREAM_AUDIO` is the third instance and
+ran the same way as `QUERY_POLICY`: TASK-020 shipped it in
+`audio-ingestion/src/audit.py` and named it in `docs/api/audio-ingestion.yaml`,
+and this list had never carried it either. All three are the same failure — the
+list and the code each look authoritative on their own — and all three are
+corrected below.
+
+Three hand-caught instances is enough evidence that reading carefully is not a
+working control, so the check is being automated rather than repeated: **TASK-045
+adds a test that collects every action constant the services actually declare and
+asserts each one appears in this table**, in both directions. Until it lands, the
+rule above is enforced by whoever happens to notice.
 
 | Action | Written by | Meaning |
 |---|---|---|
@@ -1240,11 +1249,13 @@ below.
 | `END_SESSION` | track-a-clinical (TASK-006) | An encounter was closed |
 | `READ_ENCOUNTER` | track-a-clinical (TASK-006) | An `encounters` row was read |
 | `REMINT_SESSION_TOKEN` | track-a-clinical (TASK-006b) | A session's token was refreshed |
+| `STREAM_AUDIO` | audio-ingestion (TASK-020) | Encounter audio was streamed through transcription under one session |
 | `WRITE_NOTE` | track-a-clinical (TASK-030) | A SOAP note was generated and stored |
 | `READ_NOTE` | track-a-clinical (TASK-032), prior-auth (TASK-060) | A `clinical_notes` row was read |
 | `UPDATE_NOTE` | track-a-clinical (TASK-032) | A provider edited a stored note |
 | `QUERY_POLICY` | track-b-rag (TASK-012) | An encounter's clinical context was read to answer a policy query |
 | `WRITE_NUDGE` | track-b-rag (TASK-040) | A nudge was raised and stored against an encounter |
+| `RELAY_NUDGES` | nudge-service (TASK-041) | An encounter's nudge stream was opened to a client |
 | `READ_NUDGE` | prior-auth (TASK-060) | An encounter's `clinical_nudges` rows were read |
 | `WRITE_PRIOR_AUTH` | prior-auth (TASK-060) | A prior-auth bundle was assembled and stored |
 | `SUBMIT_PRIOR_AUTH` | prior-auth (TASK-061) | A bundle was transmitted to a payer |
