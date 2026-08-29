@@ -19,6 +19,7 @@ exclude = ["packages/audio-wire"]
 medauth-api-envelope = { workspace = true }
 medauth-bedrock-client = { workspace = true }
 medauth-hipaa-logger = { workspace = true }
+medauth-cors-policy = { workspace = true }
 medauth-crypto-utils = { workspace = true }
 medauth-fhir-types = { workspace = true }
 medauth-payer-vocab = { workspace = true }
@@ -54,6 +55,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "T20"]  # T20 bans print() — see 
 known-first-party = [
     "api_envelope",
     "bedrock_client",
+    "cors_policy",
     "hipaa_logger",
     "crypto_utils",
     "fhir_types",

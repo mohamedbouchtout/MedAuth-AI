@@ -109,6 +109,10 @@ assert_members 'a spec and its own service dedupe to one entry' \
 assert_members 'a package selects itself and every service' \
   'packages/api-envelope/src/x.py' \
   '["packages/api-envelope","services/audio-ingestion","services/fhir-integration","services/nudge-service","services/policy-scraper","services/prior-auth","services/track-a-clinical","services/track-b-rag"]'
+# cors-policy is a package like any other. TASK-041c: track-a-clinical and
+# track-b-rag install its middleware, audio-ingestion and nudge-service read the
+# same origin list for their WebSocket handshakes.
+assert_members 'cors-policy selects itself and every service'   'packages/cors-policy/src/x.py'   '["packages/cors-policy","services/audio-ingestion","services/fhir-integration","services/nudge-service","services/policy-scraper","services/prior-auth","services/track-a-clinical","services/track-b-rag"]'
 assert_members 'bedrock-client selects itself and every service'   'packages/bedrock-client/src/x.py'   '["packages/bedrock-client","services/audio-ingestion","services/fhir-integration","services/nudge-service","services/policy-scraper","services/prior-auth","services/track-a-clinical","services/track-b-rag"]'
 assert_members 'a package plus a spec still dedupes' \
   "$(printf 'packages/api-envelope/src/x.py\ndocs/api/track-b-rag.yaml')" \
@@ -117,14 +121,14 @@ assert_members 'a package plus a spec still dedupes' \
 section 'roots that must test everything'
 for root in pyproject.toml uv.lock .github/workflows/ci.yml; do
   assert_members "$root selects every member" "$root" \
-    '["packages/api-envelope","packages/bedrock-client","packages/crypto-utils","packages/fhir-types","packages/hipaa-logger","packages/payer-vocab","packages/session-auth","services/audio-ingestion","services/fhir-integration","services/nudge-service","services/policy-scraper","services/prior-auth","services/track-a-clinical","services/track-b-rag"]'
+    '["packages/api-envelope","packages/bedrock-client","packages/cors-policy","packages/crypto-utils","packages/fhir-types","packages/hipaa-logger","packages/payer-vocab","packages/session-auth","services/audio-ingestion","services/fhir-integration","services/nudge-service","services/policy-scraper","services/prior-auth","services/track-a-clinical","services/track-b-rag"]'
 done
 # The selection logic cannot be trusted to select its own blast radius, so a
 # change to it runs everything. Without this a bug in the detector would be
 # merged by a run that tested nothing — the exact failure this suite guards.
 assert_members 'a change to the detector itself selects every member' \
   '.github/scripts/detect-changed-members.sh' \
-  '["packages/api-envelope","packages/bedrock-client","packages/crypto-utils","packages/fhir-types","packages/hipaa-logger","packages/payer-vocab","packages/session-auth","services/audio-ingestion","services/fhir-integration","services/nudge-service","services/policy-scraper","services/prior-auth","services/track-a-clinical","services/track-b-rag"]'
+  '["packages/api-envelope","packages/bedrock-client","packages/cors-policy","packages/crypto-utils","packages/fhir-types","packages/hipaa-logger","packages/payer-vocab","packages/session-auth","services/audio-ingestion","services/fhir-integration","services/nudge-service","services/policy-scraper","services/prior-auth","services/track-a-clinical","services/track-b-rag"]'
 
 section 'any_python gates the lint, typecheck and test jobs'
 assert_key 'any_python is false when nothing python-ish moved' \
