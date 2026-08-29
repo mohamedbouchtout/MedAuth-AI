@@ -1,4 +1,6 @@
-import { createSessionsApi, type FetchLike } from '../../../src/api/sessions';
+import { describe, expect, it, vi } from 'vitest';
+
+import { createSessionsApi, type FetchLike } from '../src/sessions';
 
 const BASE = 'https://api.example';
 const SESSION_ID = '11111111-1111-4111-8111-111111111111';
@@ -26,7 +28,7 @@ function apiWith(fetchImpl: FetchLike) {
 
 describe('startVisit', () => {
   it('posts the wire field names and returns the session', async () => {
-    const fetchImpl = jest.fn<Promise<Response>, [string, RequestInit]>(async () =>
+    const fetchImpl = vi.fn<FetchLike>(async () =>
       jsonResponse(201, envelope({ session_id: SESSION_ID, jwt: 'a.b.c' })),
     );
 
@@ -46,7 +48,7 @@ describe('startVisit', () => {
   });
 
   it('omits ehr_encounter_id when there is none', async () => {
-    const fetchImpl = jest.fn<Promise<Response>, [string, RequestInit]>(async () =>
+    const fetchImpl = vi.fn<FetchLike>(async () =>
       jsonResponse(201, envelope({ session_id: SESSION_ID, jwt: 'a.b.c' })),
     );
 
@@ -101,7 +103,7 @@ describe('startVisit', () => {
 
 describe('remintToken', () => {
   it('carries the session token as a bearer header, never in the URL', async () => {
-    const fetchImpl = jest.fn<Promise<Response>, [string, RequestInit]>(async () =>
+    const fetchImpl = vi.fn<FetchLike>(async () =>
       jsonResponse(200, envelope({ session_id: SESSION_ID, jwt: 'fresh.token.value' })),
     );
 
@@ -147,7 +149,7 @@ describe('remintToken', () => {
 
 describe('endVisit', () => {
   it('posts to the end route and succeeds without a body', async () => {
-    const fetchImpl = jest.fn<Promise<Response>, [string, RequestInit]>(async () =>
+    const fetchImpl = vi.fn<FetchLike>(async () =>
       jsonResponse(200, envelope({ session_id: SESSION_ID, status: 'completed' })),
     );
 

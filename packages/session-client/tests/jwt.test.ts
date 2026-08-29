@@ -1,5 +1,7 @@
-import { TOKEN_REFRESH_SKEW_MS, expiresAtMs, isNearExpiry } from '../../../src/api/jwt';
-import { encodeBase64Url, tokenWithClaims } from '../../support/token';
+import { describe, expect, it } from 'vitest';
+
+import { TOKEN_REFRESH_SKEW_MS, expiresAtMs, isNearExpiry } from '../src/jwt';
+import { encodeBase64Url, tokenWithClaims } from './support/token';
 
 /** A token whose payload carries the given `exp`, in seconds since the epoch. */
 function tokenWithExp(expSeconds: number): string {

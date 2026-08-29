@@ -25,10 +25,10 @@
  * both session screens; it is not re-derived here.
  */
 
+import { isNearExpiry } from '@medauth/session-client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { isNearExpiry } from '../api/jwt';
 import { sessionsApi, type ApiFailure, type SessionsApi } from '../api/sessions';
 import { AUDIO_INGESTION_WS_URL } from '../config';
 import { useAudioCapture } from '../hooks/useAudioCapture';

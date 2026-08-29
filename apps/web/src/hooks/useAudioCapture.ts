@@ -40,6 +40,7 @@ import {
   formatMismatch,
   type AudioCaptureError,
 } from '@medauth/audio-wire';
+import { sessionSubprotocols } from '@medauth/session-client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import processorUrl from '../audio/pcm-capture-processor.js?url';
@@ -65,20 +66,6 @@ const PROCESSOR_NAME = 'pcm-capture';
  * so the only evidence is audio that does not arrive.
  */
 export const FIRST_AUDIO_TIMEOUT_MS = 3_000;
-
-/**
- * The subprotocol list, and the reason there is one.
- *
- * The native `WebSocket` constructor takes a URL and subprotocols and nothing
- * else — there is no header carrier available to a browser, which is exactly
- * why CLAUDE.md defines two. The version marker is offered first so the server
- * has something safe to echo: selecting the `medauth.jwt.` entry instead would
- * write the credential into the handshake response and from there into every
- * proxy log on the path.
- */
-function subprotocols(jwt: string): string[] {
-  return ['medauth.session.v1', `medauth.jwt.${jwt}`];
-}
 
 /**
  * The one message for a connection that never opened.
@@ -228,7 +215,7 @@ export function useAudioCapture({ sessionId, jwt, baseUrl }: UseAudioCaptureOpti
   const openSocket = useCallback(() => {
     // The token is a subprotocol value. Never the query string — that is the one
     // place a credential is certain to be written to an intermediary's logs.
-    const socket = new WebSocket(`${baseUrl}/ws/audio/${sessionId}`, subprotocols(jwt));
+    const socket = new WebSocket(`${baseUrl}/ws/audio/${sessionId}`, sessionSubprotocols(jwt));
 
     socket.onopen = () => {
       openedRef.current = true;

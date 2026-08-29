@@ -2,10 +2,10 @@
 #
 # Decide which CI jobs a change needs to run.
 #
-# Reads changed file paths on stdin, one per line, and writes the six outputs
+# Reads changed file paths on stdin, one per line, and writes the seven outputs
 # the `changes` job publishes — members, any_python, web, mobile, fhir_types,
-# audio_wire — to stdout as `key=value` lines. The workflow redirects that into
-# $GITHUB_OUTPUT.
+# audio_wire, session_client — to stdout as `key=value` lines. The workflow
+# redirects that into $GITHUB_OUTPUT.
 #
 # **Why this is a script rather than inline `run:` bash.** These rules decide
 # whether anything is tested at all, and their failure mode is silent
@@ -152,16 +152,16 @@ main() {
     echo "any_python=true"
   fi
 
-  # Both apps import @medauth/audio-wire, and it ships as TypeScript source
-  # rather than a build, so a change there is a change to code that runs inside
-  # them — test them when it moves.
-  if changed_matches '^(apps/web/|packages/audio-wire/)'; then
+  # Both apps import @medauth/audio-wire and @medauth/session-client, and both
+  # ship TypeScript source rather than a build, so a change in either is a change
+  # to code that runs inside the apps — test them when it moves.
+  if changed_matches '^(apps/web/|packages/(audio-wire|session-client)/)'; then
     echo "web=true"
   else
     echo "web=false"
   fi
 
-  if changed_matches '^(apps/mobile/|packages/audio-wire/)'; then
+  if changed_matches '^(apps/mobile/|packages/(audio-wire|session-client)/)'; then
     echo "mobile=true"
   else
     echo "mobile=false"
@@ -183,6 +183,18 @@ main() {
     echo "audio_wire=true"
   else
     echo "audio_wire=false"
+  fi
+
+  # session-client is TypeScript only for the same reason and gets the same
+  # treatment: its own npm job, no place in ALL_PACKAGES, and a reaction to the
+  # npm root because a lockfile change can break `npm ci` without touching the
+  # package. It holds the only client that may re-mint a session token
+  # (TASK-042), so a change here that nothing tested would be a change to how a
+  # credential is refreshed in both apps at once.
+  if changed_matches '^(package\.json|package-lock\.json|\.github/workflows/ci\.yml|packages/session-client/)'; then
+    echo "session_client=true"
+  else
+    echo "session_client=false"
   fi
 }
 
