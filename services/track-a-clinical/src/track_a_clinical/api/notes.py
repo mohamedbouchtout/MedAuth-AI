@@ -38,6 +38,7 @@ from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api_envelope import ApiHTTPException, ApiResponse, error_responses
+from hipaa_logger import AuditAction
 from track_a_clinical import audit, notes
 from track_a_clinical.api.dependencies import get_db_session
 from track_a_clinical.api.schemas import NoteData, UpdateNoteRequest
@@ -144,7 +145,7 @@ async def read_note(
 
     await audit.audit_note_access(
         session,
-        action=audit.ACTION_READ_NOTE,
+        action=AuditAction.READ_NOTE,
         note_id=note.id,
         session_id=session_id,
         provider_id=encounter.provider_id,

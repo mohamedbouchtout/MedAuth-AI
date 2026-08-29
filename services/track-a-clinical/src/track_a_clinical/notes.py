@@ -36,6 +36,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from hipaa_logger import AuditAction
 from track_a_clinical import audit
 from track_a_clinical.models import ClinicalNote, Encounter, dump_codes
 from track_a_clinical.soap import GeneratedNote
@@ -203,7 +204,7 @@ async def apply_note_edits(
     # no-op edit is still someone opening a patient's note.
     await audit.audit_note_access(
         session,
-        action=audit.ACTION_UPDATE_NOTE,
+        action=AuditAction.UPDATE_NOTE,
         note_id=note.id,
         session_id=encounter.session_id,
         provider_id=encounter.provider_id,

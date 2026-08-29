@@ -39,6 +39,7 @@ from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api_envelope import ApiHTTPException, ApiResponse, error_responses
+from hipaa_logger import AuditAction
 from track_a_clinical import audit
 from track_a_clinical.api.dependencies import get_db_session, get_redis
 from track_a_clinical.api.schemas import (
@@ -190,7 +191,7 @@ async def start_session(
 
     await audit.audit_encounter_access(
         session,
-        action=audit.ACTION_START_SESSION,
+        action=AuditAction.START_SESSION,
         encounter_id=encounter.id,
         session_id=session_id,
         provider_id=body.provider_id,
@@ -252,7 +253,7 @@ async def end_session(
 
     await audit.audit_encounter_access(
         session,
-        action=audit.ACTION_READ_ENCOUNTER if already_ended else audit.ACTION_END_SESSION,
+        action=AuditAction.READ_ENCOUNTER if already_ended else AuditAction.END_SESSION,
         encounter_id=encounter.id,
         session_id=session_id,
         provider_id=encounter.provider_id,
@@ -375,7 +376,7 @@ async def remint_session_token(
 
     await audit.audit_encounter_access(
         session,
-        action=audit.ACTION_REMINT_SESSION_TOKEN,
+        action=AuditAction.REMINT_SESSION_TOKEN,
         encounter_id=encounter.id,
         session_id=session_id,
         provider_id=encounter.provider_id,

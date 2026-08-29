@@ -58,7 +58,7 @@ async def test_the_action_names_what_actually_happened(
 ) -> None:
     await audit.audit_nudge_stream(session_id=uuid.uuid4(), provider_id=uuid.uuid4())
 
-    assert recorded[0]["action"] == audit.ACTION_RELAY_NUDGES == "RELAY_NUDGES"
+    assert recorded[0]["action"] == audit.AuditAction.RELAY_NUDGES == "RELAY_NUDGES"
 
 
 async def test_the_row_names_this_service(recorded: list[dict[str, Any]]) -> None:

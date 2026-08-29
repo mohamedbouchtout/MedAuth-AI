@@ -34,12 +34,11 @@ from __future__ import annotations
 import uuid
 from typing import Final
 
-from hipaa_logger import audit_log
+from hipaa_logger import AuditAction, audit_log
 
 #: The access this service records: a client opened one encounter's nudge stream.
-#: From CLAUDE.md's action vocabulary, which carries this action for this service.
-ACTION_RELAY_NUDGES: Final = "RELAY_NUDGES"
-
+#: The action itself is ``AuditAction.RELAY_NUDGES`` — the vocabulary is defined
+#: once in hipaa-logger and imported, never re-declared as a local string.
 SERVICE_NAME: Final = "nudge-service"
 RESOURCE_TYPE_ENCOUNTER: Final = "Encounter"
 
@@ -63,7 +62,7 @@ async def audit_nudge_stream(
     """
     await audit_log(
         actor_id=str(provider_id),
-        action=ACTION_RELAY_NUDGES,
+        action=AuditAction.RELAY_NUDGES,
         resource_type=RESOURCE_TYPE_ENCOUNTER,
         resource_id=str(session_id),
         session_id=str(session_id),

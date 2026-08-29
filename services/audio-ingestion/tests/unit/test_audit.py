@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from hipaa_logger import AuditAction
 from src import audit
 
 
@@ -46,7 +47,7 @@ async def test_the_action_names_what_actually_happened(
 ) -> None:
     await audit.audit_audio_stream(session_id=uuid.uuid4(), provider_id=uuid.uuid4())
 
-    assert recorded[0]["action"] == audit.ACTION_STREAM_AUDIO == "STREAM_AUDIO"
+    assert recorded[0]["action"] == AuditAction.STREAM_AUDIO == "STREAM_AUDIO"
 
 
 async def test_the_row_names_this_service(recorded: list[dict[str, Any]]) -> None:

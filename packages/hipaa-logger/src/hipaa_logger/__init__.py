@@ -6,11 +6,11 @@ and it cannot wait on a service-owned schema.
 
 Typical use::
 
-    from hipaa_logger import audit_log
+    from hipaa_logger import AuditAction, audit_log
 
     await audit_log(
         actor_id=provider_id,
-        action="READ_PATIENT",
+        action=AuditAction.READ_PATIENT,
         resource_type="Patient",
         resource_id=patient_id,
         session_id=session_id,
@@ -18,8 +18,13 @@ Typical use::
     )
 
 The record holds identifiers only — never PHI content.
+
+``action`` is a member of :class:`AuditAction`, the single definition of the
+audit vocabulary. Services import it rather than declaring their own strings —
+see ``actions.py`` for why.
 """
 
+from .actions import AuditAction
 from .audit import InvalidAuditFieldError, audit_log
 from .db import (
     AuditConfigurationError,
@@ -32,6 +37,7 @@ from .db import (
 )
 
 __all__ = [
+    "AuditAction",
     "AuditConfigurationError",
     "AuditLogError",
     "InvalidAuditFieldError",

@@ -19,8 +19,8 @@ import jwt
 import pytest
 from httpx import AsyncClient
 
+from hipaa_logger import AuditAction
 from tests.unit.api.conftest import FakeRedis, FakeSession, RecordedAudit, make_encounter
-from track_a_clinical import audit
 from track_a_clinical.api.sessions import (
     ERROR_CODE_AUTH_REJECTED,
     ERROR_CODE_SESSION_COMPLETED,
@@ -159,7 +159,7 @@ async def test_remint_audits_the_read_with_its_own_action(
         f"/sessions/{session_id}/token", headers=credential(session_id=session_id, key=signing_key)
     )
 
-    assert recorded_audit.actions == [audit.ACTION_REMINT_SESSION_TOKEN]
+    assert recorded_audit.actions == [AuditAction.REMINT_SESSION_TOKEN]
     call = recorded_audit.calls[0]
     assert call["encounter_id"] == encounter.id
     assert call["provider_id"] == encounter.provider_id

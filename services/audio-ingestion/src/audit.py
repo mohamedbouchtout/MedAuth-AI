@@ -32,13 +32,12 @@ from __future__ import annotations
 import uuid
 from typing import Final
 
-from hipaa_logger import audit_log
+from hipaa_logger import AuditAction, audit_log
 
 #: The access this service records: a provider streamed encounter audio through
-#: transcription. Reads as a verb phrase in the same style as track-a-clinical's
-#: ``START_SESSION`` / ``END_SESSION``.
-ACTION_STREAM_AUDIO: Final = "STREAM_AUDIO"
-
+#: transcription. The action itself is ``AuditAction.STREAM_AUDIO`` — the
+#: vocabulary is defined once in hipaa-logger and imported, never re-declared as
+#: a local string.
 SERVICE_NAME: Final = "audio-ingestion"
 RESOURCE_TYPE_ENCOUNTER: Final = "Encounter"
 
@@ -60,7 +59,7 @@ async def audit_audio_stream(
     """
     await audit_log(
         actor_id=str(provider_id),
-        action=ACTION_STREAM_AUDIO,
+        action=AuditAction.STREAM_AUDIO,
         resource_type=RESOURCE_TYPE_ENCOUNTER,
         resource_id=str(session_id),
         session_id=str(session_id),
