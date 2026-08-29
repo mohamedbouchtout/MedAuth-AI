@@ -31,6 +31,8 @@ from typing import Annotated, Final
 from pydantic import BeforeValidator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from cors_policy import AllowedOrigins
+
 #: The Qdrant collection holding insurance policy chunks. Matches
 #: ``DEFAULT_QDRANT_COLLECTION`` on the shared ``InsurancePolicy`` model, which
 #: records the collection each ingested document was indexed into.
@@ -136,6 +138,14 @@ class Settings(BaseSettings):
         default=DEFAULT_BEDROCK_MODEL_ID_REASONING,
         min_length=1,
     )
+
+    #: Browser origins this service answers, from ``CORS_ALLOWED_ORIGINS``.
+    #: Empty by default, so an unconfigured deployment answers no browser rather
+    #: than trusting one nobody chose — a localhost origin baked in as a default
+    #: would ship to production the moment the variable was forgotten. Local dev
+    #: gets its value from ``.env.example``. See CLAUDE.md, "CORS and browser
+    #: reachability".
+    cors_allowed_origins: AllowedOrigins = ()
 
     @property
     def qdrant_url(self) -> str:

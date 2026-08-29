@@ -32,6 +32,7 @@ from fastapi import FastAPI
 from starlette.concurrency import run_in_threadpool
 
 from api_envelope import install_error_handlers
+from cors_policy import install_cors
 from track_b_rag.api.health import router as health_router
 from track_b_rag.api.nudges import router as nudges_router
 from track_b_rag.api.policies import router as policies_router
@@ -128,6 +129,10 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     install_error_handlers(app)
+    # TASK-041c. The acknowledge route below is this service's only browser
+    # caller; the policy itself is settled repo-wide in CLAUDE.md, "CORS and
+    # browser reachability", and configured per environment.
+    install_cors(app, get_settings().cors_allowed_origins)
     app.include_router(health_router)
     app.include_router(policies_router)
     # Two routers share the /policies prefix. The ingest route writes no audit
@@ -135,8 +140,8 @@ def create_app() -> FastAPI:
     # difference, and the tests that assert it, unambiguous.
     app.include_router(query_router)
     # The first route outside /policies, and the first one a browser calls
-    # (TASK-041b). It is not reachable from apps/web until TASK-041c settles
-    # CORS repo-wide — see that module's docstring before adding middleware.
+    # (TASK-041b). Reachable from apps/web via the CORS policy installed above
+    # (TASK-041c), given an origin configured for the environment.
     app.include_router(nudges_router)
     return app
 

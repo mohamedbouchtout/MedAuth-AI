@@ -18,6 +18,7 @@ import pytest
 from httpx import AsyncClient
 
 from track_b_rag.api import query as query_route
+from track_b_rag.config import get_settings
 from track_b_rag.query import PolicyQueryAnswer, fallback_answer
 
 SESSION_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
@@ -215,6 +216,12 @@ async def test_the_configured_collection_is_used(
     client: AsyncClient, recorder: Recorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("QDRANT_COLLECTION", "policies_staging")
+    # ``get_settings`` is process-wide and cached, and since TASK-041c
+    # ``create_app()`` reads it to configure CORS — so the ``client`` fixture
+    # has already warmed the cache by the time this runs. Without the clear
+    # this test asserts against the value the app was built with and passes for
+    # a reason unrelated to what it claims to check.
+    get_settings.cache_clear()
 
     await client.post("/policies/query", json=body())
 
