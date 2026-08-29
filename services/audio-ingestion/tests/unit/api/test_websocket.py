@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from session_auth import SESSION_SUBPROTOCOL
 from src.api.websocket import (
     WS_CLOSE_INTERNAL_ERROR,
     WS_CLOSE_UNAUTHORIZED,
@@ -23,7 +24,6 @@ from src.api.websocket import (
     _close_quietly,
 )
 from src.audio import MAX_BUFFERED_BYTES
-from src.auth import SESSION_SUBPROTOCOL
 from src.transcription import TranscriptSegment
 from tests.unit.api.conftest import (
     FakeRedis,

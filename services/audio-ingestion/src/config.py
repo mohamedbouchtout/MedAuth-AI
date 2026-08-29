@@ -7,10 +7,11 @@ reading a file here would add a fourth source of truth and a tempting place to
 commit a secret.
 
 ``jwt_signing_key`` carries the same 32-byte floor track-a-clinical enforces on
-it. The two services must agree about the key or every connection is rejected,
-so they must also agree about what counts as an acceptable one — a validator
-that accepted a key the issuer refuses would turn a configuration mistake into a
-mystery at connection time.
+it, taken from ``session_auth`` rather than restated here (TASK-041). The two
+services must agree about the key or every connection is rejected, so they must
+also agree about what counts as an acceptable one — a validator that accepted a
+key the issuer refuses would turn a configuration mistake into a mystery at
+connection time.
 """
 
 from __future__ import annotations
@@ -21,15 +22,7 @@ from typing import Final
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-#: Matches ``track_a_clinical.config.MIN_SIGNING_KEY_BYTES``. HS256 with a secret
-#: shorter than the digest weakens the MAC, and PyJWT warns about it.
-MIN_SIGNING_KEY_BYTES: Final = 32
-
-#: The algorithm track-a-clinical signs with. Pinned rather than read from the
-#: token: honouring the token's own ``alg`` header is how a validator gets talked
-#: into accepting ``none`` or into verifying an RS256 token with the public key
-#: as an HMAC secret.
-JWT_ALGORITHM: Final = "HS256"
+from session_auth import MIN_SIGNING_KEY_BYTES
 
 #: 16kHz mono is what TASK-022 and TASK-023 capture and what Transcribe Medical
 #: wants for high-quality audio. A sample rate that disagrees with the audio

@@ -30,10 +30,10 @@ import jwt
 import pytest
 from fastapi.testclient import TestClient
 
+from session_auth import JWT_ALGORITHM, JWT_SUBPROTOCOL_PREFIX, SESSION_SUBPROTOCOL
 from src.api import websocket as websocket_module
 from src.api.dependencies import get_redis, get_transcription_factory
-from src.auth import JWT_SUBPROTOCOL_PREFIX, SESSION_SUBPROTOCOL
-from src.config import JWT_ALGORITHM, get_settings
+from src.config import get_settings
 from src.main import create_app
 from src.transcription import TranscriptSegment
 

@@ -36,6 +36,7 @@ medauth-ai/
 │   ├── hipaa-logger/     # Shared audit logging — every service imports this
 │   ├── fhir-types/       # Shared FHIR R4 type definitions (Python + TypeScript)
 │   ├── audio-wire/       # Encounter-audio wire format — both frontends (TypeScript)
+│   ├── session-auth/     # Session-token validation for every real-time endpoint
 │   └── crypto-utils/     # AES-256 helpers used across services
 ├── infrastructure/
 │   ├── terraform/        # AWS infrastructure as code
@@ -515,6 +516,10 @@ endpoint therefore supports both, and this is the canonical mechanism rather
 than something TASK-020 settled locally: TASK-041's nudge socket inherits it by
 reference, and TASK-023's browser capture has to send the subprotocol form
 because nothing else is open to it.
+
+The implementation of all of this is `packages/session-auth`, imported by every
+real-time endpoint rather than reimplemented per service — see that package's
+design decisions below.
 
 Rules that make the two carriers behave identically:
 - **Validation is the same whichever carrier was used** — signature against
@@ -1101,6 +1106,50 @@ service's domain surface stays in that service.
   diagnostic the endpoint has. See the hipaa-logger scope note below for why
   the same endpoint also writes no audit row.
 
+### packages/session-auth — Design Decisions (locked, do not revisit)
+**Scope note (read first):** this package is the single definition of the
+session-token validation described in "How the JWT reaches a WebSocket endpoint"
+above — the two carriers, the checks, and the 4401 close code. It **validates and
+never mints**: `POST /sessions/start` in `track-a-clinical` (TASK-006) remains
+the only issuer, per Known Constraint 8. It is not a shared web framework and
+holds no routes, dependencies or middleware, exactly as the api-envelope scope
+note has it.
+
+- **Every real-time endpoint imports it; none writes its own validator.** It was
+  extracted in TASK-041, when `nudge-service` became the second endpoint needing
+  the validation `audio-ingestion` had carried since TASK-020 — the same trigger,
+  and the same argument, as api-envelope's extraction one task after
+  track-b-rag copied track-a-clinical's envelope. The specific hazard here is
+  named in Known Constraint 8: two hand-maintained copies of one validator is how
+  a "parallel auth mechanism" arrives without anyone deciding to build one, since
+  copies diverge not on purpose but because a fix lands in whichever file the
+  person had open.
+- **`validate_token()` takes a signing key, not a `Settings` object.** Each
+  service keeps its own configuration class; making one of them part of this
+  package's interface would drag a service's whole config surface into every
+  other service that authenticates.
+- **The issuer keeps its own `JWT_ALGORITHM` and `MIN_SIGNING_KEY_BYTES`.**
+  `track_a_clinical.config` defines both, and importing this package there was
+  considered and rejected: the issuer is not a consumer of this validator, and
+  making it depend on one would invert what Known Constraint 8 centralises. What
+  proves the two agree is `tests/unit/test_issuer_contract.py`, which feeds the
+  real issuer's output to this validator and asserts the key floors match — a
+  stronger check than a shared literal, which would prove the two agree on an
+  algorithm name while saying nothing about the claim set.
+- **That contract test lives here, not in a consuming service.** It was in
+  `audio-ingestion` until TASK-041, for a reason that expired with the move: the
+  validator was `src.auth` there, and several services still install a top-level
+  `src` into the shared virtualenv. The contract belongs to whoever owns the
+  validation, or the second consumer either copies the file or trusts an
+  agreement nothing in its own suite checks.
+  `.github/scripts/detect-changed-members.sh` selects this package when
+  `track-a-clinical` changes, so a change to the issuer re-runs it.
+- **Nothing here logs a token, a claim, or a reason containing either.** A
+  refusal reason is a fixed label — `expired`, `session_mismatch`,
+  `malformed_claim` — and the caller logs that. This is a HIPAA constraint living
+  inside the primitive rather than a rule call sites are trusted to remember, the
+  same arrangement as api-envelope's validation handler.
+
 ### packages/hipaa-logger — Design Decisions (locked, do not revisit)
 **Scope note (read first):** this package is NOT a general application logger.
 It writes one specific thing — a compliance audit trail row per PHI access —
@@ -1393,6 +1442,7 @@ Path filter groups (each maps to a test job):
   triggering service jobs via the packages/** wildcard below, and never
   actually ran its own tests. Fixed: packages get dedicated jobs too.)
 - `api-envelope`: packages/api-envelope/**
+- `session-auth`: packages/session-auth/**
 - `crypto-utils`: packages/crypto-utils/**
 - `fhir-types`: packages/fhir-types/** — this job runs BOTH checks: pytest against
   the Pydantic models AND `tsc --noEmit` against packages/fhir-types/typescript/.
