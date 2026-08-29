@@ -4,7 +4,8 @@ The shape of one connection:
 
 1. The session JWT is validated, from either carrier, **before the handshake is
    accepted**. A refused token never reaches a state where it could send a
-   frame, and no transcription stream is opened for it.
+   frame, and no transcription stream is opened for it. The validation itself
+   lives in ``packages/session-auth``, shared with the nudge relay (TASK-041).
 2. The handshake is accepted, echoing ``medauth.session.v1`` if the client
    offered subprotocols, and the access is written to the audit log.
 3. Client frames accumulate in an in-memory buffer and are pushed to Transcribe
@@ -34,16 +35,17 @@ import anyio
 from fastapi import APIRouter, Depends, WebSocket
 from redis.asyncio import Redis
 
-from src.api.dependencies import get_app_settings, get_redis, get_transcription_factory
-from src.audio import AudioBuffer, AudioBufferOverflow
-from src.audit import audit_audio_stream
-from src.auth import (
+from session_auth import (
+    WS_CLOSE_UNAUTHORIZED,
     SessionAuthError,
     SessionIdentity,
     extract_token,
     select_subprotocol,
     validate_token,
 )
+from src.api.dependencies import get_app_settings, get_redis, get_transcription_factory
+from src.audio import AudioBuffer, AudioBufferOverflow
+from src.audit import audit_audio_stream
 from src.config import Settings
 from src.publisher import publish_segment
 from src.transcription import TranscriptionStream, TranscriptionStreamFactory
@@ -51,14 +53,6 @@ from src.transcription import TranscriptionStream, TranscriptionStreamFactory
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["audio"])
-
-#: Close code for a refused session token. In the application range (4000-4999),
-#: chosen to echo HTTP 401. Note what it can and cannot do: a connection refused
-#: before the handshake completes has no frame to carry a code in, so a browser
-#: sees a failed upgrade rather than an ``onclose`` with 4401. Accepting an
-#: unauthenticated handshake purely so the rejection reads nicely would be the
-#: worse trade — see CLAUDE.md, "How the JWT reaches a WebSocket endpoint".
-WS_CLOSE_UNAUTHORIZED: Final = 4401
 
 #: RFC 6455 1003: the endpoint received data of a type it cannot accept. Sent
 #: when a client sends text frames on a socket that carries audio.
@@ -79,7 +73,7 @@ def _authenticate(websocket: WebSocket, session_id: str, settings: Settings) -> 
         authorization=websocket.headers.get("authorization"),
         subprotocols=list(websocket.scope.get("subprotocols") or []),
     )
-    return validate_token(token, session_id=session_id, settings=settings)
+    return validate_token(token, session_id=session_id, signing_key=settings.jwt_signing_key)
 
 
 async def _receive_audio(

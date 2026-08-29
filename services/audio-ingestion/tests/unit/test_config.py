@@ -1,4 +1,9 @@
-"""Settings, and the two constraints that must agree with track-a-clinical."""
+"""Settings for the audio WebSocket and its transcription.
+
+The signing-key floor and the pinned algorithm moved to ``packages/session-auth``
+in TASK-041 and are asserted by its suite; what stays here is this service's own
+configuration surface.
+"""
 
 from __future__ import annotations
 
@@ -8,8 +13,6 @@ from pydantic import ValidationError
 from src.config import (
     DEFAULT_MEDIA_ENCODING,
     DEFAULT_SAMPLE_RATE_HZ,
-    JWT_ALGORITHM,
-    MIN_SIGNING_KEY_BYTES,
     Settings,
     get_settings,
 )
@@ -25,15 +28,6 @@ def test_a_short_signing_key_is_rejected() -> None:
     """
     with pytest.raises(ValidationError):
         Settings(jwt_signing_key="too-short")
-
-
-def test_the_floor_matches_the_hs256_digest_length() -> None:
-    assert MIN_SIGNING_KEY_BYTES == 32
-
-
-def test_the_algorithm_is_pinned_rather_than_negotiated() -> None:
-    """Honouring a token's own ``alg`` is the classic JWT bypass."""
-    assert JWT_ALGORITHM == "HS256"
 
 
 def test_audio_format_defaults_match_what_the_capture_clients_send() -> None:

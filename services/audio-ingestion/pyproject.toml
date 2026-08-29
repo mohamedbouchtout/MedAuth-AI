@@ -16,23 +16,13 @@ dependencies = [
     "fastapi>=0.115",
     "medauth-api-envelope",
     "medauth-hipaa-logger",
+    "medauth-session-auth",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "pyjwt>=2.13.0",
     "redis>=8.1.0",
     "uvicorn[standard]>=0.52.4",
     "websockets>=13.1",
-]
-
-[dependency-groups]
-dev = [
-    # Test-only, and only for tests/unit/test_remint_token_contract.py: this
-    # service validates the tokens track-a-clinical mints, and that file proves
-    # the two agree by calling the real issuer rather than hand-rolling a token
-    # that merely looks like one. It is deliberately NOT a runtime dependency —
-    # nothing in src/ imports track_a_clinical, and nothing should: the services
-    # share a token format, not code.
-    "medauth-track-a-clinical",
 ]
 
 [build-system]
