@@ -497,6 +497,47 @@ will look for it.
   `UPDATE_NOTE` from the action vocabulary below. Absent authentication is a
   reason the audit trail matters more, not less.
 
+**A route keyed on a resource rather than a session follows the same v1 rule.**
+The bullets above are written for `GET`/`PATCH /notes/{session_id}`, whose path
+names the session. `PATCH /nudges/{nudge_id}/acknowledge` (TASK-041b) does not:
+it is keyed on the `clinical_nudges` primary key, because `nudge_id` is the only
+identifier the nudge payload hands a client. Settled here rather than inside
+TASK-041b because TASK-042 and TASK-043 call that endpoint from two platforms,
+and two clients each deciding it alone is how they end up disagreeing.
+
+- **The v1 pattern is unchanged: no credential, and audit instead.** It covers a
+  browser-facing route acting on one encounter's data whether or not its path
+  carries a `session_id`. Nothing in the note routes' reasoning depended on the
+  path shape — it rested on `POST /sessions/start` accepting `provider_id` as an
+  unauthenticated body field, and on `validate_token()` proving possession only.
+  Both are still true here.
+- **`packages/session-auth` genuinely does not fit this shape, which is why
+  reusing it is not the cheaper answer.** Its check is that the token's
+  `session_id` claim equals the `session_id` in the path, and this path has no
+  such segment to compare against. Putting one there purely to make the
+  validator fit would hand clients two names for one nudge, which the first
+  bullet of this section rejects for the same reason it rejects exposing
+  `encounters.id`.
+- **`actor_id` is resolved through the resource to the `encounters` row** —
+  `nudge_id` → `clinical_nudges.encounter_id` → `encounters.provider_id` — and
+  never taken from the caller. The same rule the note routes and the re-mint
+  endpoint follow, one join further away.
+- **The route still audits.** Absent authentication is a reason the trail
+  matters more, not less, exactly as for note access.
+- **The eventual fix is a *resolved* `session_id`, and it is deliberately not
+  built for one route.** Generalising `packages/session-auth` to validate a
+  token's claim against the session a resource belongs to — looking up which
+  encounter owns the nudge, then comparing — is the honest version of this
+  check. Take that direction when a second or third non-session-keyed browser
+  route makes audit-only feel thin, or when provider authentication lands in
+  Phase 5, whichever comes first. This is a judgement between two reasonable
+  options rather than the only defensible one: v1 buys lower complexity, and the
+  price is written down here instead of being discovered later.
+- **This settles credentials and says nothing about CORS.** No service in this
+  repository installs `CORSMiddleware` and no gateway supplies one, so a
+  browser-facing route is not actually reachable from `apps/web` until TASK-041c
+  decides that repo-wide. Two separate questions; neither answers the other.
+
 **How the JWT reaches a WebSocket endpoint — either carrier, never both
 required.** A WebSocket endpoint accepts the session token in *either* of two
 places, and one is enough:
@@ -1305,7 +1346,8 @@ rule above is enforced by whoever happens to notice.
 | `QUERY_POLICY` | track-b-rag (TASK-012) | An encounter's clinical context was read to answer a policy query |
 | `WRITE_NUDGE` | track-b-rag (TASK-040) | A nudge was raised and stored against an encounter |
 | `RELAY_NUDGES` | nudge-service (TASK-041) | An encounter's nudge stream was opened to a client |
-| `READ_NUDGE` | prior-auth (TASK-060) | An encounter's `clinical_nudges` rows were read |
+| `ACKNOWLEDGE_NUDGE` | track-b-rag (TASK-041b) | A provider dismissed a nudge, and the row changed |
+| `READ_NUDGE` | prior-auth (TASK-060), track-b-rag (TASK-041b) | An encounter's `clinical_nudges` rows were read — including a repeat acknowledge, which reads a row it does not change |
 | `WRITE_PRIOR_AUTH` | prior-auth (TASK-060) | A prior-auth bundle was assembled and stored |
 | `SUBMIT_PRIOR_AUTH` | prior-auth (TASK-061) | A bundle was transmitted to a payer |
 | `READ_PATIENT` | fhir-integration (Phase 5) | Patient context was read from an EHR |
