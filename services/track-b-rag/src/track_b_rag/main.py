@@ -33,6 +33,7 @@ from starlette.concurrency import run_in_threadpool
 
 from api_envelope import install_error_handlers
 from track_b_rag.api.health import router as health_router
+from track_b_rag.api.nudges import router as nudges_router
 from track_b_rag.api.policies import router as policies_router
 from track_b_rag.api.query import router as query_router
 from track_b_rag.bedrock import reset_clients as reset_bedrock_clients
@@ -133,6 +134,10 @@ def create_app() -> FastAPI:
     # row and the query route must — keeping them in separate modules keeps that
     # difference, and the tests that assert it, unambiguous.
     app.include_router(query_router)
+    # The first route outside /policies, and the first one a browser calls
+    # (TASK-041b). It is not reachable from apps/web until TASK-041c settles
+    # CORS repo-wide — see that module's docstring before adding middleware.
+    app.include_router(nudges_router)
     return app
 
 

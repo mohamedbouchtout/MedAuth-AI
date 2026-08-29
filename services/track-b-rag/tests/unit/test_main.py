@@ -212,11 +212,22 @@ def test_the_app_never_loads_the_model_at_import_time() -> None:
     assert get_embedder.cache_info().currsize == 0
 
 
-def test_the_app_exposes_health_ingest_and_query() -> None:
-    """Read from the generated spec: FastAPI nests included routers in app.routes."""
+def test_the_app_exposes_health_ingest_query_and_acknowledge() -> None:
+    """Read from the generated spec: FastAPI nests included routers in app.routes.
+
+    Exhaustive on purpose, so a router added to ``create_app`` has to be
+    declared here rather than appearing silently. TASK-041b's acknowledge is the
+    first route this service exposes outside the ``/policies`` prefix, and the
+    first one a browser calls.
+    """
     paths = set(create_app().openapi()["paths"])
 
-    assert paths == {"/health", "/policies/ingest", "/policies/query"}
+    assert paths == {
+        "/health",
+        "/policies/ingest",
+        "/policies/query",
+        "/nudges/{nudge_id}/acknowledge",
+    }
 
 
 def test_the_app_never_builds_a_bedrock_client_at_startup() -> None:

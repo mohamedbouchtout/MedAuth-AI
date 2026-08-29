@@ -27,6 +27,13 @@ consumer, so CLAUDE.md's "Auditing work that no request triggered" applies: the
 actor is the encounter's own ``provider_id``, and ``ip_address`` and
 ``user_agent`` are permanently absent rather than waiting on the middleware that
 will fill them in for routes. There is no client to describe.
+
+``audit_nudge_acknowledge`` (TASK-041b) is the third, and it is a route again —
+a browser dismissing a nudge — so it takes the client fields back. What it does
+*not* take is an actor from the caller: that route carries no credential in v1,
+and the provider is read from the encounter the nudge belongs to. It writes one
+of two actions depending on whether the row moved, which is the same call
+track-a-clinical's idempotent session-end makes.
 """
 
 from __future__ import annotations
@@ -44,6 +51,16 @@ from hipaa_logger import audit_log
 #: constant citing a list that had never carried it.
 ACTION_QUERY_POLICY: Final = "QUERY_POLICY"
 ACTION_WRITE_NUDGE: Final = "WRITE_NUDGE"
+
+#: The acknowledge route's pair (TASK-041b). Which one is written depends on
+#: whether the row actually changed, exactly as an idempotent
+#: ``POST /sessions/{id}/end`` audits as ``READ_ENCOUNTER`` rather than
+#: ``END_SESSION``: a repeat dismissal read a row it did not move, and recording
+#: it as a state change would make the trail claim something that did not
+#: happen. ``READ_NUDGE`` is prior-auth's constant too — the table's "Written
+#: by" column names both services.
+ACTION_ACKNOWLEDGE_NUDGE: Final = "ACKNOWLEDGE_NUDGE"
+ACTION_READ_NUDGE: Final = "READ_NUDGE"
 
 SERVICE_NAME: Final = "track-b-rag"
 
@@ -126,5 +143,53 @@ async def audit_nudge_write(
         # request-context middleware will close.
         ip_address=None,
         user_agent=None,
+        conn=conn,
+    )
+
+
+async def audit_nudge_acknowledge(
+    *,
+    nudge_id: uuid.UUID,
+    session_id: uuid.UUID,
+    provider_id: uuid.UUID,
+    changed: bool,
+    conn: asyncpg.Connection,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> None:
+    """Record that a provider dismissed a nudge, or re-read one already dismissed.
+
+    Joins the transaction the acknowledgement is written on, through ``conn``,
+    for the same reason ``audit_nudge_write`` does: an acknowledged nudge with
+    no audit row, and an audit row for an acknowledgement that rolled back, are
+    both worse than the write failing outright. Raises whatever ``audit_log``
+    raises, which rolls the acknowledgement back with it.
+
+    Unlike ``audit_nudge_write`` this one has a request behind it, so
+    ``ip_address`` and ``user_agent`` are real parameters rather than
+    permanently absent — a browser is the caller.
+
+    Args:
+        nudge_id: The ``clinical_nudges`` row, which is the resource.
+        session_id: The encounter the nudge belongs to.
+        provider_id: Read from the encounter row through the nudge, never from
+            the caller. This route carries no credential in v1 (CLAUDE.md, "A
+            route keyed on a resource rather than a session follows the same v1
+            rule"), so the encounter is the only defensible source of an actor.
+        changed: Whether this call moved the row. False on a repeat dismissal,
+            which audits as a read.
+        conn: The asyncpg connection the acknowledgement is being written on.
+        ip_address: Client IP, when the transport has a peer.
+        user_agent: Client user agent, when the caller sent one.
+    """
+    await audit_log(
+        actor_id=str(provider_id),
+        action=ACTION_ACKNOWLEDGE_NUDGE if changed else ACTION_READ_NUDGE,
+        resource_type=RESOURCE_TYPE_NUDGE,
+        resource_id=str(nudge_id),
+        session_id=str(session_id),
+        service_name=SERVICE_NAME,
+        ip_address=ip_address,
+        user_agent=user_agent,
         conn=conn,
     )

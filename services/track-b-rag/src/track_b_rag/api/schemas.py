@@ -334,3 +334,58 @@ class PolicyQueryData(BaseModel):
             "rest is provenance for logs and nudge records."
         ),
     )
+
+
+class AcknowledgeNudgeRequest(BaseModel):
+    """Body of ``PATCH /nudges/{nudge_id}/acknowledge`` — one state transition.
+
+    A transition carrying no parameters could take no body at all. It takes this
+    one because an explicit field satisfies Known Constraints #6's request-model
+    requirement without an argument about whether an empty route is exempt, it
+    describes itself in ``docs/api/track-b-rag.yaml`` rather than publishing an
+    empty box, and a later reason code can be added beside it without turning an
+    empty body into a populated one — which would break any client that
+    hardcoded the empty form. This is the shape for a PATCH-as-state-transition
+    route in this repository, not a decision local to this endpoint.
+
+    ``Literal[True]`` rather than ``bool``: this endpoint sets the flag, and the
+    reverse transition is not specified. Reading ``false`` as an un-acknowledge
+    would put a compliance-relevant flag under a caller's control in both
+    directions, so it is a validation failure instead.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    acknowledged: Literal[True] = Field(
+        description=(
+            "Always true. The field exists so the transition is stated rather "
+            "than implied; false is rejected, not read as an un-acknowledge."
+        ),
+    )
+
+
+class AcknowledgeNudgeData(BaseModel):
+    """``data`` payload returned by ``PATCH /nudges/{nudge_id}/acknowledge``.
+
+    ``already_acknowledged`` is true when the call was a no-op repeat, and
+    ``acknowledged_at`` is then the *original* timestamp rather than a fresh
+    one. The pair is the counterpart of ``EndSessionData``'s ``already_ended``
+    in track-a-clinical, deliberately copied rather than re-derived: two
+    endpoints answering "was this already done?" in slightly different shapes is
+    worse for a client than either shape on its own.
+    """
+
+    nudge_id: uuid.UUID = Field(description="The acknowledged nudge.")
+    acknowledged: bool = Field(description="Always true once this route has answered 200.")
+    acknowledged_at: datetime.datetime = Field(
+        description=(
+            "When the nudge was acknowledged, in ISO 8601 UTC. Unchanged by a "
+            "repeat call — a second dismissal does not move the first one."
+        ),
+    )
+    already_acknowledged: bool = Field(
+        description=(
+            "Whether this call was a no-op repeat. False means this call is the "
+            "one that changed the row."
+        ),
+    )
