@@ -1442,10 +1442,20 @@ list and the code each look authoritative on their own — and all three are
 corrected below.
 
 Three hand-caught instances is enough evidence that reading carefully is not a
-working control, so the check is being automated rather than repeated: **TASK-045
-adds a test that collects every action constant the services actually declare and
-asserts each one appears in this table**, in both directions. Until it lands, the
-rule above is enforced by whoever happens to notice.
+working control, so the check is automated rather than repeated. **TASK-045
+built it and it runs in CI**: `tests/test_audit_vocabulary.py` collects every
+`ACTION_*` constant the services declare, parses the action column out of the
+table below, and asserts the two agree in both directions — a constant missing
+from the table fails, and so does a row naming a service whose `audit.py`
+declares no such constant. A row for a service that has no `audit.py` yet is
+exempt, which is what lets the table carry `READ_PATIENT` and
+`SUBMIT_PRIOR_AUTH` ahead of the work.
+
+So adding an action is still a change to this table in the same PR — that rule
+has not moved — but forgetting now fails a pull request instead of waiting for
+someone to notice. Note what the test does not do: it compares two lists of
+names. Whether a row's *meaning* is right, and whether a service audits when it
+should, remain judgements under Known Constraints #6.
 
 | Action | Written by | Meaning |
 |---|---|---|
@@ -1618,6 +1628,12 @@ Path filter groups (each maps to a test job):
 - `policy-scraper`: services/policy-scraper/** or packages/**
 - `web`: apps/web/**
 - `mobile`: apps/mobile/**
+- `audit_vocab`: CLAUDE.md, tests/**, and any `**/audit.py` — the TASK-045 job
+  that checks the action vocabulary table above against the services' `ACTION_*`
+  constants. It belongs to no member, so it is its own job rather than a matrix
+  entry: the matrix runs `pytest tests --cov=src` inside a member directory, and
+  the repository root has no `src`. Both halves of the contract select it,
+  because either half can drift alone and both have.
 
 Rule: any directory under packages/ needs its own path-filter entry AND its own
 test job — a change under packages/ correctly re-runs every service that depends

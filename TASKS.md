@@ -3293,9 +3293,9 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **`ACKNOWLEDGE_NUDGE` is a new action and goes into CLAUDE.md's vocabulary
     table in the same PR**, per that table's own rule; `READ_NUDGE` already
     exists and its "Written by" column gains track-b-rag alongside prior-auth.
-    TASK-045's drift test is not built yet, so nothing mechanical catches this
-    being skipped — it would be the fourth instance of exactly the drift that
-    task exists to stop.
+    Skipping it would have been the fourth instance of exactly the drift
+    TASK-045 exists to stop, and at the time nothing mechanical would have
+    caught it. TASK-045 has since landed, so it now would.
   - **404 for an unknown `nudge_id`, and 404 for a nudge whose encounter is
     soft-deleted.** `clinical_nudges` has no `deleted_at` of its own —
     deliberately, since a nudge records what a provider was told at a point in
@@ -3559,7 +3559,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **Test:** a biologic or a referral produces no nudge of any kind
   - **Test:** nothing on this path writes a `rag:` cache entry
 
-- [ ] **TASK-045:** Test that the audit action vocabulary matches the code
+- [x] **TASK-045:** Test that the audit action vocabulary matches the code
   - Prerequisite: none. Small, and deliberately not folded into TASK-041, which
     is where the need was noticed.
   - **Why.** CLAUDE.md's action vocabulary table is declared authoritative and
@@ -3598,6 +3598,40 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **Test:** a table row for a service that has an `audit.py` without that
     constant fails the check
   - **Test:** a row for an unbuilt service passes
+  - Built (`tests/test_audit_vocabulary.py`, 8 tests; `audit-vocab` job in
+    `ci.yml`, selected by the new `audit_vocab` detector output). The table and
+    the services agree as of this task — 13 constants across four services, all
+    matching rows — so it lands green, which is the right starting state for a
+    drift guard. Decisions worth knowing before touching it:
+    - **The constants are parsed with `ast`, not imported.** Several services
+      still install a top-level module named `src` into the shared virtualenv,
+      so `src.audit` resolves to whichever sorts first and audio-ingestion's
+      constants and nudge-service's could not both be imported in one process.
+      Parsing also means the job needs no service dependency installed, which is
+      why its CI step is a plain `uv sync` rather than `--all-packages`.
+    - **Both declaration styles are read.** track-a-clinical writes
+      `ACTION_X = "X"`; the other three write `ACTION_X: Final = "X"`. A
+      collector handling only one form would have silently skipped three
+      services, which is the failure mode this task exists to end rather than
+      reproduce. There is a test naming both forms.
+    - **What is collected is the constant's *value*, not its name.** The value
+      is what reaches `audit_log.action` and what the table lists.
+    - **A row naming a service that is not a directory under `services/` fails,
+      rather than being exempted.** The carve-out is keyed on "no `audit.py`
+      yet", and a misspelled service name is indistinguishable from unbuilt work
+      under that key — it would silently disable the check for its row. Keying
+      the exemption on the real tree costs one comparison and closes it.
+    - **The parser is asserted against the real document**, not only against its
+      own fixtures: a parser that quietly returned nothing would make the
+      whole check pass by comparing two empty lists.
+    - **`SERVICE_NAME` is checked against the service's directory name.** The
+      comparison maps table rows to services by that name, so if the two ever
+      diverged the check would be matching the table against something else.
+    - **Not a job in the `test` matrix.** That matrix runs
+      `pytest tests --cov=src` inside a member directory, and the repository
+      root has no `src`. It gets its own job, its own detector output, and an
+      entry in `ci-passed`'s `needs` — a job missing from that list can go red
+      without blocking the merge.
 
 ---
 
