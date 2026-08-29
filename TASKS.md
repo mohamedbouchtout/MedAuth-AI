@@ -3149,7 +3149,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
       constrain rows with a null `cpt_code`, which is pinned as a test rather
       than left to be discovered.
 
-- [ ] **TASK-041:** Nudge WebSocket relay
+- [x] **TASK-041:** Nudge WebSocket relay
   - Prerequisite: TASK-006 (JWT), same auth pattern as TASK-020
   - Service: `services/nudge-service`
   - `WebSocket /ws/nudges/{session_id}` — same JWT validation as TASK-020
@@ -3208,6 +3208,54 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **Test:** a payload the relay cannot parse still reaches the client
     unaltered — the property "verbatim" actually means
   - **Test:** audio-ingestion's suite passes on the extracted package
+  - Built (74 tests, 100% coverage; packages/session-auth 35 tests, 100%).
+    Decisions worth knowing before touching this:
+    - **The extraction came first and audio-ingestion moved onto it in the same
+      PR**, so there was never a moment with two copies of the validator. Its
+      suite is the evidence the move preserved behaviour: no assertion changed,
+      only imports and two call shapes. `validate_token()` now takes a signing
+      key rather than a `Settings` object, so no service's configuration class
+      is part of the package's interface.
+    - **The issuer keeps its own `JWT_ALGORITHM` and `MIN_SIGNING_KEY_BYTES`,
+      and that is deliberate.** track-a-clinical is not a consumer of this
+      validator, and making it import the package would invert what Known
+      Constraint 8 centralises. The contract test moved into the package and
+      now also asserts the two key floors match — a stronger check than a shared
+      literal, which would prove agreement on an algorithm name while saying
+      nothing about the claim set.
+    - **The payload is never deserialized here.** A test asserts on the exact
+      string rather than on decoded JSON, because a relay that parsed and
+      re-serialized would pass an equality check on the decoded object while
+      quietly becoming a second definition of the shape. That also means this
+      service needs no change for TASK-044's keyword-only nudge.
+    - **A payload the relay cannot parse is still relayed.** Only a non-UTF-8
+      one is dropped, because a text frame cannot carry it. Dropping malformed
+      messages would turn an emitter bug into silence at the bedside, which a
+      provider cannot distinguish from nothing to flag.
+    - **Inbound frames are ignored rather than closing the socket**, unlike the
+      audio socket's 1003. Nothing travels client-to-server here, so a keepalive
+      is not a broken client. The receive loop exists only to notice the
+      disconnect.
+    - **1011 is a close code a client actually observes**, unlike 4401. It is
+      sent when the subscription fails *after* the handshake was accepted, which
+      is also the one case where an audit row exists for a stream that relayed
+      nothing — the access had already happened.
+    - **CI had the same hole one directory over.** The selection suite pinned
+      `ALL_SERVICES` against the real tree but not `ALL_PACKAGES`, so a package
+      missing from that array would silently get no test job — how
+      `packages/hipaa-logger` went untested before. Added, keyed on the presence
+      of a `pyproject.toml` so TypeScript-only `packages/audio-wire` is
+      correctly excluded.
+    - **Still not reachable end to end.** Nothing publishes to
+      `nudges:{session_id}` for a real encounter until TASK-052b supplies the
+      payer columns TASK-040's emitter needs, so the integration suite publishes
+      to Redis directly. What it proves is that a real publisher on the
+      canonical channel reaches a real subscriber here.
+    - Deferred deliberately: `PATCH /nudges/{nudge_id}/acknowledge` is
+      TASK-041b's and lives in track-b-rag, which owns the `clinical_nudges`
+      write. The vocabulary-drift test this task's audit action prompted is
+      TASK-045, kept out of here because it tests every service against a root
+      document and has nothing to do with relaying nudges.
 
 - [ ] **TASK-041b:** Nudge acknowledge endpoint
   - Service: `services/track-b-rag` (owns the clinical_nudges write from TASK-040)
