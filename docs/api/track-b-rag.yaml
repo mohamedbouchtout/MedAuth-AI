@@ -488,7 +488,7 @@ components:
           enum:
             - validation_error
             - http_error
-            - invalid_pdf
+            - invalid_document
             - empty_document
         message:
           type: string
