@@ -31,7 +31,7 @@ class EHRType(StrEnum):
 
     It matters more here than in an ordinary signature because this value
     **round-trips through Redis** — TASK-051 writes it into
-    ``fhir_token:{session_id}`` at launch and a later request reads it back to
+    ``fhir_token:{launch_id}`` at launch and a later request reads it back to
     pick an adapter — so a free-form string would put the write side and the
     read side in two modules with nothing holding them in step. ``StrEnum`` for
     the same reason ``AuditAction`` is one: a member compares equal to its own
