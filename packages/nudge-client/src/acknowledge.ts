@@ -1,6 +1,21 @@
 /**
  * Client for track-b-rag's nudge acknowledge route (TASK-041b).
  *
+ * **Why this is a package.** It was `apps/web/src/api/nudges.ts` until TASK-043,
+ * when `apps/mobile`'s nudge banner became the second client dismissing a nudge.
+ * That is the trigger this repository extracts on rather than copies — the same
+ * one that produced `packages/api-envelope`, `packages/session-auth`,
+ * `packages/cors-policy` and `packages/session-client`. The hazard here is the
+ * body and the missing credential: both are decisions made once, in CLAUDE.md,
+ * and a second hand-maintained copy is how one app comes to send an empty PATCH
+ * or to attach a session token that the route does not read.
+ *
+ * **Each app binds its own base URL and nothing else.** `createNudgesApi` takes
+ * the origin because the two apps configure it differently —
+ * `VITE_TRACK_B_RAG_URL` on web, `EXPO_PUBLIC_TRACK_B_RAG_URL` on mobile — and a
+ * default reaching into either app's config is what would make this package
+ * depend on its consumers.
+ *
  * **This call carries no credential, and that is the specified behaviour rather
  * than an omission.** `PATCH /nudges/{nudge_id}/acknowledge` does not validate a
  * session token: its path names a nudge, not a session, so
@@ -26,8 +41,6 @@
  */
 
 import type { ApiFailure, ApiResult } from '@medauth/session-client';
-
-import { TRACK_B_RAG_URL } from '../config';
 
 /** What the service reports about a dismissal. */
 export interface Acknowledgement {
@@ -96,7 +109,7 @@ function readAcknowledgement(body: unknown): Acknowledgement | null {
 }
 
 export function createNudgesApi(
-  baseUrl: string = TRACK_B_RAG_URL,
+  baseUrl: string,
   fetchImpl: FetchLike = (url, init) => fetch(url, init),
 ): NudgesApi {
   return {
@@ -136,6 +149,3 @@ export function createNudgesApi(
     },
   };
 }
-
-/** The client the overlay uses when none is injected. */
-export const nudgesApi: NudgesApi = createNudgesApi();

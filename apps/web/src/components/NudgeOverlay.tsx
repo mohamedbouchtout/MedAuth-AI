@@ -33,7 +33,7 @@ import { useCallback, useRef, useState } from 'react';
 
 import { nudgesApi, type NudgesApi } from '../api/nudges';
 import { useNudgeStream } from '../hooks/useNudgeStream';
-import type { DenialRisk, Nudge } from '../nudges/payload';
+import type { DenialRisk, Nudge } from '@medauth/nudge-client';
 
 export interface NudgeOverlayProps {
   /** The encounter's session id, from `POST /sessions/start` (TASK-006). */

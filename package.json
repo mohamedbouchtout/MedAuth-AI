@@ -8,6 +8,7 @@
     "apps/mobile",
     "packages/audio-wire",
     "packages/session-client",
+    "packages/nudge-client",
     "packages/fhir-types/typescript"
   ],
   "engines": {

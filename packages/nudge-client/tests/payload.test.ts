@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseNudge } from '../../../src/nudges/payload';
-import { nudgePayload } from '../../support/nudges';
+import { parseNudge } from '../src/payload';
+import { nudgePayload } from '../src/testing';
 
 function frame(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify(nudgePayload(overrides));

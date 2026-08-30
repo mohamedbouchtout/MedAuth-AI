@@ -152,16 +152,17 @@ main() {
     echo "any_python=true"
   fi
 
-  # Both apps import @medauth/audio-wire and @medauth/session-client, and both
-  # ship TypeScript source rather than a build, so a change in either is a change
-  # to code that runs inside the apps — test them when it moves.
-  if changed_matches '^(apps/web/|packages/(audio-wire|session-client)/)'; then
+  # Both apps import @medauth/audio-wire, @medauth/session-client and
+  # @medauth/nudge-client, and all three ship TypeScript source rather than a
+  # build, so a change in any of them is a change to code that runs inside the
+  # apps — test them when it moves.
+  if changed_matches '^(apps/web/|packages/(audio-wire|session-client|nudge-client)/)'; then
     echo "web=true"
   else
     echo "web=false"
   fi
 
-  if changed_matches '^(apps/mobile/|packages/(audio-wire|session-client)/)'; then
+  if changed_matches '^(apps/mobile/|packages/(audio-wire|session-client|nudge-client)/)'; then
     echo "mobile=true"
   else
     echo "mobile=false"
@@ -195,6 +196,18 @@ main() {
     echo "session_client=true"
   else
     echo "session_client=false"
+  fi
+
+  # nudge-client is TypeScript only and gets the same treatment again: its own
+  # npm job, no place in ALL_PACKAGES, and a reaction to the npm root because a
+  # lockfile change can break `npm ci` without touching the package. It holds the
+  # payload contract both apps read a nudge through and the acknowledge call both
+  # of them dismiss one with (TASK-043), so a change here that nothing tested
+  # would change what a provider is shown in both apps at once.
+  if changed_matches '^(package\.json|package-lock\.json|\.github/workflows/ci\.yml|packages/nudge-client/)'; then
+    echo "nudge_client=true"
+  else
+    echo "nudge_client=false"
   fi
 }
 
