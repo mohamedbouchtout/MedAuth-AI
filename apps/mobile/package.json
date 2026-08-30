@@ -14,9 +14,11 @@
   },
   "dependencies": {
     "@medauth/audio-wire": "*",
+    "@medauth/nudge-client": "*",
     "@medauth/session-client": "*",
     "expo": "~57.0.16",
     "expo-audio": "~57.0.4",
+    "expo-haptics": "~57.0.2",
     "expo-status-bar": "~57.0.1",
     "react": "19.2.8",
     "react-native": "0.86.2"

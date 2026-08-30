@@ -8,8 +8,8 @@
  * and the wiring that hands the session screen its patient source — TASK-025
  * put every decision that wiring depends on inside src/, where it is covered.
  *
- * `@medauth/audio-wire` is mapped to its TypeScript source rather than resolved
- * through node_modules. The package publishes no build output on purpose (see
+ * The `@medauth/*` workspace packages are mapped to their TypeScript source
+ * rather than resolved through node_modules. The package publishes no build output on purpose (see
  * its tsconfig), and jest's default `transformIgnorePatterns` would otherwise
  * skip transforming it because npm links workspace packages under
  * node_modules/. It is not in `collectCoverageFrom` either — the package has
@@ -23,6 +23,8 @@ module.exports = {
   moduleNameMapper: {
     '^@medauth/audio-wire$': '<rootDir>/../../packages/audio-wire/src/index.ts',
     '^@medauth/session-client$': '<rootDir>/../../packages/session-client/src/index.ts',
+    '^@medauth/nudge-client$': '<rootDir>/../../packages/nudge-client/src/index.ts',
+    '^@medauth/nudge-client/testing$': '<rootDir>/../../packages/nudge-client/src/testing.ts',
   },
   collectCoverage: true,
   collectCoverageFrom: ['src/**/*.{ts,tsx}'],
