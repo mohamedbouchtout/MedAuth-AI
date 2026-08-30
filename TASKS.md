@@ -3662,7 +3662,70 @@ The insurance policy RAG is the technical core. Build and validate before other 
     CLAUDE.md, "CORS and browser reachability", which settles the policy for
     both clients so neither re-derives it. Do not read a working dismiss here as
     evidence that the web dismiss works.
-  - **Test:** mock WebSocket message, verify Haptics mock called
+  - **`expo-haptics` is a dependency this app does not have yet, and it is added
+    before the first line of code that imports it.** `apps/mobile/package.json`
+    carries `expo-audio` and no haptics package at all, so the API this task is
+    named after does not currently resolve. It is a first-party Expo module,
+    which is the package to reach for rather than a third-party native one, and
+    it is added on the SDK 57 range like every other `expo-*` dependency here.
+  - **`EXPO_PUBLIC_NUDGE_WS_URL` is in `.env.example` and is not exported from
+    `apps/mobile/src/config.ts`**, which exports only `AUDIO_INGESTION_WS_URL`
+    and `API_BASE_URL`. A variable sitting in `.env.example` is evidence of
+    intent, not of wiring — this is the same gap TASK-042 found on the web side,
+    where `VITE_NUDGE_WS_URL` and `VITE_API_BASE_URL` had both been present and
+    unused since the TASK-001 scaffold. Surface it here as an export beside the
+    audio origin, with the same origin-only, no-path contract and the same
+    `isInsecureOrigin` treatment. **Standing check for any task touching a
+    client app's config: verify the `.env.example` entries it depends on are
+    actually exported from that app's config module, not merely present in the
+    file.**
+  - **Mobile needs a second HTTP origin, and `.env.example` currently asserts in
+    writing that it does not.** `API_BASE_URL` addresses track-a-clinical, which
+    owns the session lifecycle and the re-mint endpoint; the acknowledge route
+    this task's dismiss button calls is **track-b-rag**, a different service on a
+    different port. That is TASK-042's three-origins problem arriving on mobile
+    one task later. Add `EXPO_PUBLIC_TRACK_B_RAG_URL` rather than pointing one
+    variable at two services — a single base URL only becomes right when
+    something actually puts both behind one origin, which is the Phase 6 gateway
+    CLAUDE.md defers under "CORS and browser reachability".
+    - **Rewrite `.env.example`'s mobile comment in the same change, not as
+      follow-up.** It presently explains that `apps/mobile` needs only the
+      session-lifecycle origin, "which is why its `EXPO_PUBLIC_API_BASE_URL` has
+      no counterpart". That reasoning becomes false the moment this task's code
+      exists, and a wrong comment is worse than no comment: the next reader gets
+      a confident explanation with no signal that it went stale. State the
+      corrected architecture — mobile has two origins for two services, plus the
+      audio WebSocket origin — and keep the "do not collapse them until the
+      Phase 6 gateway" reasoning, which is still true and is the part worth
+      carrying.
+  - **Test:** mock WebSocket message with `haptic: true`, verify
+    `Haptics.notificationAsync()` was called
+  - **Test:** a payload with `denial_risk: "high"` and `haptic: false` renders
+    the banner and does **not** call `Haptics.notificationAsync()`. This is the
+    direct verification of TASK-040's haptic-decoupling decision, and it earns a
+    dedicated test rather than being implied by the one above: without it, a
+    later change that re-derives the buzz from the risk level reintroduces
+    "high always buzzes" with nothing in either app's suite going red. The
+    behaviour under test is a rule about an outage — `query.fallback_answer()`
+    sets `denial_risk="high"` — so the fixture should be a fallback-shaped
+    payload rather than an arbitrary one.
+  - **Test:** a token near `exp` re-mints before the socket is opened, and the
+    socket is opened with the token that came back
+  - **Test:** a socket that fails to open re-mints once and retries, and does
+    not reopen with the token that was just refused
+  - **Test:** nothing on this path calls `POST /sessions/start`. This is the
+    direct regression test for the double-encounter bug TASK-006b exists to
+    prevent — a `/sessions/start` used as a refresh forks one visit into two
+    encounters and nothing errors anywhere along that path, so a test is the
+    only thing that can catch it.
+  - **Test:** a 409 from the re-mint reports the visit as over and does not retry
+  - **Test:** a payload with `cpt_code: null` renders without naming a code
+    (TASK-044's case)
+  - **Test:** a malformed payload is dropped, nothing about it is logged, and
+    the socket stays open
+  - **Test:** click dismiss, verify `PATCH /nudges/{nudge_id}/acknowledge` is
+    called with the correct `nudge_id`, body `{"acknowledged": true}`, and no
+    credential attached
 
 - [ ] **TASK-044:** Keyword-only nudge for procedures that resolve no CPT code
   - Prerequisite: TASK-024 (the resolver and its four refusal reasons),
