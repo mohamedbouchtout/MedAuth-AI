@@ -1548,17 +1548,43 @@ services/fhir-integration/src/adapters/
 ├── cerner.py      # CernerAdapter(EHRAdapter) — coverage fallback handling
 ├── epic.py        # EpicAdapter(EHRAdapter) — proprietary extension enrichment
 └── factory.py     # get_adapter(ehr_type, fhir_base_url, access_token) -> EHRAdapter
-                   # detect_ehr_from_issuer(iss_url) -> str
+                   # detect_ehr_from_issuer(iss_url) -> EHRType
 ```
 
 The SMART launch `iss` parameter identifies the EHR vendor. Pass it to
 `detect_ehr_from_issuer()` to get the right adapter — never hardcode EHR type.
 
-What lives in base.py (standard FHIR, same across all EHRs):
-- get_patient_context() — Patient + Coverage + Condition resources
-- write_clinical_note() — DocumentReference write-back
-- get_encounter() — Encounter resource
-- submit_prior_auth() — FHIR Claim/$submit (Da Vinci PAS)
+**base.py has two layers of method, and the distinction is what the subclasses
+override.** An earlier draft of this list named only four methods and mixed the
+two layers together, which left TASK-052 (which specifies the granular fetches)
+and TASK-056/TASK-057 (which say they override `get_patient_context()`)
+describing method sets that did not contain each other. Both layers are real;
+they are written out separately here because TASK-050 creates the stubs from
+this list and the two later adapters depend on this exact shape.
+
+**Primitives — one FHIR resource type each, standard US Core, no composition:**
+- `get_patient(patient_id)` → normalized `PatientContext` patient half
+- `get_coverage(patient_id)` → normalized `CoverageInfo` (payer, plan, member_id)
+- `get_conditions(patient_id)` → list of active `Condition`
+- `get_encounter(encounter_id)` → `Encounter`
+
+**Composed — assembles primitives, and is the override point:**
+- `get_patient_context(patient_id)` → `PatientContext`, built by calling
+  `get_patient()`, `get_coverage()` and `get_conditions()`
+
+Also on base.py, and belonging to neither layer (they compose nothing and fetch
+nothing):
+- `write_clinical_note()` — DocumentReference write-back (TASK-053)
+- `submit_prior_auth()` — FHIR Claim/$submit, Da Vinci PAS (TASK-054)
+
+**Subclasses override the composed method, not the primitives, unless the
+vendor's deviation is genuinely in one resource fetch.** Enrichment and
+fallback logic is about the assembled context — Epic adds proprietary
+extensions to it, Cerner fills a payer field the `Coverage` fetch returned
+incomplete — so overriding `get_patient_context()` lets each of them call
+`super()` and then adjust, without reimplementing three fetches. A subclass that
+overrode a primitive instead would have to duplicate the composition to change
+anything about the result.
 
 What gets overridden in subclasses (EHR-specific only):
 - Athena: submit_prior_auth() → CoverMyMeds API (Athena doesn't support FHIR PAS)
@@ -1567,6 +1593,56 @@ What gets overridden in subclasses (EHR-specific only):
 
 Rule: if code only works on one EHR, it belongs in a subclass. If it works
 on all EHRs using standard FHIR, it belongs in base.py.
+
+**`EHRAdapter` is concrete and instantiable, never abstract.** It is not only a
+shared base — it is the adapter an unrecognised issuer actually gets, per the
+fallback below, and every method on it is standard FHIR R4 / US Core that works
+without any vendor knowledge. Marking it abstract would make an unknown EHR
+impossible to serve, which is exactly the hard failure the fallback exists to
+avoid.
+
+**An unrecognised issuer resolves to the base adapter and logs a WARNING — it
+does not raise.** This is the same arrangement as an unknown payer in
+`packages/payer-vocab`: the request still runs, and the fact that the name did
+not line up is visible in the operational trace rather than being indistinguishable
+from a normal answer. The reasoning transfers exactly. An EHR we have never seen
+is usually still a conformant FHIR R4 server, so the standard path is a real
+answer rather than a guess; and a raise here would turn every unrecognised SMART
+launch into a failed launch, which is a worse outcome than a working session
+someone has to notice in the logs. Log at WARNING with the issuer host — never
+the full URL with its query string, which can carry launch context — so an EHR
+worth adding a subclass for surfaces on its own.
+
+**`ehr_type` is a closed vocabulary — `EHRType`, a `StrEnum` — never a bare
+`str`.** This is the third time this repository has reached the same conclusion
+about an identifier matched by string equality, after `payer_vocab`'s canonical
+slugs and `hipaa_logger.AuditAction`, and the argument is the one those two
+already made: one spelling, defined once, with mypy rejecting an invented value
+at the call site. It matters more here than in an ordinary function signature
+because the value **round-trips through Redis** — TASK-051 writes it into
+`fhir_token:{session_id}` at launch and a later request reads it back to pick an
+adapter — so a free-form string puts a write side and a read side in two
+different modules with nothing holding them in step. `StrEnum` for the same
+reason `AuditAction` is one: a member compares equal to its own text, so what
+goes into Redis and comes back out is an ordinary string and no serialisation
+step has to know about the type.
+
+Three details of the matching, settled here so `detect_ehr_from_issuer()` has no
+judgement left to make:
+- **Case-insensitive.** An `iss` is a URL; its host is case-insensitive by
+  specification and vendors do not agree on spelling.
+- **Match against the host, not the whole URL.** `"epic"` is four characters
+  that occur inside ordinary words, and an `iss` carries a path and can carry a
+  query string — a practice named "Epicenter Orthopedics" or a path segment
+  containing the substring would otherwise select the Epic adapter for a server
+  that is not Epic. The host is the part that actually identifies the vendor.
+- **`"cerner"` and `"oraclehealth"` both mean Cerner, and are checked in that
+  order.** Oracle's acquisition of Cerner means both appear in real issuer URLs
+  during the rename, sometimes in the same host. They resolve to one vendor key,
+  so the ordering changes nothing about the outcome — it is fixed anyway so that
+  two readers of the function cannot disagree about what a host containing both
+  does. Order the remaining checks most-specific-first for the same reason, and
+  add a test case for any host that matches two patterns.
 
 ## GitHub Actions & Templates
 

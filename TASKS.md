@@ -3899,15 +3899,58 @@ logic do not change.
 
 - [ ] **TASK-050:** EHR adapter layer scaffold
   - Service: `services/fhir-integration` (Python 3.12 + FastAPI — same as all other services)
-  - Create `src/adapters/base.py` — EHRAdapter base class with all core FHIR methods as stubs
+  - Create `src/adapters/base.py` — `EHRAdapter`, **concrete and instantiable**,
+    with every core FHIR method as a typed stub. See CLAUDE.md's "Adapter
+    Architecture" section, which this task implements; the stubs are in two
+    layers and the distinction is load-bearing for TASK-056 and TASK-057:
+    - **Primitives** (one resource type each, standard US Core, implemented in
+      TASK-052): `get_patient(patient_id)`, `get_coverage(patient_id)`,
+      `get_conditions(patient_id)`, `get_encounter(encounter_id)`
+    - **Composed** (assembles the primitives, and is what Cerner and Epic
+      override): `get_patient_context(patient_id)`
+    - Neither layer, stubbed here and implemented later:
+      `write_clinical_note()` (TASK-053), `submit_prior_auth()` (TASK-054)
+    - Each stub's docstring says which layer it is in and, for
+      `get_patient_context()`, that a subclass overriding it should call
+      `super()` and adjust rather than reimplement the three fetches
+    - The base class is not abstract. It is the adapter an unrecognised issuer
+      is routed to, so it has to be instantiable — see the fallback below
   - Create `src/adapters/factory.py`:
-    - `detect_ehr_from_issuer(iss_url: str) -> str` — maps known EHR base URLs to vendor keys
-      (check for "epic", "cerner", "oraclehealth", "athena", "eclinicalworks", "modmed" in URL)
-    - `get_adapter(ehr_type, fhir_base_url, access_token) -> EHRAdapter`
-  - Create empty subclass files: `athena.py`, `ecw.py`, `modmed.py`, `cerner.py`, `epic.py`
+    - `EHRType` — a `StrEnum` of the vendor keys, not a bare `str`. It
+      round-trips through Redis (TASK-051 stores it in
+      `fhir_token:{session_id}`; a later request reads it back to pick an
+      adapter), so the write and read sides need one definition between them.
+      Third instance of the pattern `payer_vocab` and `hipaa_logger.AuditAction`
+      already established
+    - `detect_ehr_from_issuer(iss_url: str) -> EHRType` — maps known EHR base
+      URLs to vendor keys. Matching is **case-insensitive**, runs against the
+      **host only** and never the path or query string, and checks
+      `"cerner"` before `"oraclehealth"` (both mean Cerner; the Oracle
+      acquisition puts both in real issuer URLs, sometimes in one host).
+      Remaining patterns: `"athena"`, `"eclinicalworks"`, `"modmed"`, `"epic"`
+    - **An unrecognised issuer returns the generic key and logs a WARNING — it
+      never raises.** Same arrangement as an unknown payer in `payer-vocab`: the
+      launch still works against standard FHIR, and the fact that the name did
+      not line up is visible in the operational trace instead of looking like a
+      normal answer. Log the host, never the full URL
+    - `get_adapter(ehr_type, fhir_base_url, access_token) -> EHRAdapter` — the
+      generic key returns a plain `EHRAdapter`
+    - `access_token` is a credential: it must not reach a log line, an exception
+      message, or an adapter's `repr`
+  - Create subclass files `athena.py`, `ecw.py`, `modmed.py`, `cerner.py`,
+    `epic.py`. Each holds a **real class declaration** subclassing `EHRAdapter`
+    with no overrides yet — `get_adapter()` has to instantiate them, so a
+    literally empty file will not do
   - The route handlers import only `get_adapter()` and `detect_ehr_from_issuer()` — never import
     a specific adapter class directly in routes
   - **Test:** unit test detect_ehr_from_issuer() with sample URLs from each vendor
+  - **Test:** an issuer whose *path* contains a vendor substring but whose host
+    does not is not detected as that vendor — the case host-only matching exists
+    to prevent
+  - **Test:** an unrecognised issuer returns the generic key, logs at WARNING,
+    and `get_adapter()` on it yields a usable `EHRAdapter` rather than raising
+  - **Test:** `get_adapter()` returns the right subclass for every member of
+    `EHRType`, so no key can be added without a class behind it
 
 - [ ] **TASK-051:** SMART on FHIR OAuth flow (EHR-agnostic)
   - Service: `services/fhir-integration`
@@ -3932,6 +3975,10 @@ logic do not change.
     - `get_coverage(patient_id)` → normalized CoverageInfo (payer, plan, member_id)
     - `get_conditions(patient_id)` → list of active Condition
     - `get_encounter(encounter_id)` → Encounter
+    - `get_patient_context(patient_id)` → PatientContext — the composed method
+      TASK-050 stubbed, assembling the three patient-scoped primitives above.
+      It is what `GET /fhir/patient/{patient_id}/context` calls, and what
+      TASK-056 and TASK-057 override
   - Routes (all vendor-agnostic — use get_adapter() from session ehr_type):
     - `GET /fhir/patient/{patient_id}/context` — returns PatientContext (patient + coverage + conditions)
     - `GET /fhir/encounter/{encounter_id}` — returns Encounter
@@ -4032,7 +4079,6 @@ logic do not change.
   - Implement CernerAdapter(EHRAdapter) — override get_patient_context() to handle
     incomplete Coverage resource (add requires_manual_confirmation fallback)
   - Validate all resources against Cerner sandbox
-  - Add "cerner" detection to factory.py detect_ehr_from_issuer()
   - **Test:** full integration test suite against Cerner sandbox
 
 - [ ] **TASK-057:** Epic adapter
@@ -4041,7 +4087,6 @@ logic do not change.
   - Implement EpicAdapter(EHRAdapter) — override get_patient_context() to optionally
     enrich with Epic proprietary extensions (preferred language, scheduling context)
   - All Epic extensions are additive — base functionality still works without them
-  - Add "epic" detection to factory.py
   - **Test:** full integration test suite against Epic sandbox at fhir.epic.com
   - Note: Epic production access requires App Orchard approval + reference customer
 
