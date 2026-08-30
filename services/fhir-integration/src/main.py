@@ -1,0 +1,68 @@
+"""FastAPI application for fhir-integration.
+
+Runs on port 8004 per the Local Development port table in CLAUDE.md::
+
+    cd services/fhir-integration
+    uv run uvicorn src.main:app --reload --port 8004
+
+The module is ``src.main`` rather than a named package, like every service
+except ``track_a_clinical`` and ``track_b_rag``. Those two ship named packages
+because another service imports from them; nothing imports this one, so it keeps
+the bare ``src`` layout. The task that first needs to import from here is the
+task that should rename it.
+
+**No CORS middleware, deliberately.** CLAUDE.md's rule is that a service
+installs ``cors_policy`` when it grows a browser-facing HTTP route, and not
+pre-emptively. Both routes here are browser *navigations* — the EHR redirects
+the browser to ``/fhir/launch`` and the authorization server redirects it to
+``/fhir/callback`` — and a browser applies no CORS to a top-level navigation,
+exactly as it applies none to a WebSocket upgrade. Middleware would protect
+nothing today. TASK-052 is what changes this: ``GET /fhir/patient/{id}/context``
+is a real cross-origin fetch from ``apps/web``, and it should install the shared
+policy in the same change that adds it.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+from api_envelope import install_error_handlers
+from src.api.dependencies import close_clients
+from src.api.health import router as health_router
+from src.api.smart import router as smart_router
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Release the Redis and HTTP clients on shutdown.
+
+    Nothing is opened on startup: Redis connects lazily on first command and the
+    HTTP client opens a connection per request, so the service starts even when
+    a dependency is briefly unreachable.
+    """
+    yield
+    await close_clients()
+
+
+def create_app() -> FastAPI:
+    """Build the application. A factory so tests get an isolated instance."""
+    app = FastAPI(
+        title="MedAuth AI — fhir-integration",
+        description=(
+            "SMART on FHIR launch and the multi-EHR adapter layer. Exchanges an "
+            "EHR's launch for an access token, which later tasks use to read and "
+            "write FHIR resources through a vendor-appropriate adapter."
+        ),
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+    install_error_handlers(app)
+    app.include_router(health_router)
+    app.include_router(smart_router)
+    return app
+
+
+app = create_app()

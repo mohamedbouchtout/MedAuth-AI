@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     "httpx>=0.28",
+    "medauth-api-envelope",
     "medauth-fhir-types",
     "medauth-hipaa-logger",
     "pydantic>=2.9",

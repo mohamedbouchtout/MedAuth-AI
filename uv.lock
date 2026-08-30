@@ -1722,6 +1722,7 @@ source = { editable = "services/fhir-integration" }
 dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "medauth-api-envelope" },
     { name = "medauth-fhir-types" },
     { name = "medauth-hipaa-logger" },
     { name = "pydantic" },
@@ -1735,6 +1736,7 @@ dependencies = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28" },
+    { name = "medauth-api-envelope", editable = "packages/api-envelope" },
     { name = "medauth-fhir-types", editable = "packages/fhir-types" },
     { name = "medauth-hipaa-logger", editable = "packages/hipaa-logger" },
     { name = "pydantic", specifier = ">=2.9" },

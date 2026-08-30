@@ -1,0 +1,348 @@
+openapi: 3.1.0
+
+# The published contract for services/fhir-integration.
+#
+# Kept in step with the FastAPI app by
+# services/fhir-integration/tests/unit/api/test_openapi_contract.py, which fails
+# if a route, method or status code here drifts from the application. Update
+# this file in the same change that adds or alters a route.
+#
+# Per the CI rule in CLAUDE.md, editing this file alone selects this service's
+# test job — the drift test guards two halves and has to re-run when either
+# moves.
+
+info:
+  title: MedAuth AI — fhir-integration
+  version: 0.1.0
+  description: >-
+    SMART on FHIR launch and the multi-EHR adapter layer (TASK-050, TASK-051).
+    An EHR launches MedAuth from a chart; these routes exchange that launch for
+    an EHR access token, which later tasks use to read and write FHIR resources
+    through a vendor-appropriate adapter.
+
+
+    **The identifier this service hands back is `launch_id`, not `session_id`.**
+    A SMART launch and an encounter session are two different things with two
+    different lifetimes: the launch precedes the visit, one launch can outlive
+    several encounters, and at callback time no encounter exists to key a token
+    on. Settled in CLAUDE.md, "A SMART launch is not an encounter session".
+    Clients hold both and send whichever the route being called is keyed on.
+
+
+    **Neither route here touches PHI, so neither writes an audit row.**
+    Obtaining a credential is not using it. The first PHI access in this service
+    is TASK-052's resource fetches, which audit. Both routes log at INFO
+    instead, per Known Constraints #6.
+
+servers:
+  - url: http://localhost:8004
+    description: Local development (see the port table in CLAUDE.md)
+
+tags:
+  - name: health
+    description: Readiness of this service's backing dependencies.
+  - name: smart
+    description: The SMART on FHIR authorization flow.
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Service health
+      description: >-
+        Reports whether this service can start and complete a SMART launch.
+        Returns 200 when Redis answers and 503 when it does not; the body is the
+        standard envelope in both cases. Deliberately unauthenticated and
+        unaudited — it is what the Kubernetes readiness probe calls and it
+        exposes no patient data.
+
+
+        The EHR's own endpoints are not probed: there is no single EHR to probe,
+        and whether a vendor's authorization server answers is a property of a
+        launch rather than of this service's readiness.
+      operationId: health_health_get
+      responses:
+        "200":
+          description: Every dependency answered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse_HealthData_"
+        "503":
+          description: At least one dependency is unreachable. The body names which.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse_HealthData_"
+
+  /fhir/launch:
+    get:
+      tags: [smart]
+      summary: Begin a SMART on FHIR launch
+      description: >-
+        Resolves the EHR vendor from `iss`, reads that EHR's authorization and
+        token endpoints from its `.well-known/smart-configuration` document,
+        records the launch under `fhir_launch:{state}` with a fresh PKCE
+        verifier, and redirects the browser to the authorization endpoint.
+
+
+        Supports both SMART launch types, and the presence of `launch` is the
+        only thing that distinguishes them: an EHR launch arrives with it and
+        asks for the `launch` scope, a standalone launch arrives without one and
+        asks for `launch/patient` so the authorization server prompts for the
+        patient the EHR would otherwise have named.
+
+
+        The authorization request carries `code_challenge` /
+        `code_challenge_method=S256` — SMART on FHIR 2.0 requires PKCE of every
+        client, confidential ones included — and `aud` set to the FHIR base URL,
+        which a conformant authorization server requires and which stops a code
+        issued for one FHIR server being redeemed against another.
+
+
+        **Discovery is `.well-known/smart-configuration` only.** The older
+        CapabilityStatement `oauth-uris` extension is out of scope for v1
+        (TASK-051); a server offering only that gets a 502 naming the document
+        it did not serve and the issuer host, rather than an opaque failure.
+      operationId: smart_launch_fhir_launch_get
+      parameters:
+        - name: iss
+          in: query
+          required: true
+          description: >-
+            The EHR's FHIR base URL. Identifies the vendor and is the `aud` the
+            authorization request is bound to. Any query string or fragment is
+            stripped before use — a FHIR base URL carries neither, and one
+            arriving anyway would otherwise be appended to and logged.
+          schema:
+            type: string
+            minLength: 1
+            title: Iss
+        - name: launch
+          in: query
+          required: false
+          description: >-
+            The EHR's opaque launch context. Present on an EHR launch and absent
+            on a standalone launch.
+          schema:
+            anyOf:
+              - type: string
+              - type: "null"
+            title: Launch
+      responses:
+        "302":
+          description: Redirect to the EHR's authorization endpoint.
+        "422":
+          description: The request body or path parameter is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse_NoneType_"
+        "500":
+          description: >-
+            No SMART client is registered in this deployment for the EHR the
+            issuer resolved to.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse_NoneType_"
+        "502":
+          description: >-
+            The EHR's authorization server could not be reached, or answered in
+            a way this service cannot use.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse_NoneType_"
+
+  /fhir/callback:
+    get:
+      tags: [smart]
+      summary: Complete a SMART on FHIR launch
+      description: >-
+        Claims the launch record for the presented `state` — atomically, so a
+        replayed callback finds nothing and cannot mint a second token —
+        presents the PKCE verifier held with it, and stores the resulting EHR
+        access token under `fhir_token:{launch_id}` for as long as the EHR says
+        it lives.
+
+
+        `state` is this flow's CSRF defence. It is server-generated, single-use,
+        and deleted the moment it is consumed; unknown, expired and
+        already-consumed are one answer on purpose, since distinguishing them
+        would tell a caller probing states which ones were real.
+
+
+        Returns the `launch_id`. It deliberately does **not** return the SMART
+        launch context the token response carried: those patient and encounter
+        identifiers are stored for TASK-052, which audits when it reads them,
+        and a credential exchange is not where a client starts learning patient
+        identifiers.
+
+
+        A `refresh_token` is stored when the EHR returns one, so TASK-051b has
+        something to refresh without a second exchange. Nothing here renews a
+        token: until that task lands, an expired EHR token means repeating the
+        launch.
+      operationId: callback_fhir_callback_get
+      parameters:
+        - name: state
+          in: query
+          required: true
+          description: The state this service issued on the redirect.
+          schema:
+            type: string
+            minLength: 1
+            title: State
+        - name: code
+          in: query
+          required: false
+          description: The authorization code.
+          schema:
+            anyOf:
+              - type: string
+              - type: "null"
+            title: Code
+        - name: error
+          in: query
+          required: false
+          description: An OAuth error code, when the authorization server refused.
+          schema:
+            anyOf:
+              - type: string
+              - type: "null"
+            title: Error
+      responses:
+        "200":
+          description: The launch_id naming this launch and its EHR access token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse_LaunchSessionData_"
+        "400":
+          description: >-
+            The `state` is unknown, expired or already consumed, or the
+            authorization server reported that the provider declined.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse_NoneType_"
+        "422":
+          description: The request body or path parameter is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse_NoneType_"
+        "500":
+          description: >-
+            No SMART client is registered in this deployment for the EHR the
+            issuer resolved to.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse_NoneType_"
+        "502":
+          description: >-
+            The EHR's authorization server could not be reached, or answered in
+            a way this service cannot use.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiResponse_NoneType_"
+
+components:
+  schemas:
+    ApiError:
+      type: object
+      title: ApiError
+      description: The error half of the shared envelope.
+      properties:
+        code:
+          type: string
+          title: Code
+        message:
+          type: string
+          title: Message
+      required: [code, message]
+
+    ApiResponse_NoneType_:
+      type: object
+      title: ApiResponse[NoneType]
+      description: The envelope on a failure — data null, error populated.
+      properties:
+        data:
+          anyOf:
+            - type: "null"
+          title: Data
+        error:
+          anyOf:
+            - $ref: "#/components/schemas/ApiError"
+            - type: "null"
+
+    ApiResponse_HealthData_:
+      type: object
+      title: ApiResponse[HealthData]
+      properties:
+        data:
+          anyOf:
+            - $ref: "#/components/schemas/HealthData"
+            - type: "null"
+        error:
+          anyOf:
+            - $ref: "#/components/schemas/ApiError"
+            - type: "null"
+
+    ApiResponse_LaunchSessionData_:
+      type: object
+      title: ApiResponse[LaunchSessionData]
+      properties:
+        data:
+          anyOf:
+            - $ref: "#/components/schemas/LaunchSessionData"
+            - type: "null"
+        error:
+          anyOf:
+            - $ref: "#/components/schemas/ApiError"
+            - type: "null"
+
+    HealthData:
+      type: object
+      title: HealthData
+      description: Per-dependency readiness flags.
+      properties:
+        redis:
+          type: string
+          enum: [ok, error]
+          title: Redis
+          description: Whether the Redis store holding SMART launch records answers.
+      required: [redis]
+
+    EHRType:
+      type: string
+      title: EHRType
+      description: >-
+        The EHR vendor keys, as a closed vocabulary. `generic` is an issuer
+        `detect_ehr_from_issuer()` did not recognise; it routes to the standard
+        FHIR adapter rather than to a vendor subclass.
+      enum: [athena, ecw, modmed, cerner, epic, generic]
+
+    LaunchSessionData:
+      type: object
+      title: LaunchSessionData
+      description: What GET /fhir/callback hands back once a launch completes.
+      properties:
+        launch_id:
+          type: string
+          title: Launch Id
+          description: >-
+            Names this SMART launch and the EHR access token it produced. It is
+            NOT an encounter session_id: a launch precedes the visit and
+            outlives individual encounters. See CLAUDE.md, 'A SMART launch is
+            not an encounter session'.
+        ehr_type:
+          $ref: "#/components/schemas/EHRType"
+        expires_in:
+          type: integer
+          title: Expires In
+          description: Seconds until the stored EHR access token expires.
+      required: [launch_id, ehr_type, expires_in]
