@@ -4153,25 +4153,258 @@ logic do not change.
   - **Test:** a rejected `refresh_token` surfaces as a launch that must be
     repeated, with a distinct error from a transient network failure
 
+- [ ] **TASK-051c:** Capture the SMART `fhirUser` claim as the audit actor
+  - Prerequisite: **TASK-051**; wanted by **TASK-052** and every later PHI read
+    in this service
+  - Service: `services/fhir-integration`
+  - **The gap.** Every `audit_log()` row this service writes has
+    `actor_id=None`, because no `encounters` row exists at SMART launch and this
+    repository refuses to mint a service-account UUID to fill the column — see
+    CLAUDE.md, "Auditing a PHI read that happens before any encounter exists".
+    A null actor is the honest record of what we know, but it is not the record
+    an auditor wants: the EHR *did* tell us who authorized the launch, and we
+    threw it away.
+  - **The source is the `fhirUser` claim in the `id_token`** returned by the
+    token exchange — a reference to a `Practitioner`, which is exactly the
+    provider whose access is being recorded. TASK-051 already requests the
+    `openid fhirUser` scope; it stores nothing from the `id_token`.
+  - **Why it is its own task rather than a field added to TASK-052.** Reading a
+    claim out of an `id_token` responsibly means fetching the EHR's JWKS,
+    verifying the token's signature and issuer against it, and resolving the
+    `Practitioner` reference. That is a token-validation path, and folding it
+    into a task that implements four FHIR GETs would be introducing an
+    authentication mechanism as a side effect — what Known Constraints #8
+    exists to prevent. It gets its own task so it gets its own review.
+  - Store the resolved identity on `LaunchToken` and pass it as `actor_id`;
+    remove the `actor_id=None` comments TASK-052 leaves at each call site.
+  - **An unverifiable or absent `fhirUser` stays `None`.** A claim that fails
+    signature verification, or an EHR that returns no `id_token`, means the
+    actor is still unknown — fall back to the null, never to the unverified
+    value. An unverified identity in an audit trail is the fabrication this task
+    exists to remove, one step subtler.
+  - **Nothing backfills the rows already written.** Inventing the actor after
+    the fact is the same fabrication one remove away; those rows are
+    permanently actor-less and that is the truthful outcome.
+  - **Test:** a launch whose `id_token` carries a verifiable `fhirUser` produces
+    audit rows with that actor
+  - **Test:** an `id_token` failing signature verification leaves `actor_id`
+    null and does not fail the launch
+  - **Test:** no `id_token`, claim or resolved identity reaches a log record
+
 - [ ] **TASK-052:** Base FHIR resource fetching (implements base.py methods)
   - Service: `services/fhir-integration`
+  - Prerequisite: **TASK-050** (the stubs and the normalized models this fills
+    in), **TASK-051** (the SMART launch that produces the EHR access token these
+    fetches spend — built, see its Built note)
   - Implement in `adapters/base.py` — these use standard US Core FHIR only:
-    - `get_patient(patient_id)` → normalized PatientContext
-    - `get_coverage(patient_id)` → normalized CoverageInfo (payer, plan, member_id)
-    - `get_conditions(patient_id)` → list of active Condition
-    - `get_encounter(encounter_id)` → Encounter
-    - `get_patient_context(patient_id)` → PatientContext — the composed method
+    - `get_patient(patient_id)` → `PatientInfo`
+    - `get_coverage(patient_id)` → `CoverageInfo | None` (payer, plan, member_id)
+    - `get_conditions(patient_id)` → list of active `Condition`
+    - `get_encounter(encounter_id)` → `Encounter`
+    - `get_patient_context(patient_id)` → `PatientContext` — the composed method
       TASK-050 stubbed, assembling the three patient-scoped primitives above.
       It is what `GET /fhir/patient/{patient_id}/context` calls, and what
       TASK-056 and TASK-057 override
-  - Routes (all vendor-agnostic — use get_adapter() from session ehr_type):
-    - `GET /fhir/patient/{patient_id}/context` — returns PatientContext (patient + coverage + conditions)
-    - `GET /fhir/encounter/{encounter_id}` — returns Encounter
-  - All accesses logged via hipaa-logger
-  - If Coverage resource returns incomplete payer info: set `requires_manual_confirmation: true`
-    in response — do not fail, let provider fill it in
-  - **Test:** against local HAPI FHIR loaded with Synthea patients — verify all fields populated
-  - **Test:** against Athenahealth sandbox with real sandbox credentials
+  - Routes (all vendor-agnostic — the handler resolves an adapter through
+    `get_adapter()` and never imports a concrete one):
+    - `GET /fhir/patient/{patient_id}/context` — returns `PatientContext`
+      (patient + coverage + conditions)
+    - `GET /fhir/encounter/{encounter_id}` — returns `Encounter`
+
+  - **Both routes are keyed on `launch_id`, carried in the
+    `X-MedAuth-Launch-Id` request header.** An earlier draft of this task said
+    "use `get_adapter()` from session `ehr_type`", which was written before
+    TASK-051 and is wrong in two ways: this service holds no session, and
+    `ehr_type` is not something a caller supplies. What the handler actually
+    does is read `launch_id` from the header, load `fhir_token:{launch_id}`
+    through `store.load_launch_token()`, and pass that record's `ehr_type`,
+    `fhir_base_url` and `access_token` to `get_adapter()`. The vendor is never
+    a request parameter.
+    - **A header rather than a query parameter or a path segment.** `launch_id`
+      resolves to an EHR access token, so possessing one is enough to read a
+      patient's chart — it is a capability handle, and CLAUDE.md already refuses
+      to put that class of value in a URL query string, which is "the one place
+      a credential is certain to be logged by intermediaries". A path segment
+      lands in the same access logs and would also fight the two route shapes
+      above, which are fixed. A header has no such problem and, unlike the
+      WebSocket case that forced the subprotocol carrier, a browser `fetch()`
+      sets request headers freely, so there is no platform obstacle to it here.
+    - **A missing or unknown `X-MedAuth-Launch-Id` is a 404**, not a 401 — the
+      launch record has expired or never existed, and there is no credential
+      being rejected. Error code `FHIR_UNKNOWN_LAUNCH`. An absent header is a
+      422 from the standard validation handler, like any other missing required
+      parameter.
+    - **A `session_id` presented in that header is a 404, never a lookup that
+      happens to succeed.** The two identifiers are different values with
+      different lifetimes and neither is derivable from the other — CLAUDE.md,
+      "A SMART launch is not an encounter session", which fixes exactly this
+      rule. In practice a `session_id` simply misses `fhir_token:{launch_id}`
+      and takes the 404 path above; the point of stating it is that no code may
+      be added that falls back to treating one as the other, and there is a test
+      naming that case. Do not log the presented value.
+    - **CORS is not installed in this service and this task does not install
+      it.** Per CLAUDE.md, "Only the services that answer HTTP to a browser
+      install it … add it to a service when that service grows a browser-facing
+      HTTP route, not pre-emptively." TASK-070 is what makes `apps/web` call
+      these routes; that task installs the shared middleware here and must add
+      `X-MedAuth-Launch-Id` to the allowed request headers, since a custom
+      header triggers a preflight that will otherwise fail. Flagged here so it
+      is not discovered in a browser console.
+
+  - **The adapter is handed the pooled `httpx.AsyncClient`; it never creates
+    one.** `EHRAdapter.__init__` takes the client alongside `fhir_base_url` and
+    `access_token`, and `get_adapter()` passes it through. The client is the
+    process-wide one already declared in `src/api/dependencies.py`, so
+    connections to a vendor's FHIR server are pooled across requests exactly as
+    they already are for discovery and token exchange, and a test substitutes a
+    transport through `app.dependency_overrides` without patching anything. An
+    adapter constructing its own client would open a connection pool per
+    request and put the one object that must not render its access token in
+    charge of its own transport.
+    - Timeouts are set per call, matching what `discovery.py` and `oauth.py`
+      already do rather than being fixed on the shared client.
+    - The `Authorization: Bearer` header is applied per request by the adapter.
+      It is never set as a default header on the shared client, which is used
+      for unauthenticated discovery against other hosts.
+
+  - **FHIR-layer failures map to three distinct envelope outcomes.** They are
+    written down here rather than in the implementation because TASK-052b,
+    TASK-053, TASK-054 and TASK-025b all call this layer and must handle them
+    identically. Collapsing them into one generic failure is the specific thing
+    this rule forbids: "the EHR has no `Coverage` for this patient" and "we
+    could not reach the EHR" are different facts, and merging them lets a
+    transient outage read as a patient with no insurance — the same failure
+    class as a payer's silence being read as a negative determination.
+
+    | Outcome | What it means | Status | Error code |
+    |---|---|---|---|
+    | Not found | The EHR answered, and the resource does not exist — HTTP 404, or a 200 `OperationOutcome` whose issue code is `not-found` | 404 | `FHIR_RESOURCE_NOT_FOUND` |
+    | Unreachable | No usable answer — connect error, read timeout, or any 5xx from the EHR | 504 on timeout, 502 otherwise | `FHIR_UPSTREAM_UNAVAILABLE` |
+    | Malformed | The EHR answered 200 with something that is not the resource asked for — not JSON, wrong `resourceType`, or failing Pydantic validation | 502 | `FHIR_MALFORMED_RESPONSE` |
+
+    - **Only "unreachable" is worth retrying**, and that is the distinction the
+      three exist to preserve. Not-found is stable; malformed is a vendor quirk
+      that needs an adapter subclass, not a second attempt.
+    - **No response body reaches the error message.** A FHIR error body can
+      carry patient detail, and `OperationOutcome.diagnostics` routinely does.
+      The envelope error names the resource type and the outcome; the
+      operational log at WARNING adds the status code and the `iss` host. The
+      same rule TASK-051 already follows for a token endpoint's
+      `error_description`.
+    - **An empty search Bundle is not "not found".** A `Coverage?patient=` or
+      `Condition?patient=` search returning zero entries is a successful answer
+      meaning the patient has none on file, and it is handled by the coverage
+      rule below or by an empty condition list — never by a 404. Only a missing
+      `Patient` or `Encounter` read is a not-found.
+
+  - **An expired EHR access token is a fourth outcome, and it is TASK-051b's
+    seam.** A 401 or 403 from the EHR means the token this launch holds is no
+    longer good. Until TASK-051b lands there is no renewal path, so this returns
+    **401** with `FHIR_LAUNCH_EXPIRED` and a message saying the SMART launch must
+    be repeated — which is the limitation TASK-051 already states rather than a
+    new one. Keep it to **one place**: the helper that loads the launch token and
+    builds the adapter is where the 401 is recognised, not four copies inside the
+    primitives. TASK-051b replaces the body of that helper and touches none of
+    the fetches.
+
+  - **What counts as incomplete coverage — the enumerated rule.**
+    `requires_manual_confirmation` means *a human must confirm the payer
+    information before this encounter's policy answers can be trusted*. It gates
+    TASK-052b's NULL-versus-confirm behaviour directly, so it is enumerated here
+    rather than left to that task to infer. The fields that matter are the ones
+    feeding `rag:{payer}:{plan_type}:{state}:{cpt_code}`, because a wrong value
+    there writes a real policy answer under a key standing for a different plan.
+
+    | Case | `coverage` | `requires_manual_confirmation` |
+    |---|---|---|
+    | Search returns no `Coverage` at all | `None` | `true` |
+    | No `Coverage` with `status="active"` | `None` | `true` |
+    | Several active `Coverage` resources and no unambiguous primary | `None` | `true` |
+    | Active `Coverage`, but no payer display name readable from `payor` | `CoverageInfo(payer=None, …)` | `true` |
+    | Active `Coverage` with a payer, but no plan type in `type` or `class` | `CoverageInfo(plan_type=None, …)` | `true` |
+    | Active `Coverage` with payer and plan type, no `member_id` | `CoverageInfo(member_id=None, …)` | `false` |
+    | Active `Coverage` with all three | fully populated | `false` |
+
+    - **A missing `member_id` does not set the flag**, and that is deliberate
+      rather than an oversight. It is not a segment of the cache key and no
+      policy answer changes without it; it is needed by TASK-060's prior-auth
+      bundle, which is far downstream and must check for it itself. Setting the
+      flag on it would make a provider confirm payer details in order to fix a
+      field that has nothing to do with the payer's policy.
+    - **Selecting among several active coverages: `Coverage.order` decides, and
+      ambiguity is not resolved by guessing.** Where exactly one active resource
+      exists, use it. Where several do, use the one with the lowest `order`
+      (FHIR's own coordination-of-benefits ranking, `1` being primary) when that
+      lowest value is unique. Where `order` is absent or tied across several,
+      return `None` with the flag set — picking one arbitrarily would silently
+      answer a policy query against a secondary payer, which is a wrong answer
+      served confidently, and this repository's standing preference is the empty
+      answer plus a visible signal instead.
+    - **Never fail the request for any row in that table.** A partial answer with
+      the flag set is a working encounter a provider can complete; a 502 is a
+      launch that dead-ends. The flag is on `PatientContext`, so
+      `GET /fhir/encounter/{encounter_id}` does not carry it.
+    - **Nothing here is slugged.** `CoverageInfo.payer` keeps the payer's own
+      spelling; `payer_vocab.normalize_payer()` is called by `/policies/query`
+      and that remains the single normalisation site.
+
+  - **Auditing.** These are this service's first PHI accesses, so `audit_log()`
+    starts here — TASK-051 deferred it explicitly. `GET /fhir/patient/{id}/context`
+    writes one `READ_PATIENT` row; `GET /fhir/encounter/{id}` writes one
+    `READ_ENCOUNTER` row. **One row per route call, not one per FHIR fetch**: the
+    auditable access is the context read, the same "one row per unit of work"
+    rule the Redis consumers follow. `actor_id` is `None`, per CLAUDE.md's
+    "Auditing a PHI read that happens before any encounter exists" — no
+    `encounters` row exists at launch time, and capturing the SMART `fhirUser`
+    claim is **TASK-051c**, explicitly not this task. Each call site names
+    TASK-051c in a comment. `session_id` is `None` for the same reason;
+    `resource_type` is `Patient` or `Encounter`, `resource_id` the id in the path.
+    The service needs `DATABASE_URL` in its config for this — it has none today.
+
+  - **`scripts/seed-synthea.sh` is implemented here**, as the genuine
+    prerequisite of the HAPI test rather than because a stub comment names this
+    task. It loads Synthea patients into the local HAPI FHIR server at
+    `localhost:8080` and is re-runnable without duplicating them.
+    `scripts/setup-dev.sh` carries the same stub comment and is **unrelated
+    scope** — it is TASK-052c, below, not part of this task.
+
+  - **CI must start HAPI FHIR, and its wait condition needs checking rather than
+    assuming.** `ci.yml` runs `docker compose up -d --wait postgres redis qdrant`;
+    `hapi-fhir` joins that line. It is a Spring Boot application that builds a
+    schema on first start, so it is far slower than the three services already
+    there and the compose healthcheck and any `--wait-timeout` must be measured
+    against it, not inherited. A too-short timeout produces a flaky red CI that
+    looks like a test failure.
+
+  - **`docs/api/fhir-integration.yaml` gains both routes in this change**, per
+    the contract drift test that already guards it.
+
+  - **Test:** against local HAPI FHIR loaded with Synthea patients — verify all
+    fields populated
+  - **Test:** each row of the coverage table above, named individually — in
+    particular that a tie on `Coverage.order` yields `None` plus the flag rather
+    than an arbitrary pick
+  - **Test:** each of the three FHIR-layer outcomes maps to its own status and
+    error code, and no response body or `OperationOutcome.diagnostics` text
+    reaches the envelope or a log record
+  - **Test:** an unknown `X-MedAuth-Launch-Id` is a 404, and a `session_id`
+    presented in that header is a 404 rather than resolving to anything
+  - **Test:** a 401 from the EHR surfaces as `FHIR_LAUNCH_EXPIRED`, from the
+    single helper rather than from each primitive
+  - **Test:** one audit row per route call with `actor_id` null — not one per
+    FHIR fetch
+  - **Test (gated, nightly):** against the Athenahealth sandbox with real
+    sandbox credentials. Env-gated and off by default, paired with a job in
+    `nightly-live-checks.yml` named for the dependency, per the standing rule in
+    CLAUDE.md — same treatment as TASK-013's CMS check, no new reasoning.
+    **Known blocker:** it is not established that working Athenahealth sandbox
+    credentials exist or that `SMART_REDIRECT_URI` is registered against them,
+    and the developer-program status question (Development versus Preview
+    access) was never resolved. Nothing in the repository evidences a successful
+    launch against Athena. So this test ships gated and unverified, and the
+    first real run may fail for access reasons rather than code reasons. That is
+    stated rather than assumed away; TASK-055 is where Athena is actually
+    validated, and it should not be closed on the strength of this task.
 
 - [ ] **TASK-052b:** Populate encounter payer, plan type and state at SMART launch
   - Prerequisite: **TASK-051** (the SMART launch that produces a session),
@@ -4210,6 +4443,15 @@ logic do not change.
       Decide where it comes from: the patient's address, the practice location,
       or the `Coverage` resource — they disagree for a patient treated out of
       state, and which one the payer's policy follows is the question to answer.
+  - **What counts as "incomplete" is TASK-052's enumerated table, not a
+    judgement made here.** That task fixes, row by row, when `get_coverage()`
+    returns `None`, when it returns a partial `CoverageInfo`, and when
+    `requires_manual_confirmation` is set — including that a tie on
+    `Coverage.order` between several active coverages yields `None` plus the
+    flag rather than an arbitrary primary, and that a missing `member_id` does
+    *not* set it. Map those outcomes straight onto the three columns: a field
+    this task cannot read stays NULL. Do not re-derive the rule, and do not work
+    around it with a local default.
   - **A partial `Coverage` is not an error and must not become a guess.**
     TASK-052 already returns `requires_manual_confirmation: true` rather than
     failing when payer info is incomplete. A column left NULL here is correct
@@ -4238,6 +4480,20 @@ logic do not change.
     published transcript segment produces a real `/policies/query` call. This is
     TASK-024's deferred acceptance criterion and it belongs here, because it
     cannot pass until these columns are populated.
+- [ ] **TASK-052c:** Implement `scripts/setup-dev.sh`
+  - **Why it is its own task.** The stub reads `# Implemented in TASK-052` and
+    CLAUDE.md's tree says "stub until TASK-052", but installing dependencies has
+    nothing to do with base FHIR resource fetching — the reference is an
+    artefact of TASK-001 writing one task number into two stubs. Split out
+    rather than absorbed, so TASK-052 is not carrying unrelated work.
+  - One command that installs all Python and Node dependencies: `uv sync` across
+    the workspace and `npm install` at the root for `apps/web`, `apps/mobile` and
+    `packages/fhir-types/typescript/`.
+  - It is documented in CLAUDE.md's "Start full local stack" as one of three
+    commands a new developer runs, so it should fail with a readable message
+    when `uv` or the pinned Node version is missing rather than a traceback.
+  - **Test:** running it twice in a row succeeds and is a no-op the second time
+
 - [ ] **TASK-053:** SOAP note write-back (base.py)
   - Implement `write_clinical_note(encounter_id, note_text, icd10_codes)` in base.py
   - Creates FHIR DocumentReference resource (LOINC 11488-4 — Consult note)
