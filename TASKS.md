@@ -3981,7 +3981,7 @@ logic do not change.
       `detect_ehr_from_issuer()` with a live `iss`, and TASK-052 is what makes
       the fetches do anything.
 
-- [ ] **TASK-051:** SMART on FHIR OAuth flow (EHR-agnostic)
+- [x] **TASK-051:** SMART on FHIR OAuth flow (EHR-agnostic)
   - Service: `services/fhir-integration`
   - Prerequisite: **TASK-050** (`detect_ehr_from_issuer()`, `get_adapter()` and
     the `EHRType` vocabulary this task is the first live caller of)
@@ -4085,6 +4085,49 @@ logic do not change.
     exhaustiveness check TASK-050 applies to the adapter table
   - **Test:** no credential reaches a log record — assert against caplog for
     `code`, `state`, `code_verifier`, `client_secret` and the access token
+  - Built (`services/fhir-integration`, 135 tests across the service at 96.75%
+    coverage against the 80% gate — 81 of them new here, on top of TASK-050's
+    54). Every acceptance bullet above has a test named for it. Decisions worth
+    knowing before touching this:
+    - **The service's whole HTTP surface arrived with this task**, as the task
+      text anticipated: `main.py`, a `pydantic-settings` config class,
+      `/health`, the `medauth-api-envelope` dependency, and
+      `docs/api/fhir-integration.yaml` guarded by
+      `tests/unit/api/test_openapi_contract.py`.
+    - **`claim_launch()` reads and deletes in one round trip, with `GETDEL`.**
+      That is what makes a `state` single-use under concurrency rather than
+      merely by convention: two callbacks arriving with the same `state` cannot
+      both find a record, so a replayed callback cannot mint a second token.
+    - **`PendingLaunch` holds the `token_endpoint` discovered alongside the
+      authorization endpoint**, rather than rediscovering it at callback time.
+      A callback is a person waiting on a redirect, so the second round trip is
+      latency nobody needs — and rediscovery would allow the two halves of one
+      OAuth conversation to come from two different documents if a vendor
+      rotated endpoints mid-flow.
+    - **A token response without a usable `expires_in` gets a short floor**
+      rather than an unbounded or absent TTL, so `fhir_token:{launch_id}` cannot
+      outlive the credential it holds.
+    - **`LaunchToken` already stores `refresh_token` and the SMART launch
+      context** (`patient_id`, `encounter_id`, `scope`) as opaque identifiers.
+      Nothing reads them yet by design: TASK-051b refreshes against the first,
+      and TASK-052 is the first reader of the rest — which is a PHI access and
+      audits there. Storing them now is what stops TASK-052 needing a second
+      token exchange to learn which patient the EHR launched us for.
+    - **Neither route audits, and that is the rule rather than an omission.**
+      Obtaining a credential is not using it; the first PHI access in this
+      service is TASK-052's resource fetches. Both routes log at INFO instead,
+      with the `iss` as a host and never a full URL.
+    - **Credential-pair selection keys off `EHRType`**, including a `generic`
+      registration for an unrecognised issuer, so no vendor-name string was
+      introduced. An exhaustiveness test means a key cannot be added without
+      credentials behind it.
+    - **Open item, not code:** `SMART_REDIRECT_URI` has *not* been verified
+      against what is registered in the Athenahealth developer portal, and the
+      Development-versus-Preview access question is unresolved. A mismatch fails
+      at the vendor's authorization server before any request reaches MedAuth,
+      so it is invisible from our logs. Nothing in the repository evidences a
+      successful launch against a real vendor. TASK-055 is where that is
+      settled; TASK-052's gated sandbox test carries the same caveat.
 
 - [ ] **TASK-051b:** EHR access token refresh
   - Prerequisite: **TASK-051**
