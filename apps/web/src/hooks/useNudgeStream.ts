@@ -35,12 +35,12 @@
  * either — the frames are PHI and the token is a credential.
  */
 
+import { parseNudge, type Nudge } from '@medauth/nudge-client';
 import { isNearExpiry, sessionSubprotocols, type ApiFailure } from '@medauth/session-client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { sessionsApi, type SessionsApi } from '../api/sessions';
 import { NUDGE_SERVICE_WS_URL } from '../config';
-import { parseNudge, type Nudge } from '../nudges/payload';
 
 /**
  * Why the stream is not delivering nudges.

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { createNudgesApi, type FetchLike } from '../../../src/api/nudges';
+import { createNudgesApi, type FetchLike } from '../src/acknowledge';
 
 const BASE = 'https://rag.example';
 const NUDGE_ID = '0b7f0000-0000-4000-8000-000000000001';

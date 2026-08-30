@@ -13,7 +13,7 @@ members = ["services/*", "packages/*"]
 # uv one, and has no pyproject.toml. Without this exclusion the `packages/*`
 # glob claims it and `uv sync` fails outright for every Python job. Any future
 # TypeScript-only package under packages/ needs a line here too.
-exclude = ["packages/audio-wire", "packages/session-client"]
+exclude = ["packages/audio-wire", "packages/session-client", "packages/nudge-client"]
 
 [tool.uv.sources]
 medauth-api-envelope = { workspace = true }

@@ -167,12 +167,27 @@ assert_key 'session_client ignores the uv lockfile' \
   session_client 'uv.lock' 'false'
 assert_key 'session_client ignores audio-wire' \
   session_client 'packages/audio-wire/src/frame.ts' 'false'
+assert_key 'nudge_client reacts to its own package' \
+  nudge_client 'packages/nudge-client/src/payload.ts' 'true'
+assert_key 'nudge_client reacts to the npm lockfile' \
+  nudge_client 'package-lock.json' 'true'
+assert_key 'nudge_client ignores the uv lockfile' \
+  nudge_client 'uv.lock' 'false'
+assert_key 'nudge_client ignores session-client' \
+  nudge_client 'packages/session-client/src/jwt.ts' 'false'
 # Both apps compile this package's source into themselves, so a change to the
 # only client that may re-mint a session token has to re-run both app suites.
 assert_key 'web reacts to session-client, which ships as source' \
   web 'packages/session-client/src/sessions.ts' 'true'
 assert_key 'mobile reacts to session-client' \
   mobile 'packages/session-client/src/sessions.ts' 'true'
+# Both apps render nudges from this package's parser and dismiss them through
+# its acknowledge client, so a change to it changes what a provider is shown
+# in both apps at once.
+assert_key 'web reacts to nudge-client, which ships as source' \
+  web 'packages/nudge-client/src/payload.ts' 'true'
+assert_key 'mobile reacts to nudge-client' \
+  mobile 'packages/nudge-client/src/payload.ts' 'true'
 
 section 'the conventions the rules are derived from must hold in the repo'
 # The docs/api rule maps a spec to a job by filename alone. If a spec is named

@@ -1,10 +1,11 @@
 /**
  * Fixtures for the nudge overlay's tests.
  *
- * The payload builder produces the wire shape from CLAUDE.md, "The nudge payload
- * — one shape", in snake_case, because that is what crosses the socket. Building
- * it from the app's own `Nudge` type would test the component against the
- * parser's output rather than against what nudge-service actually relays.
+ * The payload builder is `@medauth/nudge-client/testing` and is re-exported here
+ * rather than redefined: it produces the wire shape from CLAUDE.md, "The nudge
+ * payload — one shape", in snake_case, because that is what crosses the socket,
+ * and one copy per app is how two suites come to agree with each other about a
+ * payload neither one receives.
  *
  * The fake socket is deliberately thin: it records what it was constructed with
  * — the URL and the subprotocol list, which is where the credential rides — and
@@ -15,20 +16,7 @@
 
 import { encodeBase64Url } from './token';
 
-/** One nudge as track-b-rag publishes it. */
-export function nudgePayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    type: 'PAYER_RULE_ALERT',
-    nudge_id: '0b7f0000-0000-4000-8000-000000000001',
-    procedure: 'knee MRI',
-    cpt_code: '73721',
-    message: 'Prior authorization required for knee MRI. Still undocumented: six weeks of therapy.',
-    missing_criteria: ['six weeks of conservative therapy'],
-    denial_risk: 'high',
-    haptic: true,
-    ...overrides,
-  };
-}
+export { fallbackNudgePayload, nudgePayload } from '@medauth/nudge-client/testing';
 
 /** A token shaped like a session JWT. No signature is real. */
 export function tokenExpiringAt(nowMs: number, secondsFromNow: number): string {

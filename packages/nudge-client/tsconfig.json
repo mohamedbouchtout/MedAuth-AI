@@ -1,0 +1,34 @@
+{
+  // Mirrors packages/session-client. This package holds the contract both apps
+  // read a nudge through; a loose type here becomes a banner rendered from a
+  // payload nobody checked rather than from the shape CLAUDE.md fixes.
+  //
+  // No `outDir` and no build: consumers import `src/index.ts` directly, so both
+  // Vite (apps/web) and Metro/Jest (apps/mobile) transpile it as source. A dist
+  // build would have to be produced before either app's test run, which is a
+  // build-ordering rule that nothing enforces and everyone forgets.
+  //
+  // `lib` carries DOM only for `fetch`'s types — `RequestInit` and `Response`.
+  // Nothing here touches a document, and the `FetchLike` seam means nothing here
+  // reaches for a global either.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": []
+  },
+  "include": ["src", "tests", "vitest.config.ts"]
+}

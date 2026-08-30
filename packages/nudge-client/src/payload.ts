@@ -19,9 +19,17 @@
  * provider cannot act on an alert that names no procedure. Nothing about the
  * drop is logged, because the payload is PHI.
  *
- * `haptic` is parsed and deliberately unused on web: it is TASK-043's escalation
- * on a device that can buzz, and it is *not* a synonym for high risk. Keeping it
- * in the type stops a later reader concluding the field is optional.
+ * `haptic` is parsed and acted on only by `apps/mobile` (TASK-043); `apps/web`
+ * reads it and ignores it, having nothing to buzz. It is *not* a synonym for
+ * high risk — the emitter withholds it on a high-risk answer it could not
+ * verify — so neither app may re-derive the escalation from `denial_risk`.
+ * Keeping it in the type stops a later reader concluding the field is optional.
+ *
+ * **Why this is a package.** It was `apps/web/src/nudges/payload.ts` until
+ * TASK-043 made `apps/mobile` the second reader of the wire shape. One writer
+ * and several readers is the arrangement CLAUDE.md fixes the payload for in the
+ * first place; two hand-maintained parsers of it would reintroduce exactly the
+ * disagreement that section exists to prevent, in one language.
  */
 
 /** How likely the payer is to deny the order as documented. Drives the banner. */

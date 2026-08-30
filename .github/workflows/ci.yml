@@ -45,6 +45,7 @@ jobs:
       fhir_types: ${{ steps.detect.outputs.fhir_types }}
       audio_wire: ${{ steps.detect.outputs.audio_wire }}
       session_client: ${{ steps.detect.outputs.session_client }}
+      nudge_client: ${{ steps.detect.outputs.nudge_client }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -369,6 +370,28 @@ jobs:
       - name: vitest — 80% coverage gate, same as services/ and packages/
         run: npm run test --workspace @medauth/session-client
 
+  nudge-client:
+    name: Nudge client (packages/nudge-client)
+    needs: changes
+    if: needs.changes.outputs.nudge_client == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          # .nvmrc is the only place the Node version is written — see the
+          # session-client job above for why this is read rather than repeated.
+          node-version-file: .nvmrc
+
+      - run: npm ci
+
+      - name: tsc --noEmit
+        run: npm run typecheck --workspace @medauth/nudge-client
+
+      - name: vitest — 80% coverage gate, same as services/ and packages/
+        run: npm run test --workspace @medauth/nudge-client
+
   # ---------------------------------------------------------------------------
   # Frontends — only when the app actually changed and has a package.json.
   # ---------------------------------------------------------------------------
@@ -445,7 +468,18 @@ jobs:
     # failure the detector rules guard against, one layer up: the job runs, goes
     # red, and nothing stops the pull request.
     needs:
-      [lint, typecheck, test, fhir-types, audio-wire, session-client, web, mobile, detect-logic]
+      [
+        lint,
+        typecheck,
+        test,
+        fhir-types,
+        audio-wire,
+        session-client,
+        nudge-client,
+        web,
+        mobile,
+        detect-logic,
+      ]
     if: always()
     runs-on: ubuntu-latest
     steps:
