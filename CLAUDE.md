@@ -592,6 +592,63 @@ trade: accepting an unauthenticated handshake purely so the rejection reads
 nicely is worse than the client having to distinguish a failed upgrade from a
 normal close.
 
+
+### A SMART launch is not an encounter session (cross-cutting)
+Settled here rather than inside TASK-051 because TASK-052b and TASK-070 both
+depend on the answer, and because a task that settles it implicitly by choosing
+a Redis key name in isolation has decided a repository-wide vocabulary question
+by accident.
+
+**There are two identifiers. They are not the same value, neither is derivable
+from the other, and they have different lifetimes.**
+
+- **`session_id` — the encounter session.** Minted server-side by
+  `POST /sessions/start` in `track-a-clinical` (TASK-006), which is the only
+  issuer. It names one clinical visit. Every Redis channel in the canonical list
+  below, every real-time endpoint, and every session-keyed route is keyed on it.
+  Its lifetime is the visit, and only `POST /sessions/{session_id}/end` ends it.
+- **`launch_id` — the SMART on FHIR OAuth launch.** Minted server-side by
+  `GET /fhir/launch` in `fhir-integration` (TASK-051) when an EHR hands us `iss`
+  and `launch`. It names one authorization flow and the EHR access token that
+  flow produces. Its lifetime is the EHR's access token lifetime, which is the
+  EHR's to decide and not ours.
+
+**Why conflating them would be wrong, concretely.** A SMART launch happens when
+a provider opens MedAuth from a chart; an encounter starts when they tap "start
+visit." The launch therefore precedes the encounter, and at the moment
+`GET /fhir/callback` must store the access token there is no `session_id` in
+existence to key it on. In the other direction, one launch can outlive several
+encounters, and an access token can expire and be renewed in the middle of a
+visit without the visit ending — the same independence already settled above for
+the MedAuth session token, arriving from the EHR's side.
+
+**The Redis keys are therefore `fhir_launch:{state}` and
+`fhir_token:{launch_id}`.** Earlier drafts of this document named them
+`fhir_session:{state_param}` and `fhir_token:{session_id}`, written before
+anyone traced which session was meant. `session_id` in this repository already
+names one thing, and reusing it for the OAuth flow is the collapse the note
+routes reject — "two names for one visit" — arriving from the other direction:
+one name for two things. The word `session` does not appear in the FHIR OAuth
+flow's vocabulary at all, so the collision cannot be reintroduced by a later
+reader reaching for the obvious word.
+
+What follows, for the tasks that depend on this:
+- **TASK-052b is the one place both identifiers are in scope at once.** It runs
+  at SMART launch and writes `insurance_payer`, `insurance_plan_type` and
+  `state` onto an `encounters` row, so it needs an explicit recorded mapping
+  from an encounter to the `launch_id` it was created under. An explicit mapping
+  is the whole point; an assumption that the two values are equal is the failure
+  this section exists to prevent.
+- **TASK-070 holds both at once.** The web app receives `launch_id` from
+  `/fhir/callback` and `session_id` from `/sessions/start`, and sends whichever
+  one the route it is calling is keyed on. A route takes one or the other and
+  says which; nothing accepts "the session id" unqualified.
+- **Neither is derivable from the other, and no route accepts them
+  interchangeably.** A route keyed on `launch_id` given a `session_id` is a 404,
+  not a lookup that happens to miss.
+- **The two never share a key namespace.** `fhir_*` keys belong to the OAuth
+  flow; everything keyed on `{session_id}` in the canonical list belongs to the
+  encounter.
 ### CORS and browser reachability — decided once, in the services (cross-cutting)
 Settled by TASK-041c. `apps/web` is the first browser caller in this repository:
 every route before it was service-to-service, so nothing ever needed to answer a
@@ -760,10 +817,21 @@ rag:{payer}:{plan_type}:{state}:{cpt_code}
                                   nudge_message) — those are recomputed per
                                   call. See the cache note in Key
                                   Architectural Constraints. (TASK-012)
-fhir_session:{state_param}       cache, TTL = OAuth flow timeout (~10 min) —
-                                  transient SMART launch state (TASK-051)
-fhir_token:{session_id}          cache, TTL = token expiry — EHR access token
-                                  + fhir_base_url + ehr_type (TASK-051)
+fhir_launch:{state}              cache, TTL = OAuth flow timeout (~10 min) —
+                                  transient SMART launch state: iss, ehr_type,
+                                  the discovered token endpoint and the PKCE
+                                  code_verifier, held only between the
+                                  authorization redirect and the callback that
+                                  consumes it, which deletes it. A state is
+                                  single-use (TASK-051)
+fhir_token:{launch_id}           cache, TTL = token expiry — EHR access token
+                                  + fhir_base_url + ehr_type (TASK-051).
+                                  Keyed on launch_id, NOT on session_id: a
+                                  SMART launch and an encounter session are two
+                                  different things with two different
+                                  lifetimes, and at callback time no encounter
+                                  exists yet. See "A SMART launch is not an
+                                  encounter session" above.
 ```
 Lowercase, colon-separated, most-specific segment last. If a task needs a new
 Redis key pattern not listed here, add it to this list in the same PR.
@@ -1620,7 +1688,7 @@ slugs and `hipaa_logger.AuditAction`, and the argument is the one those two
 already made: one spelling, defined once, with mypy rejecting an invented value
 at the call site. It matters more here than in an ordinary function signature
 because the value **round-trips through Redis** — TASK-051 writes it into
-`fhir_token:{session_id}` at launch and a later request reads it back to pick an
+`fhir_token:{launch_id}` at launch and a later request reads it back to pick an
 adapter — so a free-form string puts a write side and a read side in two
 different modules with nothing holding them in step. `StrEnum` for the same
 reason `AuditAction` is one: a member compares equal to its own text, so what

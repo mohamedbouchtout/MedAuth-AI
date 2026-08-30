@@ -180,8 +180,8 @@ carrying speech ([ADR-0028](../adr/0028-per-session-subscription.md)).
 |---|---|---|
 | `rag:{payer}:{plan_type}:{state}:{cpt_code}` | cache, 24h | **Payer-policy fields only** |
 | `procedure_seen:{session_id}` | set, 4h | Procedure keys already queried this encounter |
-| `fhir_session:{state_param}` | cache, ~10 min | Transient SMART launch state *(TASK-051)* |
-| `fhir_token:{session_id}` | cache, token expiry | EHR access token, FHIR base URL, EHR type *(TASK-051)* |
+| `fhir_launch:{state}` | cache, ~10 min | Transient SMART launch state: iss, ehr_type, token endpoint, PKCE code_verifier. Single-use *(TASK-051)* |
+| `fhir_token:{launch_id}` | cache, token expiry | EHR access token, FHIR base URL, EHR type *(TASK-051)* |
 
 **`rag:` holds four fields and only four:** `requires_auth`, `auth_criteria`,
 `step_therapy_required`, `step_therapy_details`. Never `missing_criteria`,

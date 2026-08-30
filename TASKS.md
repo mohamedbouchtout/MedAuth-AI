@@ -3918,7 +3918,7 @@ logic do not change.
   - Create `src/adapters/factory.py`:
     - `EHRType` — a `StrEnum` of the vendor keys, not a bare `str`. It
       round-trips through Redis (TASK-051 stores it in
-      `fhir_token:{session_id}`; a later request reads it back to pick an
+      `fhir_token:{launch_id}`; a later request reads it back to pick an
       adapter), so the write and read sides need one definition between them.
       Third instance of the pattern `payer_vocab` and `hipaa_logger.AuditAction`
       already established
@@ -3983,19 +3983,132 @@ logic do not change.
 
 - [ ] **TASK-051:** SMART on FHIR OAuth flow (EHR-agnostic)
   - Service: `services/fhir-integration`
+  - Prerequisite: **TASK-050** (`detect_ehr_from_issuer()`, `get_adapter()` and
+    the `EHRType` vocabulary this task is the first live caller of)
+  - **This task creates the service's HTTP surface.** `fhir-integration` holds
+    only the adapter layer today — no `main.py`, no config module, no `/health`,
+    no `docs/api/fhir-integration.yaml`. All four land here, on the same terms
+    every other service already follows: `packages/api-envelope` for the
+    envelope and FastAPI error handlers (add the dependency — it is not in the
+    service's `pyproject.toml` yet), a `pydantic-settings` config class, and the
+    committed OpenAPI spec that `tests/unit/api/test_openapi_contract.py` guards
+    against drift. Per the CI rule in CLAUDE.md, `docs/api/fhir-integration.yaml`
+    is what selects this service's job when the spec is edited alone.
+  - **The launch flow's identifier is `launch_id`, never `session_id`.** A SMART
+    launch and an encounter session are two different things with two different
+    lifetimes, and this task does not get to decide that by picking a Redis key
+    name — it is settled in CLAUDE.md, "A SMART launch is not an encounter
+    session", which TASK-052b and TASK-070 also cite. Redis keys are
+    `fhir_launch:{state}` and `fhir_token:{launch_id}`.
   - `GET /fhir/launch` — receives `launch` + `iss` params from EHR
     - Calls `detect_ehr_from_issuer(iss)` to identify vendor
     - Fetches `{iss}/.well-known/smart-configuration` to discover auth + token endpoints
-    - Stores iss + ehr_type in Redis session keyed by state param
-    - Redirects to EHR's authorization_endpoint
+    - Generates `state` and `launch_id` server-side (UUIDs, per the UUID
+      convention — never client-supplied, since `state` is the CSRF defence)
+    - Generates a PKCE `code_verifier` and stores it, with `iss`, `ehr_type` and
+      `launch_id`, under `fhir_launch:{state}`
+    - Redirects to the EHR's `authorization_endpoint`, carrying
+      `code_challenge` + `code_challenge_method=S256`, `aud={fhir_base_url}`,
+      `state`, `client_id`, `redirect_uri`, `scope`, and `launch` when the EHR
+      supplied one
   - `GET /fhir/callback` — receives auth code, exchanges for access token
-    - Retrieves session from Redis using state param
-    - POSTs to EHR's token_endpoint to exchange code
-    - Stores access token + fhir_base_url + ehr_type in Redis (TTL = token expiry)
-    - Returns session_id to client for subsequent API calls
+    - Retrieves the launch record from `fhir_launch:{state}`
+    - POSTs to the EHR's `token_endpoint` to exchange the code, sending the
+      `code_verifier` held for this `state`
+    - Stores access token + `fhir_base_url` + `ehr_type` under
+      `fhir_token:{launch_id}` (TTL = token expiry)
+    - Deletes `fhir_launch:{state}` — a `state` is single-use, and leaving it
+      readable past its callback leaves a replayable CSRF token alive for the
+      rest of its TTL
+    - Returns `launch_id` to the client for subsequent API calls
   - Supports both EHR launch (EHR opens MedAuth in iframe) and standalone launch
+  - **PKCE is required, not optional.** CLAUDE.md pins SMART on FHIR 2.0, which
+    requires PKCE of every client, confidential ones included. It was missing
+    from this task's earlier text; that was an omission of a spec requirement,
+    not a decision to leave it out. `S256` only — never `plain`.
+  - **`aud` is required for the same reason.** A SMART authorization request
+    carries `aud` set to the FHIR base URL the client intends to use, and a
+    conformant server rejects a request without it. Also an omission rather than
+    a choice.
+  - **Credential-pair selection keys off `EHRType`, and introduces no second
+    vendor identifier.** `.env.example` holds five `*_CLIENT_ID` /
+    `*_CLIENT_SECRET` pairs; the flow selects the pair from the `ehr_type`
+    already resolved by `detect_ehr_from_issuer()`. Do not add a vendor-name
+    string, a config dict keyed on a raw `str`, or a per-vendor branch in a
+    route — that would be a fourth spelling of an identity this repository has
+    already made a closed vocabulary three times.
+    - **Verify `SMART_REDIRECT_URI` against what is actually registered in each
+      vendor's developer portal**, starting with the Athenahealth app already
+      set up. A mismatch fails at the vendor's authorization server, before any
+      request reaches MedAuth, so there is nothing in our logs to diagnose it
+      from — this is the one setup error in the flow that is invisible from our
+      side, which is why it is checked deliberately rather than discovered.
+    - `client_secret` is a credential: never a log line, an exception message,
+      or a `repr`, exactly as TASK-050 requires of `access_token`
+  - **Neither route touches PHI, so neither audits.** Obtaining a credential is
+    not using it: the first PHI access in this service is TASK-052's resource
+    fetches, and that is where `audit_log()` starts. Judged by the same test as
+    TASK-024's `resolve_query_parameters()` SELECT. Both routes log at INFO via
+    `logging.getLogger(__name__)` per Known Constraints #6 — the `iss` host
+    only, never the full URL with its query string, and never `launch`,
+    `code`, `state`, `code_verifier`, or the token.
+  - **Discovery is `.well-known/smart-configuration` only — the older
+    CapabilityStatement `oauth-uris` extension is explicitly out of scope for
+    v1.** A server that offers only the older pattern fails with a clear error
+    naming the missing document and the `iss` host, not a `KeyError` or a bare
+    502 — a vendor sandbox that cannot be launched against should say why in one
+    line. Revisit only if an EHR actually in the priority order turns out to
+    require it; do not build the fallback speculatively.
+  - **Access token refresh is deliberately not in this task — it is TASK-051b.**
+    Stating it rather than leaving it absent, because the repository already has
+    a worked precedent for this exact shape on the MedAuth-JWT side (TASK-006b's
+    re-mint endpoint, which exists because a visit outlasts its token) and the
+    EHR's token has the same property with a lifetime we do not control. What
+    this task does: store `refresh_token` and `expires_in` alongside the access
+    token when the EHR returns them, so the follow-up has something to refresh
+    and no second token exchange is needed to get it. What it does not do: any
+    renewal path. Until TASK-051b lands, an expired EHR token means the launch
+    must be repeated, and that is a stated limitation rather than a silent one.
   - **Test:** mock authorization server returning code + token, verify full flow
   - **Test:** verify state mismatch returns 400 (CSRF protection)
+  - **Test:** the `code_challenge` on the authorization redirect is the S256
+    hash of the `code_verifier` later sent to the token endpoint, and the
+    verifier never appears in the redirect
+  - **Test:** the authorization redirect carries `aud` equal to the FHIR base
+    URL for the detected vendor
+  - **Test:** a `state` is single-use — replaying a callback with a `state`
+    already consumed returns 400 rather than minting a second token record
+  - **Test:** an `iss` serving no `.well-known/smart-configuration` produces the
+    named error, not an unhandled exception
+  - **Test:** each `EHRType` member selects that vendor's client-credential
+    pair, so a key cannot be added without credentials behind it — the same
+    exhaustiveness check TASK-050 applies to the adapter table
+  - **Test:** no credential reaches a log record — assert against caplog for
+    `code`, `state`, `code_verifier`, `client_secret` and the access token
+
+- [ ] **TASK-051b:** EHR access token refresh
+  - Prerequisite: **TASK-051**
+  - Service: `services/fhir-integration`
+  - **Why this is its own task.** TASK-051 stores `refresh_token` and
+    `expires_in` but implements no renewal, so today an EHR access token
+    expiring mid-visit means repeating the SMART launch. That is the same
+    problem TASK-006b solved for the MedAuth session token — a real encounter
+    outlasts a short-lived credential — with the difference that this token's
+    lifetime belongs to the EHR and cannot be tuned from our side.
+  - Refresh against the vendor's `token_endpoint` using the stored
+    `refresh_token`, rewriting `fhir_token:{launch_id}` with the new access
+    token and TTL. `launch_id` does not change: it names the launch, not the
+    token, and a client holding it must not have to re-learn it.
+  - Decide and write down what happens when the refresh itself fails — a
+    revoked grant is not the same as a network error, and only one of them
+    should end the launch.
+  - Note what does **not** change: refreshing an EHR token neither extends nor
+    ends an encounter. Token lifetime and visit lifetime are independent, the
+    same separation CLAUDE.md already draws for the MedAuth session token.
+  - **Test:** an expired access token is refreshed transparently and the
+    `launch_id` is unchanged
+  - **Test:** a rejected `refresh_token` surfaces as a launch that must be
+    repeated, with a distinct error from a transient network failure
 
 - [ ] **TASK-052:** Base FHIR resource fetching (implements base.py methods)
   - Service: `services/fhir-integration`
@@ -4059,6 +4172,11 @@ logic do not change.
     failing when payer info is incomplete. A column left NULL here is correct
     and the resolution seam already handles it: it names exactly the fields
     still absent. Filling one in with a default would be worse than leaving it.
+  - **The encounter-to-launch mapping is explicit, never an equality.** This is
+    the one task where both identifiers are in scope at once, so it records
+    which `launch_id` an encounter was created under rather than assuming the
+    two values are the same. Settled in CLAUDE.md under "A SMART launch is not
+    an encounter session"; do not re-derive it here.
   - **Before closing this task, the CPT table must be clinically reviewed.**
     TASK-024's `procedure_codes.py` was written from general knowledge, not from
     a licensed AMA CPT distribution, and no code in it can reach a provider
@@ -4264,6 +4382,12 @@ logic do not change.
     **TASK-006b has shipped** `POST /sessions/{session_id}/token` — refresh
     through it, proactively before opening a socket with a token near `exp` and
     reactively on `AUTH_REJECTED`. Only a 409 from it means the visit is over.
+  - **This app holds two identifiers at once and must not conflate them.**
+    `launch_id` comes from `/fhir/callback` (TASK-051) and names the SMART
+    launch; `session_id` comes from `POST /sessions/start` and names the visit.
+    Settled in CLAUDE.md under "A SMART launch is not an encounter session" —
+    do not re-derive it here. Send whichever one the route being called is
+    keyed on, and never store them in one field named for either.
   - **Test:** component tests for start/active/end state transitions with mocked APIs
 
 - [ ] **TASK-071:** Note review + edit UI
