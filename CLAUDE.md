@@ -44,7 +44,7 @@ medauth-ai/
 │   └── kubernetes/       # K8s manifests + Helm chart
 ├── scripts/
 │   ├── seed-synthea.sh   # Load synthetic patients into local HAPI FHIR (stub until TASK-052)
-│   └── setup-dev.sh      # One-command dev environment setup (stub until TASK-052)
+│   └── setup-dev.sh      # One-command dev environment setup (stub until TASK-052c)
 └── docker-compose.yml    # Full local stack — postgres, redis, qdrant, hapi-fhir, crd
 ```
 
@@ -1497,6 +1497,52 @@ disagreeing.
   `audit_log(..., conn=...)`, exactly as `track_a_clinical.audit` already does
   for routes. A note that exists with no audit row, and an audit row for a note
   that rolled back, are both worse than the write failing outright.
+
+### Auditing a PHI read that happens before any encounter exists (cross-cutting)
+The section above answers "who is the actor when no request triggered the work"
+by reading `encounters.provider_id`. Phase 5 breaks the assumption underneath
+that answer: `fhir-integration` reads a patient, their coverage and their
+conditions from the EHR at SMART launch (TASK-052), and at that moment **no
+`encounters` row exists at all**. The launch precedes the visit — settled in "A
+SMART launch is not an encounter session" above — so there is no provider column
+to read the actor from. Settled here once, because TASK-052, TASK-025b's patient
+search and TASK-053's note write-back are all the same shape.
+
+- **`actor_id` is `None`, and that is the honest answer rather than a gap.**
+  The column is nullable, and a null actor truthfully records that the system
+  read this patient's data under a launch whose provider identity this service
+  had not captured. This is the same rule the section above already states in
+  its own words: *never mint a service-account UUID to fill the field, because a
+  fabricated identifier in an audit trail is worse than an honest null.* A
+  service-account UUID would be worse here than in a Redis consumer, because it
+  would look like a real actor in the one table an auditor reads to answer "who
+  accessed patient X".
+- **The eventual correct source is the SMART `fhirUser` claim.** SMART on FHIR
+  2.0 identifies the authorizing user through the `fhirUser` claim in the
+  `id_token` returned by the token exchange — a reference to a `Practitioner`
+  resource, which is precisely the provider whose access is being recorded. That
+  is a real identity asserted by the EHR, not one we invented, so it is what
+  `actor_id` should eventually carry.
+- **Capturing `fhirUser` is TASK-051c, an explicit follow-up, and is *not* in
+  TASK-052's scope.** Stated as a boundary rather than left ambiguous. TASK-051
+  requests the `openid fhirUser` scope already, but stores nothing from the
+  `id_token`: `LaunchToken` holds the access token, the refresh token and the
+  opaque launch context, and no code in this repository parses an `id_token` or
+  validates its signature. Doing that properly means fetching the EHR's JWKS,
+  verifying the token against it, and resolving a `Practitioner` reference —
+  which is a token-validation path of its own, not a field to bolt onto a
+  resource fetch. TASK-052 would be smuggling in an authentication mechanism
+  under cover of implementing four GETs, which is exactly what Known Constraints
+  #8 forbids.
+- **So `actor_id=None` is provisional and says so at the call site.** Every
+  `audit_log()` call in `fhir-integration` names TASK-051c in a comment, so a
+  later reader sees a deferred source rather than an oversight. The rows written
+  before it lands are permanently actor-less; nothing backfills them, because
+  inventing the actor afterwards is the same fabrication one step removed.
+- **What does not change:** the read still audits. Absent provider identity is a
+  reason the trail matters more, not less — the same argument the note routes
+  and `PATCH /nudges/{nudge_id}/acknowledge` already make for shipping without a
+  credential in v1.
 
 **The action vocabulary is `hipaa_logger.AuditAction`, and it is the only
 definition.** Services import members from it; none declares its own action
