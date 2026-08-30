@@ -3897,7 +3897,7 @@ against the Athenahealth sandbox (TASK-051 through TASK-053). Each subsequent
 EHR only requires adding a subclass and any overrides — the routes and core
 logic do not change.
 
-- [ ] **TASK-050:** EHR adapter layer scaffold
+- [x] **TASK-050:** EHR adapter layer scaffold
   - Service: `services/fhir-integration` (Python 3.12 + FastAPI — same as all other services)
   - Create `src/adapters/base.py` — `EHRAdapter`, **concrete and instantiable**,
     with every core FHIR method as a typed stub. See CLAUDE.md's "Adapter
@@ -3951,6 +3951,35 @@ logic do not change.
     and `get_adapter()` on it yields a usable `EHRAdapter` rather than raising
   - **Test:** `get_adapter()` returns the right subclass for every member of
     `EHRType`, so no key can be added without a class behind it
+  - Built (`services/fhir-integration`, 54 tests at 100% coverage against the
+    80% gate — the service's first tests, so it no longer relies on CI's
+    "no tests collected" escape hatch). Decisions worth knowing before touching
+    this:
+    - **The stubs needed return types, so the normalized shapes exist now.**
+      `PatientInfo`, `CoverageInfo`, `PatientContext` and `PriorAuthSubmission`
+      live in `src/adapters/models.py`. Their names and fields come from what
+      TASK-052 and TASK-054 say they return rather than from anything invented
+      here; TASK-052 populates them and may extend them. They are deliberately
+      not FHIR resources — the point of the layer is that nothing above it knows
+      which vendor's `Coverage` put the payer where.
+    - **`EHRType.GENERIC` is a member of the vocabulary, not a `None`.** An
+      unrecognised issuer has a key like every other EHR, so `get_adapter()`
+      needs no special case and no caller has to handle an absent type.
+    - **`get_adapter()` coerces a plain string at runtime**, the same backstop
+      `AuditAction` has and for a sharper reason: a `StrEnum` member does not
+      hash equal to its own text, so the Redis round-trip TASK-051 introduces
+      would miss the adapter table without it. A test covers that specific
+      caller.
+    - **A test asserts the case list covers every `EHRType` member.** Adding a
+      key and forgetting the class behind it would otherwise be green here and a
+      `KeyError` at a real SMART launch.
+    - **The vendor subclasses are not exported from `adapters/__init__.py`.** A
+      route that can name `EpicAdapter` is a route that can hardcode an EHR.
+    - **`__repr__` omits the access token, and the test covers every subclass**,
+      so one that adds its own `__repr__` has to keep that true.
+    - Nothing is verifiable against a real EHR yet: TASK-051 is what first calls
+      `detect_ehr_from_issuer()` with a live `iss`, and TASK-052 is what makes
+      the fetches do anything.
 
 - [ ] **TASK-051:** SMART on FHIR OAuth flow (EHR-agnostic)
   - Service: `services/fhir-integration`
