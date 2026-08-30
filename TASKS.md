@@ -3633,7 +3633,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
       for one yet. The browser rendering and the dismiss are covered by the suite
       against a fake socket and a fake client, not against a live service.
 
-- [ ] **TASK-043:** Haptic nudge (mobile)
+- [x] **TASK-043:** Haptic nudge (mobile)
   - App: `apps/mobile`
   - On nudge received with `haptic: true`: call `Haptics.notificationAsync()`.
     Trigger on that field alone — never on `denial_risk == "high"`. The emitter
@@ -3726,6 +3726,43 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **Test:** click dismiss, verify `PATCH /nudges/{nudge_id}/acknowledge` is
     called with the correct `nudge_id`, body `{"acknowledged": true}`, and no
     credential attached
+  - Built (apps/mobile: 132 tests, 92.4% coverage against the 80% gate;
+    packages/nudge-client: 21 tests, 93.0%; apps/web still green at 51 after the
+    extraction). Decisions worth knowing before touching this:
+    - **`@medauth/nudge-client` is new, and this task is what forced it.** The
+      payload parser and the acknowledge client were `apps/web`'s until this app
+      became the second reader of one and the second caller of the other — the
+      trigger this repository extracts on rather than copies. The stream hook
+      deliberately stayed per-app: the two apps carry the token differently, and
+      that difference is a platform constraint rather than duplication.
+    - **The wire-shape fixture ships from the package too**, as a `/testing`
+      subpath. It is a second statement of the payload contract, and three
+      copies of it — package, web, mobile — would drift exactly as the parsers
+      would have, producing green tests for a payload nobody sends.
+    - **`shouldBuzz` is one line in a module of its own.** That is the only place
+      the escalation is decided, so it is the only place a later change could
+      reintroduce "high always buzzes". Its test pins both directions — that
+      `haptic` decides and that `denial_risk` does not — because a single
+      happy-path test would pass just as happily against
+      `haptic || denialRisk === 'high'`.
+    - **The mount is awaited inside `act` in every test.** The proactive re-mint
+      resolves during mount, and a bare `render` leaves that promise settling
+      outside `act` — which React warns about and which a later assertion can
+      race. The socket is also waited for rather than assumed: passive effects
+      flush after `render` returns, so a test reaching for it immediately finds
+      none.
+    - **`.env.example` needed a rewrite, not an addition.** It explained that
+      this app needed only one HTTP origin, which the dismiss button falsified.
+      Both new origins now have config exports and tests asserting they are not
+      the same value as their neighbours — the check the task added as a standing
+      rule, since a variable in `.env.example` is evidence of intent and not of
+      wiring.
+    - **Not verifiable end to end until TASK-052b**, the same caveat every task
+      on this path carries: nothing publishes to `nudges:{session_id}` for a real
+      encounter yet. Verified against a fake socket and fake clients in the
+      suite; no live service was exercised from this app, and no device was
+      buzzed — `expo-haptics` is behind the injected `HapticsLike` seam in every
+      test.
 
 - [ ] **TASK-044:** Keyword-only nudge for procedures that resolve no CPT code
   - Prerequisite: TASK-024 (the resolver and its four refusal reasons),
