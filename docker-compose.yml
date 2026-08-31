@@ -92,6 +92,24 @@ services:
       HAPI_FHIR_ALLOW_MULTIPLE_DELETE: "true"
     ports:
       - "8080:8080"
+    # No healthcheck, and this is a property of the image rather than an
+    # oversight — verified in TASK-052 by running it. hapiproject/hapi is
+    # distroless: it has no /bin/sh, no wget and no curl, so both CMD-SHELL and
+    # CMD forms fail with
+    #
+    #   OCI runtime exec failed: exec: "/bin/sh": stat /bin/sh: no such file
+    #
+    # on every probe. A healthcheck that can never pass is worse than none: it
+    # leaves the container permanently "starting", so `docker compose up --wait`
+    # blocks until its timeout and then fails, on a server that has been serving
+    # the whole time.
+    #
+    # Readiness is therefore waited for from outside, against the published
+    # port: scripts/seed-synthea.sh checks GET /fhir/metadata before it seeds,
+    # and CI polls the same endpoint before running the tests. Note this means
+    # `--wait` tells you nothing about this service — it returns as soon as the
+    # container is running, which for a Spring Boot application building its
+    # schema is well before it answers.
 
   # Simulated payer for the Da Vinci CRD tier (TASK-015). HL7's own build of the
   # Coverage Requirements Discovery Reference Implementation, with the

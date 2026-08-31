@@ -209,15 +209,47 @@ jobs:
           restore-keys: hf-BAAI-bge-large-en-v1.5-
 
       # The same stack a developer gets from `docker compose up`, with the same
-      # images and the same healthchecks. `--wait` blocks until all three
-      # report healthy, which is what the service containers' --health-cmd
-      # options used to do. hapi-fhir is deliberately not started: nothing
-      # tests against it yet and it is slow to boot.
+      # images and the same healthchecks. `--wait` blocks until every named
+      # service reports healthy, which is what the service containers'
+      # --health-cmd options used to do.
+      #
       - name: Start backing services
         env:
           POSTGRES_DB: medauth_test
           POSTGRES_PASSWORD: medauth_ci
         run: docker compose up -d --wait postgres redis qdrant
+
+      # Started only for the member that tests against it. It is a Spring Boot
+      # application that builds a schema on first start, so it costs a couple of
+      # minutes and every other job would pay that for nothing.
+      #
+      # `--wait` is deliberately NOT used here, and readiness is polled from
+      # outside instead. The image is distroless — no /bin/sh, no wget, no curl
+      # — so it can carry no healthcheck (see docker-compose.yml), and without
+      # one `--wait` returns the moment the container is *running*, which is
+      # long before this server answers. Polling the CapabilityStatement is what
+      # actually tells us it is up, and it fails loudly with logs rather than
+      # letting the tests race the boot.
+      - name: Start HAPI FHIR
+        if: matrix.member == 'services/fhir-integration'
+        env:
+          POSTGRES_DB: medauth_test
+          POSTGRES_PASSWORD: medauth_ci
+        run: docker compose up -d hapi-fhir
+
+      - name: Wait for HAPI FHIR to serve
+        if: matrix.member == 'services/fhir-integration'
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -sSf --max-time 5 http://localhost:8080/fhir/metadata >/dev/null 2>&1; then
+              echo "HAPI FHIR answered after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "HAPI FHIR did not answer within 300s" >&2
+          docker compose logs hapi-fhir
+          exit 1
 
       - run: uv sync --all-packages
 
@@ -232,6 +264,14 @@ jobs:
       - name: pytest ${{ matrix.member }}
         working-directory: ${{ matrix.member }}
         shell: bash
+        env:
+          # fhir-integration's HAPI tests skip when no server answers, so a
+          # laptop without the stack up still runs a clean suite. In CI the
+          # server is started above for that member, so a skip would mean the
+          # tests quietly stopped running — this turns that into a failure
+          # instead. Same reasoning as pairing an env-gated test with a
+          # scheduled run.
+          REQUIRE_HAPI_TESTS: ${{ matrix.member == 'services/fhir-integration' && '1' || '0' }}
         run: |
           set -uo pipefail
           # `shell: bash` runs with -e already set by the runner, so the exit
