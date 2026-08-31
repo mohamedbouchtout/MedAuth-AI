@@ -19,6 +19,14 @@ class StartSessionRequest(BaseModel):
     "Session Lifecycle & JWT Issuance". No ``session_id`` field exists: the
     server generates it, and accepting a client-supplied one would let a caller
     collide with or impersonate another encounter's session.
+
+    **``launch_id`` is accepted and ``session_id`` is not, and that asymmetry is
+    the point.** A ``launch_id`` names a SMART launch the client genuinely holds
+    — ``GET /fhir/callback`` handed it one — and it is what lets TASK-052b read
+    the encounter's payer and site of care from the EHR. A ``session_id`` names
+    this visit, which does not exist until this call answers. The two are
+    different identifiers with different lifetimes and neither is derivable from
+    the other; see CLAUDE.md, "A SMART launch is not an encounter session".
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -26,6 +34,11 @@ class StartSessionRequest(BaseModel):
     patient_id: str = Field(min_length=1, max_length=100)
     provider_id: uuid.UUID
     ehr_encounter_id: str | None = Field(default=None, max_length=100)
+    #: The SMART launch this visit was started from, when there was one. Both
+    #: this and ``ehr_encounter_id`` are needed to read the payer columns: the
+    #: launch supplies the EHR credential and the encounter id says which visit
+    #: to ask about. Either alone leaves the columns NULL.
+    launch_id: str | None = Field(default=None, max_length=64)
 
 
 class StartSessionData(BaseModel):

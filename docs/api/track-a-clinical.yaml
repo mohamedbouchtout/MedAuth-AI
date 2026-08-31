@@ -429,6 +429,23 @@ components:
           default: null
           description: The EHR's own Encounter resource id, when launched from one.
           examples: ['athena-enc-9001']
+        launch_id:
+          type: [string, 'null']
+          maxLength: 64
+          default: null
+          description: >-
+            The SMART launch this visit was started from, as returned by
+            `GET /fhir/callback` on fhir-integration. Supplied together with
+            `ehr_encounter_id`, it lets the service read the encounter's payer,
+            plan type and site-of-care state from the EHR and record them on the
+            encounter (TASK-052b); either one alone leaves those columns null,
+            and so does a lookup that fails — the session still starts.
+
+            Not a `session_id`, and not interchangeable with one. A SMART launch
+            and an encounter session are different identifiers with different
+            lifetimes, and the session this call is about does not exist until
+            it answers.
+          examples: ['3f2a7c18-0d64-4a51-9f0e-8b1c2d3e4f50']
 
     StartSessionData:
       type: object

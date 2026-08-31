@@ -49,6 +49,7 @@ from track_a_clinical.api.schemas import (
     StartSessionRequest,
 )
 from track_a_clinical.config import get_settings
+from track_a_clinical.coverage_context import fetch_coverage_context
 from track_a_clinical.models import (
     ENCOUNTER_STATUS_ACTIVE,
     ENCOUNTER_STATUS_COMPLETED,
@@ -177,12 +178,33 @@ async def start_session(
         settings=get_settings(),
     )
 
+    # Read before the row is written, so the encounter is inserted once with
+    # whatever the EHR could tell us rather than being updated a moment later.
+    # A failure here returns None and the three columns stay NULL — see
+    # ``coverage_context`` for why that does not fail the session.
+    context = None
+    if body.launch_id and body.ehr_encounter_id:
+        context = await fetch_coverage_context(
+            launch_id=body.launch_id,
+            ehr_encounter_id=body.ehr_encounter_id,
+        )
+
     encounter = Encounter(
         session_id=session_id,
         patient_fhir_id=body.patient_id,
         provider_id=body.provider_id,
         ehr_encounter_id=body.ehr_encounter_id,
+        launch_id=body.launch_id,
         status=ENCOUNTER_STATUS_ACTIVE,
+        # Straight off TASK-052's enumerated rule, which ``fhir-integration``
+        # applies — never re-derived here, and never defaulted. The payer keeps
+        # its own spelling; ``/policies/query`` is the single site that slugs it.
+        insurance_payer=context.coverage.payer if context and context.coverage else None,
+        insurance_plan_type=context.coverage.plan_type if context and context.coverage else None,
+        insurance_member_id=context.coverage.member_id if context and context.coverage else None,
+        # The site of care, already USPS-normalised upstream. Never the
+        # patient's residence — see that service's ``site_of_care`` module.
+        state=context.state if context else None,
     )
     session.add(encounter)
     # Flush rather than commit: the primary key is server-generated and the audit
