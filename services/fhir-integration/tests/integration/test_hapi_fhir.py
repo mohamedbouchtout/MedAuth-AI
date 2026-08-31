@@ -1,4 +1,4 @@
-"""The adapter against a real HAPI FHIR R4 server. TASK-052.
+"""The adapter against a real HAPI FHIR R4 server. TASK-052, TASK-052b.
 
 **Why this exists alongside the unit tests.** Those drive every branch against a
 hand-written transport, which is the only way to produce a 200
@@ -8,15 +8,23 @@ search semantics, the real shape of a searchset ``Bundle``, real element casing,
 and a real 404. That is what a live server is for, and it is the reason CLAUDE.md
 keeps parsers honest against real upstream output rather than only fixtures.
 
-**These tests create their own resources rather than reading Synthea's.**
-TASK-052 asks for a check against a HAPI server loaded with Synthea patients, and
-``scripts/seed-synthea.sh`` is that path — but seeding downloads a ~150MB JAR and
-generates a population, which is minutes per run and needs a JDK. Paying that on
-every pull request to assert field mapping would be a poor trade, so the split
-is: this test posts the handful of resources it needs to a real server and reads
-them back through the adapter, and the fuller Synthea check stays a developer and
-nightly path. What is verified here is the part that can silently rot — the
-mapping — against the server that will actually answer it.
+**These tests create their own resources rather than reading Synthea's, and
+for TASK-052b they have to.** TASK-052 asked for a check against a HAPI server
+loaded with Synthea patients, and ``scripts/seed-synthea.sh`` is that path — but
+seeding downloads a ~150MB JAR and generates a population, which is minutes per
+run and needs a JDK. Paying that on every pull request to assert field mapping
+would be a poor trade.
+
+For the payer columns the reason is stronger than cost: **Synthea emits no
+searchable ``Coverage`` resource at all.** It builds one and calls
+``eob.addContained(coverage)``, under an open ``// TODO: Make Coverage separate
+resources for US Core 6 & 7?`` in ``FhirR4.java``; across 40 real sample bundles
+containing 2,348 encounters the count of standalone ``Coverage`` resources is
+zero. So ``Coverage?patient=`` against a Synthea-seeded server comes back empty
+and a Synthea patient can only ever exercise the NULL path. Synthea also
+generates a single-state population, so it cannot exercise the out-of-state
+disagreement case either. Both need hand-posted resources, which is what the
+fixture below builds.
 
 **Skipping is not silent.** With ``REQUIRE_HAPI_TESTS=1`` set, an unreachable
 server is a failure rather than a skip. CI sets it, because a test that quietly
@@ -27,6 +35,7 @@ in CLAUDE.md.
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 
@@ -35,6 +44,7 @@ import pytest
 
 from src.adapters.base import EHRAdapter
 from src.adapters.errors import FHIRResourceNotFound
+from src.adapters.site_of_care import organization_state
 
 HAPI_BASE_URL = os.environ.get("HAPI_FHIR_BASE_URL", "http://localhost:8080/fhir")
 REQUIRE_HAPI = os.environ.get("REQUIRE_HAPI_TESTS") == "1"
@@ -80,6 +90,11 @@ def seeded(hapi: str) -> dict[str, str]:
                 "name": [{"use": "official", "family": "Testpatient", "given": ["Ada", "Marie"]}],
                 "gender": "female",
                 "birthDate": "1971-11-02",
+                # Deliberately a different state from the site of care below, so
+                # the disagreement path runs against real resources rather than
+                # only against a fixture. A residence is never the cache key's
+                # state; see src/adapters/site_of_care.py.
+                "address": [{"use": "home", "city": "Nashua", "state": "NH"}],
             },
             headers={"Content-Type": "application/fhir+json"},
         )
@@ -122,7 +137,54 @@ def seeded(hapi: str) -> dict[str, str]:
             )
             condition.raise_for_status()
 
+        organization = client.post(
+            "/Organization",
+            json={
+                "resourceType": "Organization",
+                "active": True,
+                "name": f"Testclinic {marker}",
+                # A billing address first, in a third state, so the real server
+                # proves the eligibility rule rather than the fixture doing it.
+                "address": [
+                    {"use": "billing", "city": "Wilmington", "state": "DE"},
+                    {"city": "Leominster", "state": "MA"},
+                ],
+            },
+            headers={"Content-Type": "application/fhir+json"},
+        )
+        organization.raise_for_status()
+        organization_id = organization.json()["id"]
+
+        location = client.post(
+            "/Location",
+            json={
+                "resourceType": "Location",
+                "status": "active",
+                "name": f"Testclinic room {marker}",
+                "address": {"city": "Leominster", "state": "MA"},
+                "managingOrganization": {"reference": f"Organization/{organization_id}"},
+            },
+            headers={"Content-Type": "application/fhir+json"},
+        )
+        location.raise_for_status()
+        location_id = location.json()["id"]
+
         encounter = client.post(
+            "/Encounter",
+            json={
+                "resourceType": "Encounter",
+                "status": "finished",
+                "subject": {"reference": f"Patient/{patient_id}"},
+                "location": [{"location": {"reference": f"Location/{location_id}"}}],
+                "serviceProvider": {"reference": f"Organization/{organization_id}"},
+            },
+            headers={"Content-Type": "application/fhir+json"},
+        )
+        encounter.raise_for_status()
+
+        # An encounter with no site of care at all, for the NULL case. A real
+        # server is what proves the adapter answers None rather than raising.
+        placeless = client.post(
             "/Encounter",
             json={
                 "resourceType": "Encounter",
@@ -131,9 +193,15 @@ def seeded(hapi: str) -> dict[str, str]:
             },
             headers={"Content-Type": "application/fhir+json"},
         )
-        encounter.raise_for_status()
+        placeless.raise_for_status()
 
-    return {"patient_id": patient_id, "encounter_id": encounter.json()["id"]}
+    return {
+        "patient_id": patient_id,
+        "encounter_id": encounter.json()["id"],
+        "placeless_encounter_id": placeless.json()["id"],
+        "location_id": location_id,
+        "organization_id": organization_id,
+    }
 
 
 @pytest.fixture
@@ -157,6 +225,8 @@ async def test_the_patient_maps_from_a_real_server(
     assert patient.given_names == ["Ada", "Marie"]
     assert patient.birth_date == "1971-11-02"
     assert patient.gender == "female"
+    # The residence, for the disagreement check only — never the cache key.
+    assert patient.address_state == "NH"
 
 
 async def test_the_coverage_maps_from_a_real_search(
@@ -222,3 +292,79 @@ async def test_a_patient_with_no_coverage_is_not_a_not_found(
         patient_id = response.json()["id"]
 
     assert await adapter.get_coverage(patient_id) is None
+
+
+async def test_the_location_and_organization_read_back(
+    adapter: EHRAdapter, seeded: dict[str, str]
+) -> None:
+    """The two primitives TASK-052b added, against the server that will answer them."""
+    location = await adapter.get_location(seeded["location_id"])
+    organization = await adapter.get_organization(seeded["organization_id"])
+
+    assert location.id == seeded["location_id"]
+    assert location.address is not None
+    assert location.address.state == "MA"
+    assert organization.id == seeded["organization_id"]
+    assert organization.address is not None
+
+
+async def test_the_encounter_coverage_context_populates_all_three_columns(
+    adapter: EHRAdapter, seeded: dict[str, str]
+) -> None:
+    """TASK-052b's first acceptance criterion, against a real FHIR server.
+
+    Against hand-posted resources rather than a Synthea patient — see the module
+    docstring for why a Synthea patient cannot satisfy this at all.
+    """
+    context = await adapter.get_encounter_coverage_context(seeded["encounter_id"])
+
+    assert context.patient_id == seeded["patient_id"]
+    assert context.coverage is not None
+    assert context.coverage.payer == "Blue Cross Blue Shield of Massachusetts"
+    assert context.coverage.plan_type == "PPO"
+    assert context.state == "MA"
+    assert context.requires_manual_confirmation is False
+
+
+async def test_the_state_is_the_site_of_care_and_not_the_patients_residence(
+    adapter: EHRAdapter, seeded: dict[str, str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The patient lives in NH and was seen in MA. The answer is MA, and it is logged.
+
+    Asserted against a real server because this is the one rule a later change is
+    most likely to "fix" by reaching for ``Patient.address`` — which resolves to
+    a plausible value nearly every time and is wrong.
+    """
+    with caplog.at_level(logging.WARNING):
+        context = await adapter.get_encounter_coverage_context(seeded["encounter_id"])
+
+    assert context.state == "MA"
+    assert "different states" in caplog.text
+
+
+async def test_an_encounter_with_no_site_of_care_leaves_the_state_null(
+    adapter: EHRAdapter, seeded: dict[str, str]
+) -> None:
+    """No Location, no serviceProvider — and still no fallback to the residence.
+
+    The patient on this encounter has an NH address. A NULL state is the honest
+    record; ``resolve_query_parameters()`` names it as missing, and nothing
+    downstream is misled about where the service happened.
+    """
+    context = await adapter.get_encounter_coverage_context(seeded["placeless_encounter_id"])
+
+    assert context.state is None
+    assert context.coverage is not None
+
+
+async def test_a_billing_address_is_not_read_as_a_site_of_care(
+    adapter: EHRAdapter, seeded: dict[str, str]
+) -> None:
+    """The seeded Organization lists a DE billing address before its MA one.
+
+    A lockbox in another state is ordinary, and reading it would key the cache on
+    a state the service did not happen in.
+    """
+    organization = await adapter.get_organization(seeded["organization_id"])
+
+    assert organization_state(organization) == "MA"

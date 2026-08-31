@@ -425,6 +425,110 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse_NoneType_'
+  /fhir/encounter/{encounter_id}/coverage-context:
+    get:
+      tags:
+        - fhir
+      summary: Read the payer and site-of-care details for one encounter
+      description: 'Return the three things an ``encounters`` row needs about payer and place.
+
+
+        TASK-052b. ``track-a-clinical`` calls this from ``POST /sessions/start`` to
+
+        populate ``insurance_payer``, ``insurance_plan_type`` and ``state`` — the
+
+        three parameters ``resolve_query_parameters()`` has never been able to fill.
+
+
+        **Keyed on the encounter, and the patient is not a parameter.** The subject
+
+        is read off ``Encounter.subject``, so a caller cannot pair one encounter
+
+        with another patient''s coverage.
+
+
+        **``state`` is the site of care and never the patient''s residence.** The
+
+        payer documents this platform reads scope themselves that way; the reasoning
+
+        and the evidence are in ``src/adapters/site_of_care.py``.
+
+
+        **An incomplete answer is not an error.** A NULL column is the correct record
+
+        of something the EHR did not hold, and the dispatcher downstream names
+
+        exactly which fields are still missing. A guessed payer or a guessed state
+
+        would instead write a real policy answer under a
+
+        ``rag:{payer}:{plan_type}:{state}:{cpt_code}`` key standing for a different
+
+        plan, and serve it to the next encounter that matched.
+
+
+        This is a PHI read — it reads the patient''s coverage — and writes one
+
+        ``READ_PATIENT`` audit row, one per call rather than one per FHIR fetch.'
+      operationId: read_encounter_coverage_context_fhir_encounter__encounter_id__coverage_context_get
+      parameters:
+        - name: encounter_id
+          in: path
+          required: true
+          schema:
+            type: string
+            description: The encounter's id on the EHR.
+            title: Encounter Id
+          description: The encounter's id on the EHR.
+        - name: X-MedAuth-Launch-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            description: The launch_id returned by GET /fhir/callback. Names the SMART launch
+              whose EHR access token this read is made with. Not a session_id — the two are
+              different identifiers with different lifetimes.
+            title: X-Medauth-Launch-Id
+          description: The launch_id returned by GET /fhir/callback. Names the SMART launch
+            whose EHR access token this read is made with. Not a session_id — the two are
+            different identifiers with different lifetimes.
+      responses:
+        '200':
+          description: The payer half and the site-of-care state for one encounter.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_EncounterCoverageContext_'
+        '401':
+          description: The EHR rejected this launch's access token; repeat the launch.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '404':
+          description: No such SMART launch, or the EHR holds no such encounter.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '422':
+          description: The request body or path parameter is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '502':
+          description: The EHR was unreachable or answered with something unusable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '504':
+          description: The EHR did not answer in time.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
 components:
   schemas:
     Annotation:
@@ -471,6 +575,18 @@ components:
         - message
       title: ApiError
       description: The error half of the envelope.
+    ApiResponse_EncounterCoverageContext_:
+      properties:
+        data:
+          anyOf:
+            - $ref: '#/components/schemas/EncounterCoverageContext'
+            - type: 'null'
+        error:
+          anyOf:
+            - $ref: '#/components/schemas/ApiError'
+            - type: 'null'
+      type: object
+      title: ApiResponse[EncounterCoverageContext]
     ApiResponse_Encounter_:
       properties:
         data:
@@ -893,6 +1009,13 @@ components:
               type: array
             - type: 'null'
           title: Diagnosis
+        location:
+          anyOf:
+            - items:
+                $ref: '#/components/schemas/EncounterLocation'
+              type: array
+            - type: 'null'
+          title: Location
         serviceProvider:
           anyOf:
             - $ref: '#/components/schemas/Reference'
@@ -918,8 +1041,65 @@ components:
         \ at the encounter.\n    participant: Practitioners and others involved.\n    period:\
         \ Start and end of the encounter.\n    reason_code: Coded reason the encounter took\
         \ place.\n    reason_reference: Reason expressed as a reference to another resource.\n\
-        \    diagnosis: Diagnoses relevant to this encounter.\n    service_provider: Organization\
-        \ responsible for the encounter.\n    part_of: Encounter this one is a part of."
+        \    diagnosis: Diagnoses relevant to this encounter.\n    location: Places the patient\
+        \ was during the encounter. The site of\n        care TASK-052b reads ``state`` from.\n\
+        \    service_provider: Organization responsible for the encounter. The\n        fallback\
+        \ site-of-care source when no ``location`` resolves.\n    part_of: Encounter this\
+        \ one is a part of."
+    EncounterCoverageContext:
+      properties:
+        encounter_id:
+          type: string
+          title: Encounter Id
+        patient_id:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Patient Id
+        coverage:
+          anyOf:
+            - $ref: '#/components/schemas/CoverageInfo'
+            - type: 'null'
+        state:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: State
+        requires_manual_confirmation:
+          type: boolean
+          title: Requires Manual Confirmation
+          default: false
+      type: object
+      required:
+        - encounter_id
+      title: EncounterCoverageContext
+      description: "What one encounter needs written onto its ``encounters`` row.\n\nTASK-052b.\
+        \ This is what ``EHRAdapter.get_encounter_coverage_context()``\nreturns and what ``GET\
+        \ /fhir/encounter/{encounter_id}/coverage-context``\nanswers with, and it maps one-to-one\
+        \ onto three columns:\n``insurance_payer``, ``insurance_plan_type`` and ``state``.\n\
+        \n**It is a separate shape from :class:`PatientContext` because it answers a\ndifferent\
+        \ question.** That one is \"what do we know about this patient\" and\nis keyed on\
+        \ a patient; this one is \"which payer policy set applies to this\nvisit, and where\
+        \ did it happen\" and is keyed on an encounter. Only this one\ncan carry ``state``,\
+        \ because the site of care is a property of the encounter\nand no patient-keyed shape\
+        \ has anywhere honest to put it.\n\nAttributes:\n    encounter_id: The encounter's\
+        \ id on the EHR that answered.\n    patient_id: The subject read off ``Encounter.subject``,\
+        \ or None when the\n        reference could not be resolved — in which case no coverage\
+        \ was\n        read either.\n    coverage: The payer half, or None when the EHR held\
+        \ no usable\n        ``Coverage``. Reuses :class:`CoverageInfo` rather than flattening\n\
+        \        it, so the enumerated rule in TASK-052 has exactly one shape to\n       \
+        \ produce.\n    state: The **site-of-care** state as a two-character USPS code, or\
+        \ None\n        when neither a ``Location`` nor an ``Organization`` yielded one.\n\
+        \        Never the patient's residence — see\n        :mod:`src.adapters.site_of_care`\
+        \ for what the policy documents\n        actually say. Normalized through ``payer_vocab.normalize_state``\
+        \ so\n        it speaks the vocabulary ``insurance_policies.state`` is matched\n \
+        \       against.\n    requires_manual_confirmation: True when the payer information\
+        \ is\n        incomplete, by the same :func:`~src.adapters.base.needs_manual_confirmation`\n\
+        \        rule the patient context uses. **A NULL ``state`` does not set it**,\n  \
+        \      deliberately: the flag is about payer details a provider can fill in\n    \
+        \    from the patient's card, and nobody at the bedside can supply a site\n      \
+        \  of care the EHR did not record. ``resolve_query_parameters()``\n        already\
+        \ names ``state`` when it is missing, which is where that gap\n        is visible."
     EncounterDiagnosis:
       properties:
         condition:
@@ -942,6 +1122,45 @@ components:
         \ Reference to the Condition or Procedure. Required by FHIR.\n    use: Role the diagnosis\
         \ played — admission, discharge, billing, and so on.\n    rank: Ranking among the\
         \ encounter's diagnoses, 1 being primary."
+    EncounterLocation:
+      properties:
+        location:
+          $ref: '#/components/schemas/Reference'
+        status:
+          anyOf:
+            - type: string
+              enum:
+                - planned
+                - active
+                - reserved
+                - completed
+            - type: 'null'
+          title: Status
+        physicalType:
+          anyOf:
+            - $ref: '#/components/schemas/CodeableConcept'
+            - type: 'null'
+        period:
+          anyOf:
+            - $ref: '#/components/schemas/Period'
+            - type: 'null'
+      additionalProperties: true
+      type: object
+      required:
+        - location
+      title: EncounterLocation
+      description: "A place the patient was during the encounter.\n\n**This is the primary\
+        \ source of the encounter's site of care** (TASK-052b):\n``location`` is resolved\
+        \ to a ``Location`` resource and its\n``address.state`` becomes the ``state`` segment\
+        \ of the RAG cache key. The\npayer policies this platform reads scope themselves that\
+        \ way — CMS's\nMedicare Coverage Database says to search by \"the state where the\
+        \ service\ntook place\" — and no document in the seed corpus points at the patient's\n\
+        residence.\n\nA visit can list several: admitted here, moved to a ward, seen in a\
+        \ theatre.\n``status`` is what separates the ones the patient actually reached from\
+        \ the\nones that were only ever planned.\n\nAttributes:\n    location: Reference to\
+        \ the ``Location``. Required by FHIR.\n    status: Whether the patient is or was present\
+        \ at this location.\n    physical_type: The kind of place — a bed, a room, a building.\n\
+        \    period: When the patient was at this location."
     EncounterParticipant:
       properties:
         type:
@@ -1144,6 +1363,11 @@ components:
                 - unknown
             - type: 'null'
           title: Gender
+        address_state:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Address State
       type: object
       required:
         - patient_id
@@ -1154,7 +1378,14 @@ components:
         \ order the resource listed them.\n    birth_date: Date of birth as a FHIR ``date``\
         \ string, when known.\n    gender: Administrative gender, used for record matching\
         \ and for the\n        demographics a payer rule may key on (TASK-059). Not a statement\n\
-        \        about gender identity — see ``fhir_types.Patient``."
+        \        about gender identity — see ``fhir_types.Patient``.\n    address_state: The\
+        \ patient's residence state as a USPS code, when the\n        resource carried one\
+        \ this vocabulary recognises. **Not a source for\n        the encounter's ``state``\
+        \ column**, and TASK-052b's only use of it\n        is the disagreement warning: the\
+        \ policy documents scope themselves\n        by the site of care, so a patient's residence\
+        \ is a different fact\n        that merely coincides most of the time. Reading it\
+        \ as the site of\n        care is the mistake this field's presence makes easy, which\
+        \ is why\n        the ban is written on the field rather than only in\n        :mod:`src.adapters.site_of_care`."
     Period:
       properties:
         start:

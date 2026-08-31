@@ -47,7 +47,7 @@ from src.adapters.errors import (
     FHIRResourceNotFound,
     FHIRUpstreamUnavailable,
 )
-from src.adapters.models import PatientContext
+from src.adapters.models import EncounterCoverageContext, PatientContext
 from src.api.dependencies import get_http_client, get_redis
 from src.audit import (
     RESOURCE_TYPE_ENCOUNTER,
@@ -266,3 +266,67 @@ async def read_encounter(
         resource_id=encounter_id,
     )
     return ApiResponse[Encounter](data=encounter)
+
+
+@router.get(
+    "/encounter/{encounter_id}/coverage-context",
+    response_model=ApiResponse[EncounterCoverageContext],
+    status_code=status.HTTP_200_OK,
+    summary="Read the payer and site-of-care details for one encounter",
+    response_description="The payer half and the site-of-care state for one encounter.",
+    responses=error_responses(
+        401,
+        404,
+        422,
+        502,
+        504,
+        descriptions={
+            401: "The EHR rejected this launch's access token; repeat the launch.",
+            404: "No such SMART launch, or the EHR holds no such encounter.",
+            502: "The EHR was unreachable or answered with something unusable.",
+            504: "The EHR did not answer in time.",
+        },
+    ),
+)
+async def read_encounter_coverage_context(
+    encounter_id: Annotated[str, Path(description="The encounter's id on the EHR.")],
+    adapter: Annotated[EHRAdapter, Depends(get_ehr_adapter)],
+) -> ApiResponse[EncounterCoverageContext]:
+    """Return the three things an ``encounters`` row needs about payer and place.
+
+    TASK-052b. ``track-a-clinical`` calls this from ``POST /sessions/start`` to
+    populate ``insurance_payer``, ``insurance_plan_type`` and ``state`` — the
+    three parameters ``resolve_query_parameters()`` has never been able to fill.
+
+    **Keyed on the encounter, and the patient is not a parameter.** The subject
+    is read off ``Encounter.subject``, so a caller cannot pair one encounter
+    with another patient's coverage.
+
+    **``state`` is the site of care and never the patient's residence.** The
+    payer documents this platform reads scope themselves that way; the reasoning
+    and the evidence are in ``src/adapters/site_of_care.py``.
+
+    **An incomplete answer is not an error.** A NULL column is the correct record
+    of something the EHR did not hold, and the dispatcher downstream names
+    exactly which fields are still missing. A guessed payer or a guessed state
+    would instead write a real policy answer under a
+    ``rag:{payer}:{plan_type}:{state}:{cpt_code}`` key standing for a different
+    plan, and serve it to the next encounter that matched.
+
+    This is a PHI read — it reads the patient's coverage — and writes one
+    ``READ_PATIENT`` audit row, one per call rather than one per FHIR fetch.
+    """
+    try:
+        context = await adapter.get_encounter_coverage_context(encounter_id)
+    except Exception as exc:
+        raise _as_api_error(exc) from exc
+
+    # READ_PATIENT rather than READ_ENCOUNTER: what makes this a PHI access is
+    # the Coverage read, and the encounter is how it was addressed. The resource
+    # ids stay the encounter's, because that is what was asked for.
+    await audit_ehr_read(
+        action=AuditAction.READ_PATIENT,
+        resource_type=RESOURCE_TYPE_ENCOUNTER,
+        resource_id=encounter_id,
+    )
+    return ApiResponse[EncounterCoverageContext](data=context)

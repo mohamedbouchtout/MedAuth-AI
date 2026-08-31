@@ -11,8 +11,11 @@ the method Cerner and Epic override (TASK-056, TASK-057), so those subclasses
 can call ``super()`` and adjust the assembled result instead of reimplementing
 three fetches.
 
-TASK-052 implements the fetches. TASK-053 still owns the note write-back and
-TASK-054 the prior authorization submission; those two remain stubs.
+TASK-052 implements the fetches. TASK-052b adds the ``Location`` and
+``Organization`` primitives and ``get_encounter_coverage_context()``, which is
+the second composed method and the one that answers "which payer policy set,
+and where". TASK-053 still owns the note write-back and TASK-054 the prior
+authorization submission; those two remain stubs.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from typing import Any, Final
 import httpx
 from pydantic import ValidationError
 
-from fhir_types import Claim, Condition, Coverage, Encounter, Patient
+from fhir_types import Claim, Condition, Coverage, Encounter, Location, Organization, Patient
 
 from .errors import (
     FHIRAuthorizationExpired,
@@ -32,7 +35,23 @@ from .errors import (
     FHIRResourceNotFound,
     FHIRUpstreamUnavailable,
 )
-from .models import CoverageInfo, PatientContext, PatientInfo, PriorAuthSubmission
+from .models import (
+    CoverageInfo,
+    EncounterCoverageContext,
+    PatientContext,
+    PatientInfo,
+    PriorAuthSubmission,
+)
+from .site_of_care import (
+    location_state,
+    log_state_disagreement,
+    organization_state,
+    patient_address_state,
+    reference_id,
+    service_provider_reference,
+    site_location_references,
+    to_usps_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +300,9 @@ class EHRAdapter:
             given_names=list(name.given or []) if name else [],
             birth_date=patient.birth_date,
             gender=patient.gender,
+            # For the site-of-care disagreement check only, never as a source
+            # for the encounter's state. See ``site_of_care``.
+            address_state=to_usps_state(patient_address_state(patient.address)),
         )
 
     async def get_coverage(self, patient_id: str) -> CoverageInfo | None:
@@ -437,6 +459,46 @@ class EHRAdapter:
         encounter: Encounter = self._parse(Encounter, body, "Encounter", encounter_id)
         return encounter
 
+    async def get_location(self, location_id: str) -> Location:
+        """Primitive. Read one location.
+
+        Added by TASK-052b. It is a primitive rather than something folded into
+        ``get_encounter()`` because it reads a different resource type: the
+        two-layer rule in this module's docstring is what keeps a vendor's
+        deviation landing in the right place, and a fetch that quietly read two
+        resource types would have no honest layer to belong to.
+
+        Args:
+            location_id: The location's id on this EHR.
+
+        Returns:
+            The ``Location`` resource.
+        """
+        body = await self._get(
+            f"Location/{location_id}", resource_type="Location", resource_id=location_id
+        )
+        location: Location = self._parse(Location, body, "Location", location_id)
+        return location
+
+    async def get_organization(self, organization_id: str) -> Organization:
+        """Primitive. Read one organization.
+
+        Args:
+            organization_id: The organization's id on this EHR.
+
+        Returns:
+            The ``Organization`` resource.
+        """
+        body = await self._get(
+            f"Organization/{organization_id}",
+            resource_type="Organization",
+            resource_id=organization_id,
+        )
+        organization: Organization = self._parse(
+            Organization, body, "Organization", organization_id
+        )
+        return organization
+
     # -- Composed: assembles primitives, and is the override point ------------
 
     async def get_patient_context(self, patient_id: str) -> PatientContext:
@@ -471,6 +533,117 @@ class EHRAdapter:
             conditions=conditions,
             requires_manual_confirmation=needs_manual_confirmation(coverage),
         )
+
+    async def get_encounter_coverage_context(self, encounter_id: str) -> EncounterCoverageContext:
+        """Composed. Everything ``encounters`` needs about payer and place.
+
+        Added by TASK-052b, and the second composed method here. It exists
+        because the three columns a policy query is keyed on come from two
+        different resources: ``insurance_payer`` and ``insurance_plan_type``
+        from the patient's ``Coverage``, and ``state`` from the encounter's own
+        ``Location`` or ``Organization``. A caller assembling those itself would
+        have to know that split, which is the knowledge this layer exists to
+        hold.
+
+        **A vendor subclass overrides this, not the primitives.** Same rule as
+        ``get_patient_context()``: enrichment is about the assembled answer.
+
+        The patient's id is read off ``Encounter.subject`` rather than taken as
+        a parameter, so a caller cannot pair an encounter with someone else's
+        coverage.
+
+        Args:
+            encounter_id: The encounter's id on this EHR.
+
+        Returns:
+            The payer half, the site-of-care state, and whether a provider must
+            confirm the payer information by hand.
+        """
+        encounter = await self.get_encounter(encounter_id)
+        patient_id = reference_id(encounter.subject, "Patient")
+
+        if patient_id is None:
+            # An encounter with no readable subject is not an error — it is an
+            # encounter we cannot look up coverage for. The state still resolves,
+            # because it comes off the encounter rather than off the patient.
+            logger.warning(
+                "Encounter has no resolvable Patient subject, so no Coverage can be "
+                "read for it. Recording the site-of-care state alone and asking for "
+                "manual confirmation of the payer."
+            )
+            return EncounterCoverageContext(
+                encounter_id=encounter.id or encounter_id,
+                patient_id=None,
+                coverage=None,
+                state=await self.resolve_site_of_care_state(encounter),
+                requires_manual_confirmation=True,
+            )
+
+        # Independent reads against one server; serially they would cost three
+        # round trips of latency for nothing. Same reasoning as
+        # ``get_patient_context()``, and likewise without ``return_exceptions``.
+        coverage, patient, state = await asyncio.gather(
+            self.get_coverage(patient_id),
+            self.get_patient(patient_id),
+            self.resolve_site_of_care_state(encounter),
+        )
+        log_state_disagreement(state, patient.address_state)
+
+        return EncounterCoverageContext(
+            encounter_id=encounter.id or encounter_id,
+            patient_id=patient_id,
+            coverage=coverage,
+            state=state,
+            requires_manual_confirmation=needs_manual_confirmation(coverage),
+        )
+
+    async def resolve_site_of_care_state(self, encounter: Encounter) -> str | None:
+        """Return the encounter's site-of-care state as a USPS code, or None.
+
+        ``Encounter.location`` first, then ``Encounter.serviceProvider``, then
+        nothing — the order and the deliberate absence of a patient-address
+        fallback are argued in :mod:`src.adapters.site_of_care`.
+
+        **A location that cannot be read is not fatal.** A dangling reference or
+        a permission the launch does not carry falls through to the next
+        candidate, because a coarser answer beats no answer. An outage
+        propagates unchanged: ``FHIRUpstreamUnavailable`` is the one failure
+        worth surfacing, since swallowing it would let "the EHR was down" look
+        exactly like "this encounter has no location".
+
+        Args:
+            encounter: The encounter as the EHR holds it.
+
+        Returns:
+            The two-character USPS code, or None when nothing resolved one.
+        """
+        for location_id in site_location_references(encounter):
+            try:
+                location = await self.get_location(location_id)
+            except (FHIRResourceNotFound, FHIRMalformedResponse, FHIRAuthorizationExpired):
+                logger.warning(
+                    "An Encounter.location could not be read; trying the next candidate. "
+                    "The site-of-care state falls back to the service provider if none "
+                    "resolves."
+                )
+                continue
+            state = to_usps_state(location_state(location))
+            if state is not None:
+                return state
+
+        organization_id = service_provider_reference(encounter)
+        if organization_id is None:
+            return None
+        try:
+            organization = await self.get_organization(organization_id)
+        except (FHIRResourceNotFound, FHIRMalformedResponse, FHIRAuthorizationExpired):
+            logger.warning(
+                "The Encounter.serviceProvider Organization could not be read, and no "
+                "Location resolved either. Leaving the encounter's state NULL rather "
+                "than falling back to the patient's address, which is a different fact."
+            )
+            return None
+        return to_usps_state(organization_state(organization))
 
     # -- Neither layer: a write and a submission ------------------------------
 
