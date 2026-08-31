@@ -188,8 +188,9 @@ def test_encounter_state_is_a_nullable_usps_code() -> None:
 
     The two columns are compared to each other, so a width or a nullability that
     disagreed would either truncate a code on one side or force a value nothing
-    can supply on the other. Null means "not known yet" — TASK-052b is what
-    fills it, and until then every encounter has it unset.
+    can supply on the other. Null means "not known yet": TASK-052b fills it
+    from the encounter's site of care at SMART launch, and it stays unset for an
+    encounter started without one, or one whose EHR recorded no location.
     """
     column = Encounter.__table__.columns["state"]
     assert isinstance(column.type, sa.CHAR)

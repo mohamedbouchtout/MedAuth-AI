@@ -15,11 +15,14 @@ What a fake cannot prove:
 * **The dedup guard is atomic across real round trips**, rather than against a
   set in the test process.
 
-The policy query itself is stubbed here — it has to be, because
-:func:`resolve_query_parameters` cannot yet produce a payer, plan, state or CPT
-code (TASK-024). What is asserted is that the dispatch is reached with the right
-session and the right extracted context, which is the acceptance criterion
-TASK-021 states.
+The policy query itself is stubbed here, and stays stubbed now that TASK-052b
+has made a real one possible. What this module asserts is TASK-021's own
+acceptance criterion — that the dispatch is reached, over a real broker, with
+the right session and the right extracted context — and a real query would add a
+Qdrant collection, a policy corpus and a Bedrock stub to every one of these
+tests without sharpening that claim. The unstubbed chain is
+``test_end_to_end_nudge.py``, which exists precisely so this module does not
+have to carry it.
 """
 
 from __future__ import annotations
@@ -85,7 +88,7 @@ ANSWER = PolicyQueryData(
 
 
 class RecordedDispatch:
-    """Stands in for the policy query, which cannot run until TASK-052b."""
+    """Stands in for the policy query. See the module docstring for why."""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []

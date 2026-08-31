@@ -12,12 +12,13 @@ through the consumer.
 this. ``cpt_code`` comes from :mod:`track_b_rag.procedure_codes`, which maps a
 spoken keyword and its qualifier onto a code and refuses rather than guesses.
 ``provider_id`` is read from the encounter, where it has always been non-null.
-``payer``, ``plan_type`` and ``state`` are columns on ``encounters`` that
-nothing populates yet: they are filled from a FHIR ``Coverage`` resource at
-SMART launch, which is **TASK-052b**, gated on TASK-051 and TASK-052. So
-:func:`resolve_query_parameters` still raises on every real encounter — but it
-now raises naming the three fields that are genuinely absent for *that*
-encounter, rather than a fixed list of five.
+``payer``, ``plan_type`` and ``state`` are columns on ``encounters`` filled
+at SMART launch from a FHIR ``Coverage`` resource and the encounter's own
+``Location``, which **TASK-052b** built. So :func:`resolve_query_parameters` now
+resolves completely for an encounter started from a launch, and raises naming
+the fields genuinely absent for *that* encounter when it cannot — an encounter
+started without a launch, or one whose EHR held no usable coverage. Both are
+ordinary outcomes rather than the "every real encounter" case they used to be.
 
 A placeholder for any of them would be worse than no answer at all. The Redis
 cache key is ``rag:{payer}:{plan_type}:{state}:{cpt_code}``, so a made-up value
@@ -143,13 +144,14 @@ class MissingQueryParameters(Exception):
 
 
 #: What :func:`resolve_query_parameters` still cannot supply for any encounter,
-#: because nothing populates these three columns until **TASK-052b** fills them
-#: from a FHIR ``Coverage`` resource at SMART launch. Named as data rather than
-#: buried in the raise so the consumer's tests, and anyone reading the warning
-#: in a log, can see the list without reading the function.
+#: when an encounter was started without a SMART launch, or when the one it was
+#: started from held no usable coverage. **TASK-052b** fills them for every
+#: other encounter. Named as data rather than buried in the raise so the
+#: consumer's tests, and anyone reading the warning in a log, can see the list
+#: without reading the function.
 #:
 #: The raise itself reports the subset actually missing for the encounter at
-#: hand, which is a smaller list once TASK-052b starts filling some of them in.
+#: hand, which since TASK-052b is usually shorter than this whole list.
 UNRESOLVED_PARAMETERS: Final[tuple[str, ...]] = (
     "payer",
     "plan_type",
@@ -202,10 +204,11 @@ async def resolve_query_parameters(
 
     Raises:
         MissingQueryParameters: When the procedure has no confident code, when
-            the encounter is unknown, or when the encounter's payer columns are
-            still empty — which is every real encounter until TASK-052b. All
-            three are structural: the same mention a second later fails
-            identically, so the consumer keeps its dedup claim and logs once.
+            the encounter is unknown, or when the encounter's payer columns
+            are empty — an encounter started without a SMART launch, or one
+            whose EHR held no usable coverage (TASK-052b). All three are
+            structural: the same mention a second later fails identically, so
+            the consumer keeps its dedup claim and logs once.
         Exception: Anything the database raises propagates, and is deliberately
             *not* turned into ``MissingQueryParameters``. A connection that
             failed once may work on the next mention, and the consumer releases
@@ -371,11 +374,11 @@ async def resolve_and_query_policy(
 
     Raises:
         MissingQueryParameters: When the query cannot be built at all — an
-            unmappable procedure, an unknown encounter, or the payer columns
-            TASK-052b fills, which is still every real encounter. Deliberately
-            not swallowed here: the consumer distinguishes "this can never work"
-            from "this did not work this time" and handles the dedup claim
-            differently for each.
+            unmappable procedure, an unknown encounter, or payer columns the
+            SMART launch could not fill (TASK-052b). Deliberately not swallowed
+            here: the consumer distinguishes "this can never work" from "this
+            did not work this time" and handles the dedup claim differently for
+            each.
     """
     parameters = await resolve_query_parameters(session_id=session_id, mention=mention)
     answer = await post_policy_query(

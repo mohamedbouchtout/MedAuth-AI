@@ -11,10 +11,11 @@ What a fake cannot prove:
   not a PHI access rests on the query naming ``provider_id``,
   ``insurance_payer``, ``insurance_plan_type`` and ``state`` and nothing else.
   That is a property of the statement SQLAlchemy actually emits.
-* **A populated encounter resolves end to end.** Every real encounter today has
-  the three payer columns empty, so the only way to exercise the path TASK-052b
-  will open is to write a row with them filled. This is what de-risks that task:
-  when it lands, the resolution side is already known to work.
+* **A populated encounter resolves every parameter.** The row here is written
+  directly rather than through a SMART launch, which keeps this module about the
+  resolution alone — it was what de-risked TASK-052b before that task landed, and
+  it is now the narrow test beneath ``test_end_to_end_nudge.py``, which populates
+  the same columns from a real FHIR server and runs the whole chain on them.
 
 Skipped when DATABASE_URL is unset, so the unit suite still runs on a machine
 with nothing up. Each test writes its own encounter and deletes it afterwards.
@@ -108,7 +109,7 @@ async def encounter(session: AsyncSession) -> AsyncIterator[Encounter]:
 async def test_a_populated_encounter_resolves_every_parameter(
     session: AsyncSession, encounter: Encounter
 ) -> None:
-    """The path TASK-052b opens, proven now so that task is only the population."""
+    """The resolution alone, on a row written directly rather than from a launch."""
     encounter.insurance_payer = "Blue Cross Blue Shield of Massachusetts"
     encounter.insurance_plan_type = "PPO"
     encounter.state = "MA"
