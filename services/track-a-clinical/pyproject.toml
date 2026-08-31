@@ -9,7 +9,7 @@ dependencies = [
     # Direct, not transitive through medauth-bedrock-client: TASK-031 builds its
     # own `comprehendmedical` client, and a direct call must not depend on
     # another package continuing to pull boto3 in.
-    "boto3>=1.43.77",
+    "boto3>=1.43.82",
     "fastapi>=0.115",
     "httpx>=0.28",
     "langchain>=1.3.16",

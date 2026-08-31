@@ -9,7 +9,7 @@ dependencies = [
     "medauth-api-envelope",
     "medauth-hipaa-logger",
     "medauth-session-auth",
-    "pydantic>=2.9",
+    "pydantic>=2.13.5",
     "pydantic-settings>=2.6",
     "redis>=8.1.0",
     "uvicorn[standard]>=0.52.4",
