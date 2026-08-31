@@ -4480,7 +4480,7 @@ logic do not change.
       Athenahealth job is committed and gated but has never run green, and the
       sandbox-access blocker above is unchanged.
 
-- [ ] **TASK-052b:** Populate encounter payer, plan type and state at SMART launch
+- [x] **TASK-052b:** Populate encounter payer, plan type and state at SMART launch
   - Prerequisite: **TASK-051** (the SMART launch that produces a session),
     **TASK-052** (`get_coverage()`, which is what actually reads the payer off a
     FHIR `Coverage` resource), TASK-006 (owns `POST /sessions/start`, which is
@@ -4717,6 +4717,76 @@ logic do not change.
     - **Assert the patient-specific fields were not cached**, per CLAUDE.md's
       cache note. This is the first end-to-end run where a real patient's gap
       analysis and a real payer key exist at the same time.
+  - Built across `packages/fhir-types`, `services/fhir-integration` and
+    `services/track-a-clinical`. Track B now runs end to end: a transcript
+    segment published to `transcription:{session_id}` produces a real
+    `POST /policies/query` and a real nudge, which is TASK-021's stubbed seam
+    and TASK-024's deferred criterion both closed. Decisions worth knowing
+    before touching this:
+    - **`state` is the site of care, and the answer came out of the documents
+      rather than out of reasoning.** The evidence is written up above and
+      carried in `services/fhir-integration/src/adapters/site_of_care.py` so it
+      travels with the code. Both of the candidates that looked most plausible
+      before the corpus was read — the `Coverage` resource and the patient's
+      address — are wrong, and `Patient.address` is deliberately *not* a
+      fallback when no `Location` or `Organization` resolves. It produces a
+      plausible value nearly every time, and the value keys a cache, so a wrong
+      state serves one plan's answer to a patient on another. NULL is the honest
+      outcome and `resolve_query_parameters()` already names it.
+    - **Three docstrings said the opposite and were corrected in the same
+      change** — `fhir_types.Address.state`, `Patient.address` and `Coverage`'s
+      module docstring all claimed the patient's address drove the cache key's
+      `state`. They were written before anyone read what the policy documents
+      say about their own applicability, and the claim sat on the datatype a
+      patient's address actually uses, which is what made it read as settled.
+    - **A disagreement between the site of care and the patient's residence logs
+      at WARNING**, and the log line carries the two bare state codes and no
+      identifier. That is what makes the carry-over auditable: CMS states the
+      rule, Aetna and BCBSMA state nothing either way, so applying it to their
+      plans is a defensible default rather than a documented one.
+    - **`Location` and `Organization` joined `fhir-types`**, and `Encounter`
+      gained `location`. The parity test's resource list was extended
+      deliberately and gained a second check — that `AnyResource` covers every
+      modelled resource — because a resource with a `resourceType` left out of
+      that union parses as nothing and reads as unmodelled rather than as a
+      forgotten export.
+    - **`launch_id` is a column, and the mapping is never an equality.**
+      Migration `0006`. `POST /sessions/start` accepts `launch_id` and still
+      refuses `session_id`: the client genuinely holds the first, and the second
+      does not exist until the call answers.
+    - **track-a-clinical calls fhir-integration over HTTP**, not by import, so
+      the `audit_log()` row that service's route writes stays on the only path
+      to a chart read. Same arrangement, and the same argument, as
+      `track_b_rag.policy_dispatch` posting to its own `/policies/query`.
+    - **A failed payer lookup does not fail the session.** The columns stay NULL
+      and the encounter starts. A provider unable to record a visit because a
+      payer lookup timed out is worse than a visit whose policy queries cannot
+      be built, and the dispatcher reports the second per procedure. The trade
+      is deliberate; it is why the client returns `None` rather than raising.
+    - **`FHIR_INTEGRATION_URL` was bound rather than shadowed.** It had sat
+      unread in `.env.example` since TASK-001. Adding a second near-identical
+      name would have made two variables for one address.
+    - **The end-to-end test runs `fhir-integration` as a real subprocess**
+      against the real HAPI FHIR container, with `track-a-clinical` and
+      `track-b-rag` on real loopback sockets and the real `TranscriptConsumer`
+      with its default dispatch and emitter. Only Bedrock is substituted. It was
+      checked for sensitivity by removing the encounter's `Location` and
+      `serviceProvider` and confirming the run fails rather than passing on a
+      shorter path. `ci.yml` now starts `hapi-fhir` for the `track-b-rag` member
+      too, and sets `REQUIRE_HAPI_TESTS` for it, so a skip is a failure there as
+      well.
+    - **Synthea still cannot exercise the payer columns**, and a test asserts
+      the honest NULL outcome so nobody later "fixes" it by reading the
+      contained `#coverage` out of an `ExplanationOfBenefit`. That resource sets
+      its `type` to the payer's name rather than a plan type, so it would supply
+      a wrong `plan_type` rather than a missing one.
+    - **Issue #70 is still open and still binding.** The CPT table has not been
+      reviewed by a certified coder and the AMA licensing position is still
+      unsettled. Since this task landed those codes genuinely can reach a
+      provider, which is the condition the deferral was scoped against — it
+      holds only for the v1 proof of concept, against synthetic patients, with
+      no real patient, provider or payer submission.
+
 - [ ] **TASK-052c:** Implement `scripts/setup-dev.sh`
   - **Why it is its own task.** The stub reads `# Implemented in TASK-052` and
     CLAUDE.md's tree says "stub until TASK-052", but installing dependencies has
