@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 
+import httpx
 import pytest
 
 from src.adapters.athena import AthenaAdapter
@@ -32,6 +33,11 @@ VENDOR_ISSUERS = [
 @pytest.mark.parametrize(("iss_url", "expected"), VENDOR_ISSUERS)
 def test_each_vendor_is_detected_from_its_issuer(iss_url: str, expected: EHRType) -> None:
     assert detect_ehr_from_issuer(iss_url) == expected
+
+
+def _client() -> httpx.AsyncClient:
+    """A client whose transport is never reached — selection makes no request."""
+    return httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200)))
 
 
 def test_detection_is_case_insensitive() -> None:
@@ -123,7 +129,7 @@ def test_every_vendor_key_has_an_adapter_behind_it(
     ehr_type: EHRType, expected_class: type[EHRAdapter]
 ) -> None:
     """A key added without a class would otherwise fail at a SMART launch."""
-    adapter = get_adapter(ehr_type, "https://fhir.example.org/r4", "token")
+    adapter = get_adapter(ehr_type, "https://fhir.example.org/r4", "token", _client())
 
     assert type(adapter) is expected_class
 
@@ -143,20 +149,20 @@ def test_a_vendor_key_read_back_from_redis_still_selects_an_adapter() -> None:
     A StrEnum member does not hash equal to its own text, so without the runtime
     coercion in get_adapter() this lookup would miss.
     """
-    adapter = get_adapter("epic", "https://fhir.epic.com/r4", "token")  # type: ignore[arg-type]
+    adapter = get_adapter("epic", "https://fhir.epic.com/r4", "token", _client())  # type: ignore[arg-type]
 
     assert type(adapter) is EpicAdapter
 
 
 def test_an_unknown_vendor_key_is_refused_by_name() -> None:
     with pytest.raises(ValueError, match="allscripts"):
-        get_adapter("allscripts", "https://fhir.example.org/r4", "token")  # type: ignore[arg-type]
+        get_adapter("allscripts", "https://fhir.example.org/r4", "token", _client())  # type: ignore[arg-type]
 
 
 def test_detection_and_selection_compose() -> None:
     """The two functions a route is allowed to import, used the way a route uses them."""
     iss = "https://api.platform.athenahealth.com/fhir/r4"
 
-    adapter = get_adapter(detect_ehr_from_issuer(iss), iss, "token")
+    adapter = get_adapter(detect_ehr_from_issuer(iss), iss, "token", _client())
 
     assert type(adapter) is AthenaAdapter

@@ -13,10 +13,11 @@ name: Nightly live checks
 # until green. Fix the scraper or the fixtures; do not relax the assertion.
 #
 # Currently: the CMS Medicare Coverage Database (TASK-013), the commercial
-# payer documents the dev corpus is seeded from (TASK-014), and the HL7 Da Vinci
-# CRD Reference Implementation (TASK-015). EHR sandboxes join this workflow as
-# their tasks land — each one as its own job, so a red nightly names the
-# upstream that moved without anyone opening the log.
+# payer documents the dev corpus is seeded from (TASK-014), the HL7 Da Vinci
+# CRD Reference Implementation (TASK-015), and the Athenahealth sandbox
+# (TASK-052). EHR sandboxes join this workflow as their tasks land — each one as
+# its own job, so a red nightly names the upstream that moved without anyone
+# opening the log.
 
 on:
   schedule:
@@ -144,3 +145,42 @@ jobs:
       - name: Live Aetna and BCBSMA document checks
         working-directory: services/track-b-rag
         run: uv run pytest tests/integration/test_seed_policies.py -v -k Live --no-cov
+
+  athenahealth-sandbox:
+    name: Athenahealth sandbox FHIR reads
+    runs-on: ubuntu-latest
+    env:
+      # The gate the sandbox tests read. Off everywhere else, so pytest on a
+      # laptop and pytest on a pull request agree.
+      RUN_ATHENA_LIVE_TESTS: "1"
+      ATHENA_CLIENT_ID: ${{ secrets.ATHENA_CLIENT_ID }}
+      ATHENA_CLIENT_SECRET: ${{ secrets.ATHENA_CLIENT_SECRET }}
+      ATHENA_FHIR_BASE_URL: ${{ vars.ATHENA_FHIR_BASE_URL }}
+      ATHENA_TEST_PATIENT_ID: ${{ vars.ATHENA_TEST_PATIENT_ID }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+
+      - run: uv sync --all-packages
+
+      # KNOWN BLOCKER, and this job is expected to be red or skipped until it is
+      # cleared: it has never been established that working Athenahealth sandbox
+      # credentials exist, that SMART_REDIRECT_URI is registered against them, or
+      # that the developer-program access level (Development versus Preview) is
+      # the one that grants FHIR reads. Nothing in this repository evidences a
+      # successful launch against Athena.
+      #
+      # The job is committed anyway rather than held back, because a gated test
+      # with no scheduled run is a deleted test — and because the first real run
+      # is what will actually answer the access question. If it fails, read the
+      # failure as "our sandbox access is not set up" before reading it as "the
+      # adapter is wrong". TASK-055 is where Athena is genuinely validated;
+      # TASK-052 must not be closed on the strength of this job passing.
+      - name: Live Athenahealth sandbox reads
+        working-directory: services/fhir-integration
+        run: uv run pytest tests/integration/test_athena_sandbox.py -v --no-cov

@@ -15,24 +15,36 @@ info:
   title: MedAuth AI — fhir-integration
   version: 0.1.0
   description: >-
-    SMART on FHIR launch and the multi-EHR adapter layer (TASK-050, TASK-051).
-    An EHR launches MedAuth from a chart; these routes exchange that launch for
-    an EHR access token, which later tasks use to read and write FHIR resources
-    through a vendor-appropriate adapter.
+    SMART on FHIR launch and the multi-EHR adapter layer (TASK-050, TASK-051),
+    plus the base FHIR resource reads (TASK-052). An EHR launches MedAuth from a
+    chart; the launch routes exchange that launch for an EHR access token, and
+    the FHIR routes spend it reading a patient's chart through a
+    vendor-appropriate adapter.
 
 
-    **The identifier this service hands back is `launch_id`, not `session_id`.**
+    **The identifier this service is keyed on is `launch_id`, not `session_id`.**
     A SMART launch and an encounter session are two different things with two
     different lifetimes: the launch precedes the visit, one launch can outlive
     several encounters, and at callback time no encounter exists to key a token
     on. Settled in CLAUDE.md, "A SMART launch is not an encounter session".
-    Clients hold both and send whichever the route being called is keyed on.
+    Clients hold both and send whichever the route being called is keyed on. The
+    FHIR routes take `launch_id` in an `X-MedAuth-Launch-Id` header; a
+    `session_id` sent there is a 404, never a lookup that happens to succeed.
 
 
-    **Neither route here touches PHI, so neither writes an audit row.**
-    Obtaining a credential is not using it. The first PHI access in this service
-    is TASK-052's resource fetches, which audit. Both routes log at INFO
-    instead, per Known Constraints #6.
+    **The launch routes touch no PHI and write no audit row** — obtaining a
+    credential is not using it. **The FHIR routes do both**, one row per call
+    rather than one per underlying fetch. Their `actor_id` is null until
+    TASK-051c captures the SMART `fhirUser` claim; a fabricated
+    service-account id would be worse than an honest null.
+
+
+    **Incomplete payer information is not an error.** A patient whose `Coverage`
+    is missing, inactive, ambiguous between several active resources, or missing
+    its payer or plan type comes back with `requires_manual_confirmation` true
+    and the gap left empty, for a provider to fill. A guessed payer would write a
+    real policy answer under a cache key standing for a plan the patient is not
+    on.
 
 servers:
   - url: http://localhost:8004
@@ -43,219 +55,409 @@ tags:
     description: Readiness of this service's backing dependencies.
   - name: smart
     description: The SMART on FHIR authorization flow.
+  - name: fhir
+    description: >-
+      Reads of a patient's chart from the EHR, through the adapter layer. Every
+      route here is a PHI access and audits.
 
 paths:
   /health:
     get:
-      tags: [health]
+      tags:
+        - health
       summary: Service health
-      description: >-
-        Reports whether this service can start and complete a SMART launch.
-        Returns 200 when Redis answers and 503 when it does not; the body is the
-        standard envelope in both cases. Deliberately unauthenticated and
-        unaudited — it is what the Kubernetes readiness probe calls and it
-        exposes no patient data.
+      description: 'Report whether this service can start and complete a SMART launch.
 
 
-        The EHR's own endpoints are not probed: there is no single EHR to probe,
-        and whether a vendor's authorization server answers is a property of a
-        launch rather than of this service's readiness.
+        Returns 200 when Redis answers and 503 when it does not. The body is the
+
+        standard envelope in both cases.
+
+
+        Deliberately unauthenticated and unaudited: this is what the Kubernetes
+
+        readiness probe calls, and it exposes no patient data.'
       operationId: health_health_get
       responses:
-        "200":
-          description: Every dependency answered.
+        '200':
+          description: Readiness of the Redis store SMART launch records live in.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ApiResponse_HealthData_"
-        "503":
+                $ref: '#/components/schemas/ApiResponse_HealthData_'
+        '503':
           description: At least one dependency is unreachable. The body names which.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ApiResponse_HealthData_"
-
+                $ref: '#/components/schemas/ApiResponse_HealthData_'
   /fhir/launch:
     get:
-      tags: [smart]
+      tags:
+        - smart
       summary: Begin a SMART on FHIR launch
-      description: >-
-        Resolves the EHR vendor from `iss`, reads that EHR's authorization and
-        token endpoints from its `.well-known/smart-configuration` document,
-        records the launch under `fhir_launch:{state}` with a fresh PKCE
-        verifier, and redirects the browser to the authorization endpoint.
+      description: 'Start a SMART launch and redirect the browser to the EHR.
 
 
-        Supports both SMART launch types, and the presence of `launch` is the
-        only thing that distinguishes them: an EHR launch arrives with it and
-        asks for the `launch` scope, a standalone launch arrives without one and
-        asks for `launch/patient` so the authorization server prompts for the
+        Resolves the vendor from ``iss``, reads that EHR''s authorization and token
+
+        endpoints from its `.well-known/smart-configuration` document, records the
+
+        launch under `fhir_launch:{state}` with a fresh PKCE verifier, and redirects.
+
+
+        Supports both launch types. An EHR launch arrives with ``launch`` and asks
+
+        for the ``launch`` scope; a standalone launch arrives without one and asks
+
+        for ``launch/patient`` instead, so the authorization server prompts for the
+
         patient the EHR would otherwise have named.
 
 
-        The authorization request carries `code_challenge` /
-        `code_challenge_method=S256` — SMART on FHIR 2.0 requires PKCE of every
-        client, confidential ones included — and `aud` set to the FHIR base URL,
-        which a conformant authorization server requires and which stops a code
-        issued for one FHIR server being redeemed against another.
+        Touches no PHI and writes no audit row — it obtains no patient data, only
 
-
-        **Discovery is `.well-known/smart-configuration` only.** The older
-        CapabilityStatement `oauth-uris` extension is out of scope for v1
-        (TASK-051); a server offering only that gets a 502 naming the document
-        it did not serve and the issuer host, rather than an opaque failure.
+        permission to ask for some later.'
       operationId: smart_launch_fhir_launch_get
       parameters:
         - name: iss
           in: query
           required: true
-          description: >-
-            The EHR's FHIR base URL. Identifies the vendor and is the `aud` the
-            authorization request is bound to. Any query string or fragment is
-            stripped before use — a FHIR base URL carries neither, and one
-            arriving anyway would otherwise be appended to and logged.
           schema:
             type: string
             minLength: 1
+            description: The EHR's FHIR base URL. Identifies the vendor and is the `aud` the
+              authorization request is bound to.
             title: Iss
+          description: The EHR's FHIR base URL. Identifies the vendor and is the `aud` the
+            authorization request is bound to.
         - name: launch
           in: query
           required: false
-          description: >-
-            The EHR's opaque launch context. Present on an EHR launch and absent
-            on a standalone launch.
           schema:
             anyOf:
               - type: string
-              - type: "null"
+              - type: 'null'
+            description: The EHR's opaque launch context. Present on an EHR launch and absent
+              on a standalone launch, which is the only thing that distinguishes the two.
             title: Launch
+          description: The EHR's opaque launch context. Present on an EHR launch and absent
+            on a standalone launch, which is the only thing that distinguishes the two.
       responses:
-        "302":
+        '302':
           description: Redirect to the EHR's authorization endpoint.
-        "422":
+        '422':
           description: The request body or path parameter is invalid.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ApiResponse_NoneType_"
-        "500":
-          description: >-
-            No SMART client is registered in this deployment for the EHR the
-            issuer resolved to.
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '500':
+          description: No SMART client is registered in this deployment for the EHR the issuer
+            resolved to.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ApiResponse_NoneType_"
-        "502":
-          description: >-
-            The EHR's authorization server could not be reached, or answered in
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '502':
+          description: The EHR's authorization server could not be reached, or answered in
             a way this service cannot use.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ApiResponse_NoneType_"
-
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
   /fhir/callback:
     get:
-      tags: [smart]
+      tags:
+        - smart
       summary: Complete a SMART on FHIR launch
-      description: >-
-        Claims the launch record for the presented `state` — atomically, so a
-        replayed callback finds nothing and cannot mint a second token —
-        presents the PKCE verifier held with it, and stores the resulting EHR
-        access token under `fhir_token:{launch_id}` for as long as the EHR says
-        it lives.
+      description: 'Exchange the authorization code for an EHR access token.
 
 
-        `state` is this flow's CSRF defence. It is server-generated, single-use,
-        and deleted the moment it is consumed; unknown, expired and
-        already-consumed are one answer on purpose, since distinguishing them
-        would tell a caller probing states which ones were real.
+        Claims the launch record for this ``state`` — atomically, so a replayed
+
+        callback finds nothing and cannot mint a second token — presents the PKCE
+
+        verifier held with it, and stores the resulting token under
+
+        `fhir_token:{launch_id}` for as long as the EHR says it lives.
 
 
-        Returns the `launch_id`. It deliberately does **not** return the SMART
-        launch context the token response carried: those patient and encounter
-        identifiers are stored for TASK-052, which audits when it reads them,
-        and a credential exchange is not where a client starts learning patient
-        identifiers.
+        Returns the ``launch_id``. It does not return the SMART launch context the
+
+        token response carried: those identifiers are stored for TASK-052, which
+
+        audits when it reads them, and a credential exchange is not the place to
+
+        start handing patient identifiers to a client.
 
 
-        A `refresh_token` is stored when the EHR returns one, so TASK-051b has
-        something to refresh without a second exchange. Nothing here renews a
-        token: until that task lands, an expired EHR token means repeating the
-        launch.
+        Touches no PHI and writes no audit row, for the same reason as the launch
+
+        route above.'
       operationId: callback_fhir_callback_get
       parameters:
         - name: state
           in: query
           required: true
-          description: The state this service issued on the redirect.
           schema:
             type: string
             minLength: 1
+            description: The state this service issued on the redirect.
             title: State
+          description: The state this service issued on the redirect.
         - name: code
           in: query
           required: false
-          description: The authorization code.
           schema:
             anyOf:
               - type: string
-              - type: "null"
+              - type: 'null'
+            description: The authorization code.
             title: Code
+          description: The authorization code.
         - name: error
           in: query
           required: false
-          description: An OAuth error code, when the authorization server refused.
           schema:
             anyOf:
               - type: string
-              - type: "null"
+              - type: 'null'
+            description: An OAuth error code, when the authorization server refused.
             title: Error
+          description: An OAuth error code, when the authorization server refused.
       responses:
-        "200":
+        '200':
           description: The launch_id naming this launch and its EHR access token.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ApiResponse_LaunchSessionData_"
-        "400":
-          description: >-
-            The `state` is unknown, expired or already consumed, or the
-            authorization server reported that the provider declined.
+                $ref: '#/components/schemas/ApiResponse_LaunchSessionData_'
+        '400':
+          description: The `state` is unknown, expired or already consumed, or the authorization
+            server reported that the provider declined.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ApiResponse_NoneType_"
-        "422":
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '422':
           description: The request body or path parameter is invalid.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ApiResponse_NoneType_"
-        "500":
-          description: >-
-            No SMART client is registered in this deployment for the EHR the
-            issuer resolved to.
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '500':
+          description: No SMART client is registered in this deployment for the EHR the issuer
+            resolved to.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ApiResponse_NoneType_"
-        "502":
-          description: >-
-            The EHR's authorization server could not be reached, or answered in
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '502':
+          description: The EHR's authorization server could not be reached, or answered in
             a way this service cannot use.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ApiResponse_NoneType_"
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+  /fhir/patient/{patient_id}/context:
+    get:
+      tags:
+        - fhir
+      summary: Read a patient's demographics, coverage and active conditions
+      description: 'Return one patient''s demographics, insurance coverage and active conditions.
 
+
+        Assembled by the adapter''s composed ``get_patient_context()``, which is the
+
+        method a vendor subclass overrides.
+
+
+        **Incomplete payer information is not an error.** When the EHR holds no
+
+        usable ``Coverage``, or one missing its payer or plan type,
+
+        ``requires_manual_confirmation`` comes back true and the provider fills the
+
+        gap. A guessed payer would write a real policy answer under a cache key
+
+        standing for a plan the patient is not on, which is worse than an incomplete
+
+        answer a human can see. The enumerated rule is in TASK-052.
+
+
+        This is a PHI read and writes one ``READ_PATIENT`` audit row — one per call,
+
+        not one per underlying FHIR fetch.'
+      operationId: read_patient_context_fhir_patient__patient_id__context_get
+      parameters:
+        - name: patient_id
+          in: path
+          required: true
+          schema:
+            type: string
+            description: The patient's id on the EHR.
+            title: Patient Id
+          description: The patient's id on the EHR.
+        - name: X-MedAuth-Launch-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            description: The launch_id returned by GET /fhir/callback. Names the SMART launch
+              whose EHR access token this read is made with. Not a session_id — the two are
+              different identifiers with different lifetimes.
+            title: X-Medauth-Launch-Id
+          description: The launch_id returned by GET /fhir/callback. Names the SMART launch
+            whose EHR access token this read is made with. Not a session_id — the two are
+            different identifiers with different lifetimes.
+      responses:
+        '200':
+          description: The assembled patient context for one patient.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_PatientContext_'
+        '401':
+          description: The EHR rejected this launch's access token; repeat the launch.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '404':
+          description: No such SMART launch, or the EHR holds no such patient.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '422':
+          description: The request body or path parameter is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '502':
+          description: The EHR was unreachable or answered with something unusable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '504':
+          description: The EHR did not answer in time.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+  /fhir/encounter/{encounter_id}:
+    get:
+      tags:
+        - fhir
+      summary: Read one encounter from the EHR
+      description: 'Return one ``Encounter`` resource as the EHR holds it.
+
+
+        Unlike the patient context this is not normalized: an ``Encounter`` is
+
+        returned as the R4 resource, because nothing above this layer needs a
+
+        flattened form of it yet and inventing one now would fix a shape before
+
+        there is a consumer to fix it for.
+
+
+        This is a PHI read and writes one ``READ_ENCOUNTER`` audit row.'
+      operationId: read_encounter_fhir_encounter__encounter_id__get
+      parameters:
+        - name: encounter_id
+          in: path
+          required: true
+          schema:
+            type: string
+            description: The encounter's id on the EHR.
+            title: Encounter Id
+          description: The encounter's id on the EHR.
+        - name: X-MedAuth-Launch-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            description: The launch_id returned by GET /fhir/callback. Names the SMART launch
+              whose EHR access token this read is made with. Not a session_id — the two are
+              different identifiers with different lifetimes.
+            title: X-Medauth-Launch-Id
+          description: The launch_id returned by GET /fhir/callback. Names the SMART launch
+            whose EHR access token this read is made with. Not a session_id — the two are
+            different identifiers with different lifetimes.
+      responses:
+        '200':
+          description: The FHIR R4 Encounter resource.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_Encounter_'
+        '401':
+          description: The EHR rejected this launch's access token; repeat the launch.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '404':
+          description: No such SMART launch, or the EHR holds no such encounter.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '422':
+          description: The request body or path parameter is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '502':
+          description: The EHR was unreachable or answered with something unusable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '504':
+          description: The EHR did not answer in time.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
 components:
   schemas:
-    ApiError:
+    Annotation:
+      properties:
+        authorReference:
+          anyOf:
+            - $ref: '#/components/schemas/Reference'
+            - type: 'null'
+        authorString:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Authorstring
+        time:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Time
+        text:
+          type: string
+          title: Text
+      additionalProperties: true
       type: object
-      title: ApiError
-      description: The error half of the shared envelope.
+      required:
+        - text
+      title: Annotation
+      description: "A free-text note attached to a resource, with its author and time.\n\n\
+        ``text`` is clinician-authored prose and is PHI in every case this project\nencounters\
+        \ it.\n\nAttributes:\n    author_reference: The author, as a reference to a Practitioner\
+        \ or Patient.\n    author_string: The author's name, when there is no resource for\
+        \ them.\n    time: When the note was made, as a ``dateTime``.\n    text: The note\
+        \ itself."
+    ApiError:
       properties:
         code:
           type: string
@@ -263,86 +465,739 @@ components:
         message:
           type: string
           title: Message
-      required: [code, message]
-
-    ApiResponse_NoneType_:
       type: object
-      title: ApiResponse[NoneType]
-      description: The envelope on a failure — data null, error populated.
+      required:
+        - code
+        - message
+      title: ApiError
+      description: The error half of the envelope.
+    ApiResponse_Encounter_:
       properties:
         data:
           anyOf:
-            - type: "null"
+            - $ref: '#/components/schemas/Encounter'
+            - type: 'null'
+        error:
+          anyOf:
+            - $ref: '#/components/schemas/ApiError'
+            - type: 'null'
+      type: object
+      title: ApiResponse[Encounter]
+    ApiResponse_HealthData_:
+      properties:
+        data:
+          anyOf:
+            - $ref: '#/components/schemas/HealthData'
+            - type: 'null'
+        error:
+          anyOf:
+            - $ref: '#/components/schemas/ApiError'
+            - type: 'null'
+      type: object
+      title: ApiResponse[HealthData]
+    ApiResponse_LaunchSessionData_:
+      properties:
+        data:
+          anyOf:
+            - $ref: '#/components/schemas/LaunchSessionData'
+            - type: 'null'
+        error:
+          anyOf:
+            - $ref: '#/components/schemas/ApiError'
+            - type: 'null'
+      type: object
+      title: ApiResponse[LaunchSessionData]
+    ApiResponse_NoneType_:
+      properties:
+        data:
+          type: 'null'
           title: Data
         error:
           anyOf:
-            - $ref: "#/components/schemas/ApiError"
-            - type: "null"
-
-    ApiResponse_HealthData_:
+            - $ref: '#/components/schemas/ApiError'
+            - type: 'null'
       type: object
-      title: ApiResponse[HealthData]
+      title: ApiResponse[NoneType]
+    ApiResponse_PatientContext_:
       properties:
         data:
           anyOf:
-            - $ref: "#/components/schemas/HealthData"
-            - type: "null"
+            - $ref: '#/components/schemas/PatientContext'
+            - type: 'null'
         error:
           anyOf:
-            - $ref: "#/components/schemas/ApiError"
-            - type: "null"
-
-    ApiResponse_LaunchSessionData_:
+            - $ref: '#/components/schemas/ApiError'
+            - type: 'null'
       type: object
-      title: ApiResponse[LaunchSessionData]
+      title: ApiResponse[PatientContext]
+    CodeableConcept:
       properties:
-        data:
+        coding:
           anyOf:
-            - $ref: "#/components/schemas/LaunchSessionData"
-            - type: "null"
-        error:
+            - items:
+                $ref: '#/components/schemas/Coding'
+              type: array
+            - type: 'null'
+          title: Coding
+        text:
           anyOf:
-            - $ref: "#/components/schemas/ApiError"
-            - type: "null"
+            - type: string
+            - type: 'null'
+          title: Text
+      additionalProperties: true
+      type: object
+      title: CodeableConcept
+      description: "A concept expressed as codes from one or more systems, plus free text.\n\
+        \nMost clinically meaningful fields are this rather than a bare ``Coding``: the\n\
+        same diagnosis routinely arrives coded in both ICD-10 and SNOMED, and payers\ndiffer\
+        \ on which they will accept.\n\nAttributes:\n    coding: Equivalent codings of the\
+        \ same concept across systems.\n    text: The concept as the source presented it to\
+        \ a human."
+    Coding:
+      properties:
+        system:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: System
+        version:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Version
+        code:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Code
+        display:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Display
+        userSelected:
+          anyOf:
+            - type: boolean
+            - type: 'null'
+          title: Userselected
+      additionalProperties: true
+      type: object
+      title: Coding
+      description: "A single code drawn from a code system.\n\nAttributes:\n    system: URI\
+        \ of the code system, e.g. ``http://snomed.info/sct``.\n    version: Version of the\
+        \ code system, when the code's meaning depends on it.\n    code: The symbol itself,\
+        \ in syntax defined by the system.\n    display: Human-readable label for the code,\
+        \ as the system defines it.\n    user_selected: True when a human picked this code\
+        \ directly."
+    Condition:
+      properties:
+        id:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Id
+        meta:
+          anyOf:
+            - $ref: '#/components/schemas/Meta'
+            - type: 'null'
+        implicitRules:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Implicitrules
+        language:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Language
+        resourceType:
+          type: string
+          const: Condition
+          title: Resourcetype
+          default: Condition
+        identifier:
+          anyOf:
+            - items:
+                $ref: '#/components/schemas/Identifier'
+              type: array
+            - type: 'null'
+          title: Identifier
+        clinicalStatus:
+          anyOf:
+            - $ref: '#/components/schemas/CodeableConcept'
+            - type: 'null'
+        verificationStatus:
+          anyOf:
+            - $ref: '#/components/schemas/CodeableConcept'
+            - type: 'null'
+        category:
+          anyOf:
+            - items:
+                $ref: '#/components/schemas/CodeableConcept'
+              type: array
+            - type: 'null'
+          title: Category
+        severity:
+          anyOf:
+            - $ref: '#/components/schemas/CodeableConcept'
+            - type: 'null'
+        code:
+          anyOf:
+            - $ref: '#/components/schemas/CodeableConcept'
+            - type: 'null'
+        bodySite:
+          anyOf:
+            - items:
+                $ref: '#/components/schemas/CodeableConcept'
+              type: array
+            - type: 'null'
+          title: Bodysite
+        subject:
+          $ref: '#/components/schemas/Reference'
+        encounter:
+          anyOf:
+            - $ref: '#/components/schemas/Reference'
+            - type: 'null'
+        onsetDateTime:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Onsetdatetime
+        onsetString:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Onsetstring
+        abatementDateTime:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Abatementdatetime
+        abatementString:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Abatementstring
+        recordedDate:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Recordeddate
+        recorder:
+          anyOf:
+            - $ref: '#/components/schemas/Reference'
+            - type: 'null'
+        asserter:
+          anyOf:
+            - $ref: '#/components/schemas/Reference'
+            - type: 'null'
+        note:
+          anyOf:
+            - items:
+                $ref: '#/components/schemas/Annotation'
+              type: array
+            - type: 'null'
+          title: Note
+      additionalProperties: true
+      type: object
+      required:
+        - subject
+      title: Condition
+      description: "A clinical condition, problem or diagnosis.\n\n``clinical_status`` and\
+        \ ``verification_status`` are ``CodeableConcept`` rather\nthan ``Literal``, matching\
+        \ R4: both have required bindings, but the codes are\ncarried inside a coding with\
+        \ a fixed system URI rather than as a bare code.\n\n``onset`` and ``abatement`` are\
+        \ FHIR choice elements with five variants each;\nonly the ``dateTime`` and ``string``\
+        \ forms are modelled, because those are what\nthe EHRs on our integration list actually\
+        \ send. Anything else survives as an\nextra field rather than being dropped.\n\nAttributes:\n\
+        \    identifier: Business identifiers for the condition.\n    clinical_status: active,\
+        \ recurrence, relapse, inactive, remission, resolved.\n    verification_status: unconfirmed\
+        \ through confirmed, refuted, entered-in-error.\n    category: problem-list-item or\
+        \ encounter-diagnosis.\n    severity: Subjective severity of the condition.\n    code:\
+        \ The condition itself, coded — ICD-10 and/or SNOMED.\n    body_site: Anatomical location,\
+        \ which several orthopedic policies key on.\n    subject: The patient with the condition.\
+        \ Required by FHIR.\n    encounter: Encounter during which the condition was first\
+        \ asserted.\n    onset_date_time: When the condition began, as a ``dateTime``.\n \
+        \   onset_string: When the condition began, as free text.\n    abatement_date_time:\
+        \ When the condition resolved, as a ``dateTime``.\n    abatement_string: When the\
+        \ condition resolved, as free text.\n    recorded_date: When the record was first\
+        \ captured.\n    recorder: Who recorded the condition.\n    asserter: Who asserted\
+        \ the condition is present.\n    note: Free-text notes about the condition. PHI."
+    CoverageInfo:
+      properties:
+        payer:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Payer
+        plan_type:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Plan Type
+        member_id:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Member Id
+      type: object
+      title: CoverageInfo
+      description: "The payer half of a patient's context, flattened out of ``Coverage``.\n\
+        \n``payer`` is the payer's own display name, kept as the resource spelled it.\nIt\
+        \ is normalized to a slug by ``/policies/query`` through\n``payer_vocab.normalize_payer()``,\
+        \ which is the single normalisation site —\ndo not slug it here as well. See CLAUDE.md,\
+        \ \"Payer and jurisdiction\nidentity\", and TASK-052b, which is what writes these\
+        \ onto the encounter row.\n\nAttributes:\n    payer: The payer's own display name,\
+        \ as spelled by the resource.\n    plan_type: The plan type, from ``Coverage.type``\
+        \ or ``Coverage.class``.\n    member_id: The patient's member id with the payer."
+    EHRType:
+      type: string
+      enum:
+        - athena
+        - ecw
+        - modmed
+        - cerner
+        - epic
+        - generic
+      title: EHRType
+      description: 'The EHR vendor keys, as a closed vocabulary rather than a bare string.
 
+
+        Third time this repository has reached the same conclusion about an
+
+        identifier matched by string equality, after ``payer_vocab``''s canonical
+
+        slugs and ``hipaa_logger.AuditAction``: one spelling, defined once, with
+
+        mypy rejecting an invented value at the call site.
+
+
+        It matters more here than in an ordinary signature because this value
+
+        **round-trips through Redis** — TASK-051 writes it into
+
+        ``fhir_token:{launch_id}`` at launch and a later request reads it back to
+
+        pick an adapter — so a free-form string would put the write side and the
+
+        read side in two modules with nothing holding them in step. ``StrEnum`` for
+
+        the same reason ``AuditAction`` is one: a member compares equal to its own
+
+        text, so what goes into Redis and comes back out is an ordinary string and
+
+        no serialisation step has to know about the type.
+
+
+        ``GENERIC`` is an EHR the issuer did not identify; it routes to the standard
+
+        FHIR adapter rather than to a vendor subclass.'
+    Encounter:
+      properties:
+        id:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Id
+        meta:
+          anyOf:
+            - $ref: '#/components/schemas/Meta'
+            - type: 'null'
+        implicitRules:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Implicitrules
+        language:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Language
+        resourceType:
+          type: string
+          const: Encounter
+          title: Resourcetype
+          default: Encounter
+        identifier:
+          anyOf:
+            - items:
+                $ref: '#/components/schemas/Identifier'
+              type: array
+            - type: 'null'
+          title: Identifier
+        status:
+          type: string
+          enum:
+            - planned
+            - arrived
+            - triaged
+            - in-progress
+            - onleave
+            - finished
+            - cancelled
+            - entered-in-error
+            - unknown
+          title: Status
+        class:
+          anyOf:
+            - $ref: '#/components/schemas/Coding'
+            - type: 'null'
+        type:
+          anyOf:
+            - items:
+                $ref: '#/components/schemas/CodeableConcept'
+              type: array
+            - type: 'null'
+          title: Type
+        serviceType:
+          anyOf:
+            - $ref: '#/components/schemas/CodeableConcept'
+            - type: 'null'
+        priority:
+          anyOf:
+            - $ref: '#/components/schemas/CodeableConcept'
+            - type: 'null'
+        subject:
+          anyOf:
+            - $ref: '#/components/schemas/Reference'
+            - type: 'null'
+        participant:
+          anyOf:
+            - items:
+                $ref: '#/components/schemas/EncounterParticipant'
+              type: array
+            - type: 'null'
+          title: Participant
+        period:
+          anyOf:
+            - $ref: '#/components/schemas/Period'
+            - type: 'null'
+        reasonCode:
+          anyOf:
+            - items:
+                $ref: '#/components/schemas/CodeableConcept'
+              type: array
+            - type: 'null'
+          title: Reasoncode
+        reasonReference:
+          anyOf:
+            - items:
+                $ref: '#/components/schemas/Reference'
+              type: array
+            - type: 'null'
+          title: Reasonreference
+        diagnosis:
+          anyOf:
+            - items:
+                $ref: '#/components/schemas/EncounterDiagnosis'
+              type: array
+            - type: 'null'
+          title: Diagnosis
+        serviceProvider:
+          anyOf:
+            - $ref: '#/components/schemas/Reference'
+            - type: 'null'
+        partOf:
+          anyOf:
+            - $ref: '#/components/schemas/Reference'
+            - type: 'null'
+      additionalProperties: true
+      type: object
+      required:
+        - status
+      title: Encounter
+      description: "An interaction between a patient and one or more healthcare providers.\n\
+        \nThe ``class`` element is named ``encounter_class`` in Python because ``class``\n\
+        is a reserved word. Its alias is ``class``, so both wire formats and\nkeyword construction\
+        \ work: ``Encounter(encounter_class=...)`` and\n``Encounter.model_validate({\"class\"\
+        : ...})``.\n\nAttributes:\n    identifier: Business identifiers for the encounter.\n\
+        \    status: Where the encounter is in its lifecycle. Required by FHIR.\n    encounter_class:\
+        \ Classification — ambulatory, inpatient, virtual. Serialized\n        as ``class``.\n\
+        \    type: Specific kind of encounter.\n    service_type: Broad category of service\
+        \ performed.\n    priority: Urgency of the encounter.\n    subject: The patient present\
+        \ at the encounter.\n    participant: Practitioners and others involved.\n    period:\
+        \ Start and end of the encounter.\n    reason_code: Coded reason the encounter took\
+        \ place.\n    reason_reference: Reason expressed as a reference to another resource.\n\
+        \    diagnosis: Diagnoses relevant to this encounter.\n    service_provider: Organization\
+        \ responsible for the encounter.\n    part_of: Encounter this one is a part of."
+    EncounterDiagnosis:
+      properties:
+        condition:
+          $ref: '#/components/schemas/Reference'
+        use:
+          anyOf:
+            - $ref: '#/components/schemas/CodeableConcept'
+            - type: 'null'
+        rank:
+          anyOf:
+            - type: integer
+            - type: 'null'
+          title: Rank
+      additionalProperties: true
+      type: object
+      required:
+        - condition
+      title: EncounterDiagnosis
+      description: "A diagnosis relevant to the encounter.\n\nAttributes:\n    condition:\
+        \ Reference to the Condition or Procedure. Required by FHIR.\n    use: Role the diagnosis\
+        \ played — admission, discharge, billing, and so on.\n    rank: Ranking among the\
+        \ encounter's diagnoses, 1 being primary."
+    EncounterParticipant:
+      properties:
+        type:
+          anyOf:
+            - items:
+                $ref: '#/components/schemas/CodeableConcept'
+              type: array
+            - type: 'null'
+          title: Type
+        period:
+          anyOf:
+            - $ref: '#/components/schemas/Period'
+            - type: 'null'
+        individual:
+          anyOf:
+            - $ref: '#/components/schemas/Reference'
+            - type: 'null'
+      additionalProperties: true
+      type: object
+      title: EncounterParticipant
+      description: "A practitioner or other person involved in the encounter.\n\nAttributes:\n\
+        \    type: The role the participant played.\n    period: The span of the encounter\
+        \ they were present for.\n    individual: Reference to the Practitioner, PractitionerRole\
+        \ or RelatedPerson."
     HealthData:
-      type: object
-      title: HealthData
-      description: Per-dependency readiness flags.
       properties:
         redis:
           type: string
-          enum: [ok, error]
+          enum:
+            - ok
+            - error
           title: Redis
           description: Whether the Redis store holding SMART launch records answers.
-      required: [redis]
-
-    EHRType:
-      type: string
-      title: EHRType
-      description: >-
-        The EHR vendor keys, as a closed vocabulary. `generic` is an issuer
-        `detect_ehr_from_issuer()` did not recognise; it routes to the standard
-        FHIR adapter rather than to a vendor subclass.
-      enum: [athena, ecw, modmed, cerner, epic, generic]
-
-    LaunchSessionData:
       type: object
-      title: LaunchSessionData
-      description: What GET /fhir/callback hands back once a launch completes.
+      required:
+        - redis
+      title: HealthData
+      description: Per-dependency readiness flags.
+    Identifier:
+      properties:
+        use:
+          anyOf:
+            - type: string
+              enum:
+                - usual
+                - official
+                - temp
+                - secondary
+                - old
+            - type: 'null'
+          title: Use
+        type:
+          anyOf:
+            - $ref: '#/components/schemas/CodeableConcept'
+            - type: 'null'
+        system:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: System
+        value:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Value
+        period:
+          anyOf:
+            - $ref: '#/components/schemas/Period'
+            - type: 'null'
+        assigner:
+          anyOf:
+            - $ref: '#/components/schemas/Reference'
+            - type: 'null'
+      additionalProperties: true
+      type: object
+      title: Identifier
+      description: "A business identifier — an MRN, a policy number, a claim number.\n\nAttributes:\n\
+        \    use: Role this identifier plays for its owner.\n    type: Coded description of\
+        \ the identifier's kind.\n    system: Namespace the value is unique within.\n    value:\
+        \ The identifier itself. Frequently PHI (an MRN or member id).\n    period: When the\
+        \ identifier was or is valid.\n    assigner: Organization that issued it."
+    LaunchSessionData:
       properties:
         launch_id:
           type: string
           title: Launch Id
-          description: >-
-            Names this SMART launch and the EHR access token it produced. It is
-            NOT an encounter session_id: a launch precedes the visit and
-            outlives individual encounters. See CLAUDE.md, 'A SMART launch is
-            not an encounter session'.
+          description: 'Names this SMART launch and the EHR access token it produced. It is
+            NOT an encounter session_id: a launch precedes the visit and outlives individual
+            encounters. See CLAUDE.md, ''A SMART launch is not an encounter session''.'
         ehr_type:
-          $ref: "#/components/schemas/EHRType"
+          $ref: '#/components/schemas/EHRType'
+          description: The EHR vendor the issuer resolved to, or 'generic'.
         expires_in:
           type: integer
           title: Expires In
           description: Seconds until the stored EHR access token expires.
-      required: [launch_id, ehr_type, expires_in]
+      type: object
+      required:
+        - launch_id
+        - ehr_type
+        - expires_in
+      title: LaunchSessionData
+      description: What ``GET /fhir/callback`` hands back once a launch completes.
+    Meta:
+      properties:
+        versionId:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Versionid
+        lastUpdated:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Lastupdated
+        source:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Source
+        profile:
+          anyOf:
+            - items:
+                type: string
+              type: array
+            - type: 'null'
+          title: Profile
+      additionalProperties: true
+      type: object
+      title: Meta
+      description: "Resource metadata maintained by the server.\n\nOnly the elements this\
+        \ project reads are modelled. ``security`` and ``tag`` are\ndeliberately omitted —\
+        \ nothing here consumes them, and leaving them out keeps\nthis module free of any\
+        \ dependency on the datatypes module. ``extra=\"allow\"``\nmeans a server that sends\
+        \ them still round-trips them unchanged.\n\nAttributes:\n    version_id: Server-assigned\
+        \ version, used for optimistic locking on write.\n    last_updated: When the resource\
+        \ was last changed, as an ``instant``.\n    source: URI identifying where the resource\
+        \ came from.\n    profile: Profile URIs the resource claims to conform to, e.g. US\
+        \ Core."
+    PatientContext:
+      properties:
+        patient:
+          $ref: '#/components/schemas/PatientInfo'
+        coverage:
+          anyOf:
+            - $ref: '#/components/schemas/CoverageInfo'
+            - type: 'null'
+        conditions:
+          items:
+            $ref: '#/components/schemas/Condition'
+          type: array
+          title: Conditions
+          default: []
+        requires_manual_confirmation:
+          type: boolean
+          title: Requires Manual Confirmation
+          default: false
+      type: object
+      required:
+        - patient
+      title: PatientContext
+      description: "Everything a policy query needs about one patient, assembled from three\
+        \ fetches.\n\nThis is what ``EHRAdapter.get_patient_context()`` returns and what\n\
+        ``GET /fhir/patient/{patient_id}/context`` answers with.\n\nAttributes:\n    patient:\
+        \ The patient's demographics.\n    coverage: The payer half, or None when the EHR\
+        \ returned no usable\n        ``Coverage`` at all.\n    conditions: The patient's\
+        \ active conditions, as FHIR R4 resources.\n    requires_manual_confirmation: True\
+        \ when the payer information is\n        incomplete. TASK-052 sets it rather than\
+        \ failing the request: a\n        provider filling the payer in is a working encounter,\
+        \ and a guessed\n        payer is a cache key standing for a plan the patient is not\
+        \ on."
+    PatientInfo:
+      properties:
+        patient_id:
+          type: string
+          title: Patient Id
+        family_name:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Family Name
+        given_names:
+          items:
+            type: string
+          type: array
+          title: Given Names
+          default: []
+        birth_date:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Birth Date
+        gender:
+          anyOf:
+            - type: string
+              enum:
+                - male
+                - female
+                - other
+                - unknown
+            - type: 'null'
+          title: Gender
+      type: object
+      required:
+        - patient_id
+      title: PatientInfo
+      description: "A patient's demographics, flattened out of the FHIR ``Patient`` resource.\n\
+        \nAttributes:\n    patient_id: The patient's id on the EHR that answered.\n    family_name:\
+        \ Family name, when the resource carried one.\n    given_names: Given names, in the\
+        \ order the resource listed them.\n    birth_date: Date of birth as a FHIR ``date``\
+        \ string, when known.\n    gender: Administrative gender, used for record matching\
+        \ and for the\n        demographics a payer rule may key on (TASK-059). Not a statement\n\
+        \        about gender identity — see ``fhir_types.Patient``."
+    Period:
+      properties:
+        start:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Start
+        end:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: End
+      additionalProperties: true
+      type: object
+      title: Period
+      description: "A time range bounded by start and end.\n\nAttributes:\n    start: Inclusive\
+        \ start, as a ``dateTime`` string.\n    end: Inclusive end. Absent means the period\
+        \ has no known end."
+    Reference:
+      properties:
+        reference:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Reference
+        type:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Type
+        identifier:
+          anyOf:
+            - $ref: '#/components/schemas/Identifier'
+            - type: 'null'
+        display:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Display
+      additionalProperties: true
+      type: object
+      title: Reference
+      description: "A pointer from one resource to another.\n\nAttributes:\n    reference:\
+        \ Relative or absolute URL, e.g. ``Patient/1234``.\n    type: Resource type being\
+        \ referred to, when ``reference`` is absent.\n    identifier: Business identifier\
+        \ for the target, when it has no URL.\n    display: Human-readable label for the target."

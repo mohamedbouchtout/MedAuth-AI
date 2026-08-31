@@ -11,6 +11,8 @@ import logging
 from enum import StrEnum
 from urllib.parse import urlsplit
 
+import httpx
+
 from .athena import AthenaAdapter
 from .base import EHRAdapter
 from .cerner import CernerAdapter
@@ -138,7 +140,12 @@ def detect_ehr_from_issuer(iss_url: str) -> EHRType:
     return EHRType.GENERIC
 
 
-def get_adapter(ehr_type: EHRType, fhir_base_url: str, access_token: str) -> EHRAdapter:
+def get_adapter(
+    ehr_type: EHRType,
+    fhir_base_url: str,
+    access_token: str,
+    http_client: httpx.AsyncClient,
+) -> EHRAdapter:
     """Build the adapter for one EHR and one session.
 
     The signature asks for ``EHRType``, which is what mypy enforces. A valid
@@ -151,6 +158,9 @@ def get_adapter(ehr_type: EHRType, fhir_base_url: str, access_token: str) -> EHR
         ehr_type: The vendor key, from ``detect_ehr_from_issuer()`` or Redis.
         fhir_base_url: Base URL of that EHR's FHIR R4 server.
         access_token: The SMART on FHIR access token for this session.
+        http_client: The process-wide HTTP client the adapter makes its FHIR
+            calls on. Injected rather than built per adapter — see
+            ``EHRAdapter``'s class docstring for why.
 
     Returns:
         The adapter for that vendor, or a plain ``EHRAdapter`` for
@@ -167,4 +177,8 @@ def get_adapter(ehr_type: EHRType, fhir_base_url: str, access_token: str) -> EHR
             "src/adapters/factory.py, with an adapter class behind it."
         ) from exc
 
-    return _ADAPTERS[key](fhir_base_url=fhir_base_url, access_token=access_token)
+    return _ADAPTERS[key](
+        fhir_base_url=fhir_base_url,
+        access_token=access_token,
+        http_client=http_client,
+    )
