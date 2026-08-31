@@ -83,7 +83,12 @@ class Encounter(Base):
     insurance_member_id: Mapped[str | None] = mapped_column(sa.String(100), nullable=True)
 
     #: Where the encounter takes place, as a two-character USPS code, or null
-    #: until a SMART launch supplies it (TASK-052b). This is the patient-facing
+    #: until a SMART launch supplies it (TASK-052b). **The site of care, never
+    #: the patient's residence and never the plan's issuing state** — CMS's
+    #: Medicare Coverage Database says to select "the state where the service
+    #: took place", and no document in the seed corpus points anywhere else, so
+    #: TASK-052b reads it from the encounter's `Location`/`Organization` address
+    #: rather than from `Patient.address`. This is the site-of-care
     #: half of the `rag:{payer}:{plan_type}:{state}:{cpt_code}` key, and it is
     #: matched against `insurance_policies.state` and
     #: `insurance_policies.jurisdiction_states`, so it has to speak the same

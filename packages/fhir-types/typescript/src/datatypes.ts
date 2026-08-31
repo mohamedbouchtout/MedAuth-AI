@@ -127,8 +127,14 @@ export interface Address {
   readonly city?: string;
   /** County or district. */
   readonly district?: string;
-  /** State or province — payer policies are state-scoped, so this drives the
-   * `state` component of the RAG cache key described in CLAUDE.md. */
+  /** State or province. **Not** the source of the `state` component of the RAG
+   * cache key, whatever resource this address hangs off. An earlier version of
+   * this comment said it was, written before anyone read what the policy
+   * documents say about their own applicability. They say the site of care —
+   * CMS's Medicare Coverage Database instructs the reader to select "the state
+   * where the service took place" — so the key's `state` comes from the
+   * encounter's Location/Organization address, never from a `Patient.address`.
+   * See TASK-052b, "Where `state` comes from". */
   readonly state?: string;
   /** Postal or ZIP code. */
   readonly postalCode?: string;

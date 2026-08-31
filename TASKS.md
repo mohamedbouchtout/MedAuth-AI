@@ -4514,9 +4514,109 @@ logic do not change.
       segment.
     - `state` — two-character USPS, through `payer_vocab.normalize_state()`, so
       it speaks the vocabulary `insurance_policies.state` is matched against.
-      Decide where it comes from: the patient's address, the practice location,
-      or the `Coverage` resource — they disagree for a patient treated out of
-      state, and which one the payer's policy follows is the question to answer.
+      **It is the state where the service takes place — the site of care — and
+      not the patient's residence, and not the plan's issuing state.** This was
+      an open question in an earlier draft of this task; it was settled by
+      reading the real policy documents this repository already ingests rather
+      than by reasoning from general insurance-regulation knowledge. See "Where
+      `state` comes from" below for what the documents actually say.
+  - **Where `state` comes from — checked against the real documents, not
+    assumed.** The three candidates were the patient's address, the practice
+    location, and the `Coverage` resource. They disagree for a patient treated
+    out of state, so the question was answered by reading what the policy
+    documents in this repository's own corpus say about their own applicability.
+
+    - **CMS says it outright, and says it three times.** The Medicare Coverage
+      Database's own search help — the same database `services/policy-scraper`
+      scrapes — reads: *"You can narrow your search to only those documents
+      associated with a particular state by selecting the state where the
+      service took place."* The partial-state guidance immediately below it uses
+      the phrase twice more: *"if your location of service was in Southern
+      California ..."* and *"confirm that the document is relevant for your
+      location of service."* Note that this is also where CMS's sub-state
+      selections come from — California Northern/Southern and New York
+      Downstate/Queens/Upstate — which is the same vocabulary TASK-013 already
+      normalises to a parent state on the ingestion side.
+    - **A real LCD is scoped by contractor jurisdiction, and names no person.**
+      L39529 ("Intraarticular Knee Injections of Hyaluronan") carries a
+      Contractor Information block of *Contractor Name / Contract Type /
+      Contract Number / Jurisdiction / States* — Wisconsin Physicians Service,
+      J-05, Iowa / Kansas / Missouri - Entire State / Nebraska. Nothing in the
+      document refers to a beneficiary's residence, and a search of the LCD body
+      for "resides", "rendered", "furnished" and "place of service" returns
+      nothing. The document scopes itself geographically and leaves who is
+      standing in that geography to the claim.
+    - **Aetna's Clinical Policy Bulletins carry no geographic scope at all.**
+      CPB 0236, 0743 and 0016 were fetched and searched: no "state law", no
+      "state mandate", no "applicable state", no geographic applicability
+      section. Every occurrence of "state" in CPB 0743 is a bibliography
+      citation to Washington State health technology assessments. The only
+      scoping sentence is by benefit rather than by place: *"Clinical Policy
+      Bulletins are developed by Aetna to assist in administering plan benefits
+      ... contains only a partial, general description of plan or program
+      benefits."* This is what makes the Aetna documents national in the seed
+      corpus, and it is a property of the documents rather than a convenience.
+    - **BCBSMA scopes by product line, not by geography.** Policy #400's tables
+      are headed *"investigational (not covered) for Commercial Products and for
+      Medicare HMO Blue and Medicare PPO Blue"*, and #933's table of contents is
+      split into "Commercial Products" and "Medicare Advantage Products". Neither
+      document contains the words "Massachusetts", "state", "resident" or
+      "situs" anywhere. Its state scope is entirely an artefact of *which
+      licensee published it* — which is exactly why CLAUDE.md keeps licensees
+      apart under their own slugs. Coverage itself is deferred to the member:
+      *"All coverage is based on a member's plan documents ... If there is a
+      difference between the coverage in this policy and a member's documents,
+      the plan documents will be used to determine coverage."*
+
+    **What follows.** The one payer that states a rule states the site of care,
+    and no document in the corpus points at the patient's residence or at a
+    plan-issuing state. So `state` is the site of care. Concretely that is
+    `Encounter.location[].location` → `Location.address.state`, falling back to
+    `Encounter.serviceProvider` → `Organization.address.state`.
+
+    **This means `Coverage` is the wrong source for `state`, and the patient's
+    address is also the wrong source.** Both were live candidates before the
+    documents were read. `CoverageInfo` carries no address and should not grow
+    one. Note that `fhir_types.datatypes.Address.state`'s docstring currently
+    claims it "drives the `state` component of the RAG cache key" — written on
+    the datatype the *patient's* address uses. That comment is falsified by this
+    finding and is corrected in the same change.
+
+    **Where the commercial half is genuinely undetermined, say so rather than
+    guess.** Aetna and BCBSMA do not answer the question at all, so the site of
+    care is being carried over from the one payer that does. That is a defensible
+    default rather than a documented rule for those payers, and it is recorded
+    here as such. When the site-of-care state and the patient's address state
+    disagree, log at WARNING naming both — the same spirit as an unknown payer
+    in `packages/payer-vocab` and as `requires_manual_confirmation`: the answer
+    still goes out, and the fact that two sources disagreed is visible in the
+    operational trace instead of being invisible.
+
+  - **Blocker found while checking the above: Synthea emits no searchable
+    `Coverage` resource, so the first acceptance criterion below cannot pass as
+    written.** Verified two ways rather than assumed. First, against real Synthea
+    R4 output (`synthea_sample_data_fhir_r4_nov2021`): across 40 patient bundles
+    containing 2,348 encounters, the count of `Coverage` resources is **zero**.
+    The payer appears only as a display string on
+    `ExplanationOfBenefit.insurer.display` (e.g. `"Blue Cross Blue Shield"` — the
+    unqualified name CLAUDE.md routes to the generic bucket) and as a
+    **contained** `#coverage` inside the EOB. Second, against Synthea's current
+    `master` source, which is what `scripts/seed-synthea.sh` downloads:
+    `FhirR4.java` builds the `Coverage`, calls `eob.addContained(coverage)`, and
+    carries the open comment `// TODO: Make Coverage separate resources for US
+    Core 6 & 7?`. So `Coverage?patient={id}` against a Synthea-seeded HAPI
+    returns an empty search `Bundle`, which TASK-052's table maps to
+    `coverage=None` plus `requires_manual_confirmation=true`.
+    Two further details matter for anyone tempted to read the contained resource
+    instead: Synthea sets `coverage.type` to the **payer's name**, not a plan
+    type, so `plan_type` would be NULL regardless; and Synthea generates a
+    single-state population (all 40 bundles are `MA`, and every encounter's
+    service-provider state equals the patient's state), so **Synthea cannot
+    exercise the out-of-state disagreement case at all**. Both the payer columns
+    and the disagreement path therefore need hand-built resources posted to
+    HAPI, in the style of TASK-052's existing per-PR HAPI test, rather than a
+    Synthea patient. The acceptance criteria below are rewritten accordingly.
+
   - **What counts as "incomplete" is TASK-052's enumerated table, not a
     judgement made here.** That task fixes, row by row, when `get_coverage()`
     returns `None`, when it returns a partial `CoverageInfo`, and when
@@ -4536,24 +4636,87 @@ logic do not change.
     which `launch_id` an encounter was created under rather than assuming the
     two values are the same. Settled in CLAUDE.md under "A SMART launch is not
     an encounter session"; do not re-derive it here.
-  - **Before closing this task, the CPT table must be clinically reviewed.**
+  - **The CPT table is still not clinically reviewed, and the AMA CPT licensing
+    position is still unsettled. Both are real blockers, and both are
+    deliberately deferred for the v1 proof of concept — tracked as issue #70.**
     TASK-024's `procedure_codes.py` was written from general knowledge, not from
-    a licensed AMA CPT distribution, and no code in it can reach a provider
-    until this task populates the payer columns. So this is the gate: a
-    certified coder signs off on the code/qualifier pairings and the `assumes`
-    annotations, and the AMA CPT licensing position is settled, before Track B
-    fires a nudge at anyone. Do not close this without both.
-  - **Test:** a SMART launch against local HAPI FHIR with a Synthea patient
-    populates all three columns, and `resolve_query_parameters()` then returns a
-    complete parameter set
+    a licensed AMA CPT distribution, and until this task populates the payer
+    columns no code in it could reach a provider at all. An earlier draft of
+    this task therefore made both a hard prerequisite of closing it.
+
+    That has been relaxed, on one explicit and narrow basis: **no real clinical
+    encounter is being processed.** v1 is a proof of concept exercised end to
+    end against synthetic patients on a local HAPI FHIR server, with no real
+    patient, no real provider and no submission to a real payer, so the code
+    table cannot mislead anyone. The relaxation is scoped to that condition and
+    to nothing else.
+
+    What must not be lost when it stops being true: **no real patient encounter
+    goes through Track B until a certified coder has signed off on the
+    code/qualifier pairings and the `assumes` annotations, and the AMA CPT
+    licensing position is written down.** Issue #70 holds both, with the failure
+    mode spelled out — a wrong code does not merely answer one encounter badly,
+    it writes a cacheable policy answer under a `rag:` key standing for a
+    different procedure and serves it to the next encounter that matches.
+  - **Test:** a SMART launch against local HAPI FHIR populates all three
+    columns, and `resolve_query_parameters()` then returns a complete parameter
+    set. **Against hand-posted `Patient`, `Coverage`, `Encounter`, `Location`
+    and `Organization` resources, not against a Synthea patient** — see the
+    Synthea blocker above; a Synthea patient has no searchable `Coverage` and so
+    can only ever exercise the NULL path. This follows TASK-052's existing
+    per-PR HAPI test, which posts the handful of resources it needs to a real
+    server and reads them back through the adapter.
+  - **Test:** a Synthea-seeded patient populates `state` alone and leaves the
+    two payer columns NULL with `requires_manual_confirmation` set — the
+    honest outcome for a source that carries no `Coverage`, asserted so the
+    blocker cannot be silently "fixed" later by reading the contained
+    `#coverage` out of an `ExplanationOfBenefit`.
   - **Test:** a `Coverage` resource with no plan type leaves the column NULL and
     the resolution names `plan_type` alone — never a default
+  - **Test:** `state` is taken from the site of care, not the patient. An
+    encounter whose `Location`/`Organization` is in one state and whose
+    `Patient.address` is in another stores the site-of-care state, and logs a
+    WARNING naming both.
+  - **Test:** an encounter with no resolvable `Location` and no
+    `serviceProvider` leaves `state` NULL rather than falling back to the
+    patient's address
   - **Test:** a CMS sub-state jurisdiction code reaching the state field is
     normalised to its parent state rather than stored raw
   - **Test:** end to end over Redis, replacing TASK-021's stubbed seam — a
     published transcript segment produces a real `/policies/query` call. This is
     TASK-024's deferred acceptance criterion and it belongs here, because it
     cannot pass until these columns are populated.
+
+    **"End to end" here is strict, and the strictness is the point.** This is
+    the first moment TASK-021's stubbed seam and TASK-024's deferred criterion
+    are both actually proven, so a partial stand-in would leave both looking
+    closed while neither is. The test runs the real chain, with no component
+    replaced by a fake:
+    - a real `POST /sessions/start` creating a real `encounters` row, with the
+      three columns populated by this task's launch path;
+    - a real publish to `transcription:{session_id}` on the **real Redis** from
+      `docker compose`, consumed by the **real** track-b-rag transcript
+      consumer — not by calling the handler directly;
+    - real procedure detection and real `procedure_codes` resolution producing a
+      real CPT code, and a real `procedure_seen:{session_id}` claim in Redis;
+    - a real `resolve_query_parameters()` reading that encounter row out of the
+      **real Postgres**, returning a complete set with nothing defaulted;
+    - a real HTTP `POST /policies/query` against a running `track-b-rag`, whose
+      response is the real envelope.
+
+    **What may be substituted, and nothing else:** AWS Bedrock, which has no
+    local mock and is the one dependency CLAUDE.md already names as unavoidably
+    external. Qdrant, Redis, Postgres and HAPI FHIR all run in `docker compose`
+    and are used for real. Substituting the Redis bus, the consumer, the
+    parameter resolution or the HTTP call would remove precisely the seam this
+    test exists to prove.
+    - **Assert the payer-scoped `rag:` key was written and that it interpolates
+      the canonical slug**, not a display name — the failure TASK-016/TASK-017
+      fixed once, and the first time this task makes it reachable with a real
+      payer value.
+    - **Assert the patient-specific fields were not cached**, per CLAUDE.md's
+      cache note. This is the first end-to-end run where a real patient's gap
+      analysis and a real payer key exist at the same time.
 - [ ] **TASK-052c:** Implement `scripts/setup-dev.sh`
   - **Why it is its own task.** The stub reads `# Implemented in TASK-052` and
     CLAUDE.md's tree says "stub until TASK-052", but installing dependencies has

@@ -158,8 +158,16 @@ class Address(FHIRBase):
         line: Street lines, in order.
         city: City or town.
         district: County or district.
-        state: State or province — payer policies are state-scoped, so this drives
-            the ``state`` component of the RAG cache key described in CLAUDE.md.
+        state: State or province. **Not the source of the ``state`` component of
+            the RAG cache key**, whatever resource this address hangs off. An
+            earlier version of this docstring said it was, which was written
+            before anyone read what the policy documents say about their own
+            applicability. They say the site of care: CMS's Medicare Coverage
+            Database instructs the reader to select "the state where the service
+            took place", and no document in the seed corpus points at a
+            patient's residence. The cache key's ``state`` therefore comes from
+            the encounter's ``Location``/``Organization`` address, not from a
+            ``Patient.address`` — see TASK-052b, "Where ``state`` comes from".
         postal_code: Postal or ZIP code.
         country: Country, as a name or ISO 3166 code.
         period: When this address was or is in use.
