@@ -21,6 +21,7 @@ from functools import lru_cache
 from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from cors_policy import AllowedOrigins
 from src.adapters.factory import EHRType
 
 
@@ -61,6 +62,19 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)
 
     redis_url: str = Field(default="redis://localhost:6379/0", min_length=1)
+
+    #: Browser origins this service answers, from ``CORS_ALLOWED_ORIGINS``.
+    #: Empty by default, which installs no middleware at all. TASK-052 is what
+    #: made this service browser-facing: ``GET /fhir/patient/{id}/context`` is a
+    #: real cross-origin fetch from ``apps/web``, unlike the launch routes,
+    #: which are top-level navigations a browser applies no CORS to. See
+    #: CLAUDE.md, "CORS and browser reachability".
+    #:
+    #: There is deliberately no ``database_url`` beside it. ``hipaa_logger``
+    #: reads ``DATABASE_URL`` from the environment itself and owns its own pool,
+    #: and this service opens no database connection of its own — a second
+    #: declaration here would be a same-named setting with no reader.
+    cors_allowed_origins: AllowedOrigins = ()
 
     #: Where the EHR's authorization server sends the browser back to. This must
     #: be byte-for-byte what was registered in each vendor's developer portal:

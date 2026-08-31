@@ -11,15 +11,40 @@ the method Cerner and Epic override (TASK-056, TASK-057), so those subclasses
 can call ``super()`` and adjust the assembled result instead of reimplementing
 three fetches.
 
-Every method here is a stub. TASK-052 implements the fetches, TASK-053 the note
-write-back and TASK-054 the prior authorization submission.
+TASK-052 implements the fetches. TASK-053 still owns the note write-back and
+TASK-054 the prior authorization submission; those two remain stubs.
 """
 
 from __future__ import annotations
 
-from fhir_types import Claim, Condition, Encounter
+import asyncio
+import logging
+from typing import Any, Final
 
+import httpx
+from pydantic import ValidationError
+
+from fhir_types import Claim, Condition, Coverage, Encounter, Patient
+
+from .errors import (
+    FHIRAuthorizationExpired,
+    FHIRMalformedResponse,
+    FHIRResourceNotFound,
+    FHIRUpstreamUnavailable,
+)
 from .models import CoverageInfo, PatientContext, PatientInfo, PriorAuthSubmission
+
+logger = logging.getLogger(__name__)
+
+#: Per-call timeout, set here rather than on the shared client, which is also
+#: used for unauthenticated discovery against other hosts. Matches the per-call
+#: arrangement ``smart/discovery.py`` and ``smart/oauth.py`` already use.
+FHIR_TIMEOUT_SECONDS: Final = 10.0
+
+#: US Core says an active condition is one whose ``clinicalStatus`` is any of
+#: these. ``active`` alone would drop a relapsed or recurring problem, which a
+#: payer's criteria may well turn on.
+_ACTIVE_CLINICAL_STATUSES: Final = frozenset({"active", "recurrence", "relapse"})
 
 
 class EHRAdapter:
@@ -36,21 +61,202 @@ class EHRAdapter:
     ``__repr__`` deliberately: an adapter reaches error paths and log lines that
     a token must not, and the cheapest way to guarantee that is for the object
     never to render it. Subclasses must not expose it either.
+
+    **The HTTP client is injected, never constructed here.** It is the
+    process-wide ``httpx.AsyncClient`` from ``src/api/dependencies.py``, so
+    connections to a vendor's FHIR server pool across requests exactly as they
+    already do for discovery and token exchange, and a test substitutes a
+    transport without patching anything. An adapter that built its own would
+    open a pool per request and put the one object that must not render its
+    access token in charge of its own transport.
     """
 
-    def __init__(self, fhir_base_url: str, access_token: str) -> None:
-        """Bind the adapter to one EHR's FHIR endpoint and one session's token.
+    def __init__(
+        self, fhir_base_url: str, access_token: str, http_client: httpx.AsyncClient
+    ) -> None:
+        """Bind the adapter to one EHR's FHIR endpoint and one launch's token.
 
         Args:
             fhir_base_url: Base URL of the EHR's FHIR R4 server.
-            access_token: The SMART on FHIR access token for this session.
+            access_token: The SMART on FHIR access token for this launch.
+            http_client: The shared HTTP client. See the class docstring.
         """
-        self.fhir_base_url = fhir_base_url
+        self.fhir_base_url = fhir_base_url.rstrip("/")
         self._access_token = access_token
+        self._http = http_client
 
     def __repr__(self) -> str:
         """Render the adapter without its access token. See the class docstring."""
         return f"{type(self).__name__}(fhir_base_url={self.fhir_base_url!r})"
+
+    # -- The one place an HTTP call to an EHR is made -------------------------
+
+    async def _get(
+        self,
+        path: str,
+        *,
+        resource_type: str,
+        resource_id: str,
+        params: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """GET one FHIR path and return its decoded body.
+
+        Every failure mode is turned into one of the four in ``errors.py`` here,
+        so no caller has to interpret an HTTP status and none of them can
+        disagree about what a 404 or a 502 means.
+
+        **The ``Authorization`` header is applied per request**, never as a
+        default on the shared client, which also talks to hosts that must not
+        see this token.
+
+        Args:
+            path: Path below the FHIR base URL, e.g. ``Patient/123``.
+            resource_type: What is being fetched, for the error message.
+            resource_id: The id asked for, for the error message.
+            params: Search parameters, when this is a search rather than a read.
+
+        Returns:
+            The decoded JSON body.
+
+        Raises:
+            FHIRAuthorizationExpired: The EHR rejected the token (401/403).
+            FHIRResourceNotFound: The EHR answered 404.
+            FHIRUpstreamUnavailable: Transport failure or a 5xx.
+            FHIRMalformedResponse: A 200 whose body is not JSON.
+        """
+        try:
+            response = await self._http.get(
+                f"{self.fhir_base_url}/{path}",
+                params=params,
+                headers={
+                    "Authorization": f"Bearer {self._access_token}",
+                    "Accept": "application/fhir+json",
+                },
+                timeout=FHIR_TIMEOUT_SECONDS,
+            )
+        except httpx.TimeoutException as exc:
+            raise FHIRUpstreamUnavailable(
+                resource_type, resource_id, "the EHR did not answer in time", timed_out=True
+            ) from exc
+        except httpx.HTTPError as exc:
+            # Deliberately not ``str(exc)``: httpx puts the full request URL in
+            # its message, and a search URL carries a patient id.
+            raise FHIRUpstreamUnavailable(
+                resource_type, resource_id, "the EHR could not be reached"
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise FHIRAuthorizationExpired(
+                resource_type, resource_id, "the EHR rejected this launch's access token"
+            )
+        if response.status_code == 404:
+            raise FHIRResourceNotFound(resource_type, resource_id, "no such resource on the EHR")
+        if response.status_code >= 500:
+            raise FHIRUpstreamUnavailable(
+                resource_type, resource_id, f"the EHR answered {response.status_code}"
+            )
+        if response.status_code >= 400:
+            # A 4xx that is not one of the above is the EHR refusing the request
+            # as we built it — a malformed search, an unsupported parameter.
+            # That is our bug rather than an outage, and not worth retrying.
+            raise FHIRMalformedResponse(
+                resource_type, resource_id, f"the EHR refused the request ({response.status_code})"
+            )
+
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise FHIRMalformedResponse(
+                resource_type, resource_id, "the EHR's response was not JSON"
+            ) from exc
+
+        if not isinstance(body, dict):
+            raise FHIRMalformedResponse(
+                resource_type, resource_id, "the EHR's response was not a FHIR resource"
+            )
+
+        self._raise_if_not_found_outcome(body, resource_type, resource_id)
+        return body
+
+    @staticmethod
+    def _raise_if_not_found_outcome(
+        body: dict[str, Any], resource_type: str, resource_id: str
+    ) -> None:
+        """Treat a 200 ``OperationOutcome`` saying ``not-found`` as a not-found.
+
+        Some servers answer a missing resource with 200 and an outcome rather
+        than a 404. Only the issue *code* is read — never ``diagnostics``, which
+        is free text written for someone looking at a chart and routinely
+        carries patient detail.
+        """
+        if body.get("resourceType") != "OperationOutcome":
+            return
+        issues = body.get("issue")
+        codes = (
+            {issue.get("code") for issue in issues if isinstance(issue, dict)}
+            if isinstance(issues, list)
+            else set()
+        )
+        if "not-found" in codes:
+            raise FHIRResourceNotFound(resource_type, resource_id, "no such resource on the EHR")
+        raise FHIRMalformedResponse(
+            resource_type,
+            resource_id,
+            "the EHR returned an OperationOutcome instead of the resource",
+        )
+
+    @staticmethod
+    def _parse(model: type[Any], body: dict[str, Any], resource_type: str, resource_id: str) -> Any:
+        """Validate a decoded body against its R4 model.
+
+        Raises:
+            FHIRMalformedResponse: Wrong ``resourceType``, or a body the model
+                rejects. The validation error itself is not carried into the
+                message — pydantic echoes offending values, and those are PHI.
+        """
+        if body.get("resourceType") != resource_type:
+            raise FHIRMalformedResponse(
+                resource_type,
+                resource_id,
+                f"the EHR returned a {body.get('resourceType')!r} resource",
+            )
+        try:
+            return model.model_validate(body)
+        except ValidationError as exc:
+            raise FHIRMalformedResponse(
+                resource_type, resource_id, "the EHR's resource did not validate against FHIR R4"
+            ) from exc
+
+    async def _search(
+        self, resource_type: str, patient_id: str, extra: dict[str, str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Run a ``?patient=`` search and return the entry resources.
+
+        **An empty Bundle is a successful answer, not a not-found.** A patient
+        with no ``Coverage`` on file is an ordinary case that the coverage rule
+        handles; turning it into a 404 would make "no insurance recorded" and
+        "no such patient" the same outcome.
+        """
+        params = {"patient": patient_id}
+        if extra:
+            params.update(extra)
+        body = await self._get(
+            resource_type, resource_type=resource_type, resource_id=patient_id, params=params
+        )
+        if body.get("resourceType") != "Bundle":
+            raise FHIRMalformedResponse(
+                resource_type, patient_id, "the EHR did not return a search Bundle"
+            )
+        entries = body.get("entry") or []
+        if not isinstance(entries, list):
+            raise FHIRMalformedResponse(
+                resource_type, patient_id, "the search Bundle's entries were not a list"
+            )
+        return [
+            entry["resource"]
+            for entry in entries
+            if isinstance(entry, dict) and isinstance(entry.get("resource"), dict)
+        ]
 
     # -- Primitives: one resource type each, no composition -------------------
 
@@ -63,14 +269,34 @@ class EHRAdapter:
         Returns:
             The patient's demographics, flattened out of ``Patient``.
         """
-        raise NotImplementedError("get_patient is implemented in TASK-052")
+        body = await self._get(
+            f"Patient/{patient_id}", resource_type="Patient", resource_id=patient_id
+        )
+        patient: Patient = self._parse(Patient, body, "Patient", patient_id)
+
+        name = next(iter(patient.name or []), None)
+        return PatientInfo(
+            patient_id=patient.id or patient_id,
+            family_name=name.family if name else None,
+            given_names=list(name.given or []) if name else [],
+            birth_date=patient.birth_date,
+            gender=patient.gender,
+        )
 
     async def get_coverage(self, patient_id: str) -> CoverageInfo | None:
         """Primitive. Read the patient's insurance coverage.
 
-        Returns None when the EHR holds no usable ``Coverage`` at all. Partial
-        coverage is not an error and must not be filled in with a guess — see
-        ``PatientContext.requires_manual_confirmation``.
+        Returns None when the EHR holds no usable ``Coverage`` — none at all,
+        none active, or several active with no unambiguous primary. Partial
+        coverage is not an error and must not be filled in with a guess; see
+        ``PatientContext.requires_manual_confirmation`` and the enumerated table
+        in TASK-052.
+
+        **Selecting among several active coverages goes by ``Coverage.order``**,
+        FHIR's own coordination-of-benefits ranking, and a tie is not broken.
+        Picking one arbitrarily would answer a policy query against a secondary
+        payer — a confident wrong answer, where an empty answer plus a visible
+        signal is this repository's standing preference.
 
         Args:
             patient_id: The patient's id on this EHR.
@@ -78,10 +304,98 @@ class EHRAdapter:
         Returns:
             The payer, plan type and member id, or None.
         """
-        raise NotImplementedError("get_coverage is implemented in TASK-052")
+        resources = await self._search("Coverage", patient_id)
+        coverages = [
+            self._parse(Coverage, resource, "Coverage", patient_id)
+            for resource in resources
+            if resource.get("resourceType") == "Coverage"
+        ]
+        active = [coverage for coverage in coverages if coverage.status == "active"]
+        if not active:
+            return None
+
+        chosen = self._primary_coverage(active)
+        if chosen is None:
+            logger.warning(
+                "Patient has %d active Coverage resources with no unambiguous primary "
+                "(Coverage.order absent or tied) — returning no coverage and asking for "
+                "manual confirmation rather than guessing a payer.",
+                len(active),
+            )
+            return None
+
+        return CoverageInfo(
+            payer=self._payer_display(chosen),
+            plan_type=self._plan_type(chosen),
+            member_id=self._member_id(chosen),
+        )
+
+    @staticmethod
+    def _primary_coverage(active: list[Coverage]) -> Coverage | None:
+        """Return the unambiguous primary coverage, or None when there is none."""
+        if len(active) == 1:
+            return active[0]
+
+        ordered = [coverage for coverage in active if coverage.order is not None]
+        if not ordered:
+            return None
+        lowest = min(coverage.order for coverage in ordered if coverage.order is not None)
+        candidates = [coverage for coverage in ordered if coverage.order == lowest]
+        return candidates[0] if len(candidates) == 1 else None
+
+    @staticmethod
+    def _payer_display(coverage: Coverage) -> str | None:
+        """Return the payer's own spelling from ``Coverage.payor``.
+
+        **Never slugged here.** ``payer_vocab.normalize_payer()`` is called by
+        ``/policies/query`` and that stays the single normalisation site; a slug
+        stored in a column documented as the payer's own spelling is the drift
+        this repository already fixed once.
+        """
+        for payor in coverage.payor:
+            if payor.display:
+                return payor.display
+            if payor.identifier is not None and payor.identifier.value:
+                return payor.identifier.value
+        return None
+
+    @staticmethod
+    def _plan_type(coverage: Coverage) -> str | None:
+        """Return the plan type from ``Coverage.type``, falling back to ``class``.
+
+        US Core puts the plan category in ``type``; several EHRs carry it only
+        as the ``class`` entry whose type coding is ``plan``. Both are standard,
+        so both are read here rather than in a vendor subclass.
+        """
+        if coverage.type is not None:
+            if coverage.type.text:
+                return coverage.type.text
+            for coding in coverage.type.coding or []:
+                if coding.code:
+                    return coding.code
+
+        for entry in coverage.coverage_class or []:
+            codes = {coding.code for coding in entry.type.coding or []}
+            if "plan" in codes:
+                return entry.name or entry.value
+        return None
+
+    @staticmethod
+    def _member_id(coverage: Coverage) -> str | None:
+        """Return the member id from ``subscriberId``, falling back to an identifier."""
+        if coverage.subscriber_id:
+            return coverage.subscriber_id
+        for identifier in coverage.identifier or []:
+            if identifier.value:
+                return identifier.value
+        return None
 
     async def get_conditions(self, patient_id: str) -> list[Condition]:
         """Primitive. Read the patient's active conditions.
+
+        "Active" follows US Core rather than a literal ``active`` match:
+        ``recurrence`` and ``relapse`` are active problems too, and a payer's
+        criteria may turn on exactly those.
 
         Args:
             patient_id: The patient's id on this EHR.
@@ -89,7 +403,24 @@ class EHRAdapter:
         Returns:
             The active ``Condition`` resources, empty when there are none.
         """
-        raise NotImplementedError("get_conditions is implemented in TASK-052")
+        resources = await self._search("Condition", patient_id)
+        conditions = [
+            self._parse(Condition, resource, "Condition", patient_id)
+            for resource in resources
+            if resource.get("resourceType") == "Condition"
+        ]
+        return [condition for condition in conditions if self._is_active(condition)]
+
+    @staticmethod
+    def _is_active(condition: Condition) -> bool:
+        """Return whether a condition's ``clinicalStatus`` counts as active."""
+        status = condition.clinical_status
+        if status is None:
+            # A condition with no clinical status is not assertably resolved, and
+            # dropping it would hide a problem a payer's criteria may need.
+            return True
+        codes = {coding.code for coding in status.coding or []}
+        return bool(codes & _ACTIVE_CLINICAL_STATUSES)
 
     async def get_encounter(self, encounter_id: str) -> Encounter:
         """Primitive. Read one encounter.
@@ -100,7 +431,11 @@ class EHRAdapter:
         Returns:
             The ``Encounter`` resource.
         """
-        raise NotImplementedError("get_encounter is implemented in TASK-052")
+        body = await self._get(
+            f"Encounter/{encounter_id}", resource_type="Encounter", resource_id=encounter_id
+        )
+        encounter: Encounter = self._parse(Encounter, body, "Encounter", encounter_id)
+        return encounter
 
     # -- Composed: assembles primitives, and is the override point ------------
 
@@ -114,13 +449,28 @@ class EHRAdapter:
         and adjusts what comes back — it does not reimplement the three fetches,
         which is what overriding a primitive would force.
 
+        The three run concurrently: they are independent reads against one
+        server, and a context assembled serially pays three round trips of
+        latency for no benefit. A failure in any of them propagates, which is
+        why ``asyncio.gather`` is used without ``return_exceptions``.
+
         Args:
             patient_id: The patient's id on this EHR.
 
         Returns:
             The patient, their coverage and their active conditions.
         """
-        raise NotImplementedError("get_patient_context is implemented in TASK-052")
+        patient, coverage, conditions = await asyncio.gather(
+            self.get_patient(patient_id),
+            self.get_coverage(patient_id),
+            self.get_conditions(patient_id),
+        )
+        return PatientContext(
+            patient=patient,
+            coverage=coverage,
+            conditions=conditions,
+            requires_manual_confirmation=needs_manual_confirmation(coverage),
+        )
 
     # -- Neither layer: a write and a submission ------------------------------
 
@@ -153,3 +503,30 @@ class EHRAdapter:
             The payer's reference and which path submitted it.
         """
         raise NotImplementedError("submit_prior_auth is implemented in TASK-054")
+
+
+def needs_manual_confirmation(coverage: CoverageInfo | None) -> bool:
+    """Return whether a provider must confirm the payer information by hand.
+
+    The rule is TASK-052's enumerated table, in one function because TASK-052b
+    writes three encounter columns straight off it and a second derivation is
+    how two readings of one rule drift apart.
+
+    True when there is no usable coverage at all, when the payer cannot be read,
+    or when the plan type cannot be read. **A missing ``member_id`` does not set
+    it**, deliberately: it is not a segment of the
+    ``rag:{payer}:{plan_type}:{state}:{cpt_code}`` cache key and changes no
+    policy answer. TASK-060's prior-auth bundle is what needs it, and that is
+    far enough downstream to check for itself — asking a provider to confirm
+    payer details in order to fix a field unrelated to the payer's policy would
+    be noise.
+
+    Args:
+        coverage: The normalized coverage, or None when the EHR held none usable.
+
+    Returns:
+        True when the payer information is incomplete.
+    """
+    if coverage is None:
+        return True
+    return coverage.payer is None or coverage.plan_type is None

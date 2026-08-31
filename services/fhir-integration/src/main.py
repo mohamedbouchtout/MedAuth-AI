@@ -11,15 +11,20 @@ because another service imports from them; nothing imports this one, so it keeps
 the bare ``src`` layout. The task that first needs to import from here is the
 task that should rename it.
 
-**No CORS middleware, deliberately.** CLAUDE.md's rule is that a service
+**CORS is installed, as of TASK-052.** CLAUDE.md's rule is that a service
 installs ``cors_policy`` when it grows a browser-facing HTTP route, and not
-pre-emptively. Both routes here are browser *navigations* — the EHR redirects
-the browser to ``/fhir/launch`` and the authorization server redirects it to
+pre-emptively — and TASK-052 is that moment: ``GET /fhir/patient/{id}/context``
+is a real cross-origin fetch from ``apps/web``. The two launch routes are still
+not the reason. They are browser *navigations* — the EHR redirects the browser
+to ``/fhir/launch`` and the authorization server redirects it to
 ``/fhir/callback`` — and a browser applies no CORS to a top-level navigation,
-exactly as it applies none to a WebSocket upgrade. Middleware would protect
-nothing today. TASK-052 is what changes this: ``GET /fhir/patient/{id}/context``
-is a real cross-origin fetch from ``apps/web``, and it should install the shared
-policy in the same change that adds it.
+exactly as it applies none to a WebSocket upgrade.
+
+The ``X-MedAuth-Launch-Id`` header the FHIR routes read is a custom request
+header, so a browser preflights it; it is allowed in ``packages/cors-policy``
+rather than here, because that package fixes the header list for the whole
+repository and a service that could pass its own would be the per-service policy
+TASK-041c refused.
 """
 
 from __future__ import annotations
@@ -30,9 +35,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from api_envelope import install_error_handlers
+from cors_policy import install_cors
 from src.api.dependencies import close_clients
+from src.api.fhir import router as fhir_router
 from src.api.health import router as health_router
 from src.api.smart import router as smart_router
+from src.config import get_settings
 
 
 @asynccontextmanager
@@ -60,8 +68,13 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     install_error_handlers(app)
+    # Origins are per environment; the policy itself — methods, headers,
+    # credentials — is settled repo-wide in CLAUDE.md, "CORS and browser
+    # reachability", and lives in packages/cors-policy.
+    install_cors(app, get_settings().cors_allowed_origins)
     app.include_router(health_router)
     app.include_router(smart_router)
+    app.include_router(fhir_router)
     return app
 
 

@@ -14,7 +14,7 @@ def test_the_factory_returns_isolated_instances() -> None:
     assert create_app() is not create_app()
 
 
-def test_both_routers_are_mounted() -> None:
+def test_every_router_is_mounted() -> None:
     """Asserted through the generated schema rather than ``app.routes``.
 
     This FastAPI version keeps an included router's routes behind an opaque
@@ -22,7 +22,13 @@ def test_both_routers_are_mounted() -> None:
     """
     paths = set(create_app().openapi()["paths"])
 
-    assert {"/health", "/fhir/launch", "/fhir/callback"} == paths
+    assert {
+        "/health",
+        "/fhir/launch",
+        "/fhir/callback",
+        "/fhir/patient/{patient_id}/context",
+        "/fhir/encounter/{encounter_id}",
+    } == paths
 
 
 def test_the_shared_error_handlers_are_installed() -> None:
