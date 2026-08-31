@@ -4191,7 +4191,7 @@ logic do not change.
     null and does not fail the launch
   - **Test:** no `id_token`, claim or resolved identity reaches a log record
 
-- [ ] **TASK-052:** Base FHIR resource fetching (implements base.py methods)
+- [x] **TASK-052:** Base FHIR resource fetching (implements base.py methods)
   - Service: `services/fhir-integration`
   - Prerequisite: **TASK-050** (the stubs and the normalized models this fills
     in), **TASK-051** (the SMART launch that produces the EHR access token these
@@ -4242,14 +4242,29 @@ logic do not change.
       and takes the 404 path above; the point of stating it is that no code may
       be added that falls back to treating one as the other, and there is a test
       naming that case. Do not log the presented value.
-    - **CORS is not installed in this service and this task does not install
-      it.** Per CLAUDE.md, "Only the services that answer HTTP to a browser
-      install it … add it to a service when that service grows a browser-facing
-      HTTP route, not pre-emptively." TASK-070 is what makes `apps/web` call
-      these routes; that task installs the shared middleware here and must add
-      `X-MedAuth-Launch-Id` to the allowed request headers, since a custom
-      header triggers a preflight that will otherwise fail. Flagged here so it
-      is not discovered in a browser console.
+    - **This task installs `cors_policy.install_cors()` in this service, and
+      adds `X-MedAuth-Launch-Id` to the shared `ALLOWED_HEADERS`.** An earlier
+      draft of this bullet deferred both to TASK-070; that was wrong, and
+      `src/main.py`'s own docstring — written in TASK-051 — already said so:
+      "TASK-052 is what changes this … it should install the shared policy in
+      the same change that adds it." CLAUDE.md's trigger is a service *growing*
+      a browser-facing HTTP route, and this task is where the route appears.
+      Deferring would mean TASK-070 discovers a failed preflight in a browser
+      console, which is exactly what writing the rule down is meant to prevent.
+      The existing routes stay uncovered either way: `/fhir/launch` and
+      `/fhir/callback` are top-level browser navigations, and a browser applies
+      no CORS to those.
+    - **The header goes in `packages/cors-policy`, which is the point of that
+      package rather than a violation of it.** `ALLOWED_HEADERS` is fixed inside
+      the package precisely so no service can pass its own list, and its
+      docstring already anticipates the list growing as browser-facing routes
+      appear. So this is a one-entry change to the shared tuple, with a
+      preflight test naming the new header, and it selects the `cors-policy` job
+      as well as this service's. Do **not** reach for
+      `Authorization: Bearer <launch_id>` to avoid the change: that header
+      carries the MedAuth session token everywhere else in this repository, and
+      giving it a second meaning is the "two names for one thing" collapse this
+      document rejects elsewhere.
 
   - **The adapter is handed the pooled `httpx.AsyncClient`; it never creates
     one.** `EHRAdapter.__init__` takes the client alongside `fhir_base_url` and
@@ -4369,18 +4384,36 @@ logic do not change.
     scope** — it is TASK-052c, below, not part of this task.
 
   - **CI must start HAPI FHIR, and its wait condition needs checking rather than
-    assuming.** `ci.yml` runs `docker compose up -d --wait postgres redis qdrant`;
-    `hapi-fhir` joins that line. It is a Spring Boot application that builds a
-    schema on first start, so it is far slower than the three services already
-    there and the compose healthcheck and any `--wait-timeout` must be measured
-    against it, not inherited. A too-short timeout produces a flaky red CI that
-    looks like a test failure.
+    assuming.** It is a Spring Boot application that builds a schema on first
+    start, so it is far slower than the three services already there.
+    **Checking it produced a different answer than expected**, which is why the
+    bullet said to check: `hapiproject/hapi` is a **distroless image with no
+    `/bin/sh`, no `wget` and no `curl`**, so it can carry no healthcheck at all —
+    every probe fails with `exec: "/bin/sh": stat /bin/sh: no such file`. A
+    healthcheck that can never pass is worse than none, because it leaves the
+    container permanently `starting` and `docker compose up --wait` then blocks
+    until its timeout and fails, on a server that has been answering the whole
+    time. So `--wait` tells you nothing about this service, and readiness is
+    polled from outside against the published port instead — in CI before the
+    tests run, and in `scripts/seed-synthea.sh` before it seeds. Start it only
+    for the `services/fhir-integration` job; every other job would pay two
+    minutes of boot for nothing.
 
   - **`docs/api/fhir-integration.yaml` gains both routes in this change**, per
     the contract drift test that already guards it.
 
-  - **Test:** against local HAPI FHIR loaded with Synthea patients — verify all
-    fields populated
+  - **Test:** against a real local HAPI FHIR server — verify all fields
+    populated, and that a real 404 and a real empty search `Bundle` are
+    different outcomes. **Split from the Synthea seed deliberately.** Seeding
+    downloads a ~150MB JAR and generates a population, which is minutes per run
+    and needs a JDK; paying that on every pull request to assert field mapping
+    is a poor trade. So the per-PR test posts the handful of resources it needs
+    to a real server and reads them back through the adapter — which is what
+    catches a mapping that has rotted against real search semantics, real
+    `Bundle` shapes and real element casing — and the fuller Synthea-loaded
+    check stays a developer path through `scripts/seed-synthea.sh`. Skipping is
+    not silent: with `REQUIRE_HAPI_TESTS=1`, which CI sets, an unreachable
+    server fails rather than skips.
   - **Test:** each row of the coverage table above, named individually — in
     particular that a tie on `Coverage.order` yields `None` plus the flag rather
     than an arbitrary pick
@@ -4405,6 +4438,47 @@ logic do not change.
     first real run may fail for access reasons rather than code reasons. That is
     stated rather than assumed away; TASK-055 is where Athena is actually
     validated, and it should not be closed on the strength of this task.
+
+  - Built (`services/fhir-integration`, 192 tests at 96% coverage against the
+    80% gate, plus 2 gated Athena tests that do not run). The seven HAPI tests
+    were run against a real `hapiproject/hapi` R4 container and pass. Decisions
+    worth knowing before touching this:
+    - **`_get()` is the only place an HTTP call to an EHR is made**, and it is
+      where every transport outcome becomes one of the four typed errors. No
+      caller interprets a status code, so none of them can disagree about what a
+      404 means. A 4xx that is not 401/403/404 is classed **malformed**, not
+      unreachable: it is the EHR refusing the request as we built it, which is
+      our bug and is not worth retrying.
+    - **`needs_manual_confirmation()` is a module-level function, not a method.**
+      TASK-052b writes three encounter columns straight off the same rule, and a
+      second derivation is how two readings of one rule drift apart.
+    - **`get_patient_context()` runs its three primitives with
+      `asyncio.gather`** and without `return_exceptions`. Concurrent because
+      they are independent reads against one server; failing loudly because a
+      partial context that looks complete is the failure this whole task is
+      written against.
+    - **A `Condition` with no `clinicalStatus` is kept**, not dropped. It is not
+      assertably resolved, and dropping it would hide a problem a payer's
+      criteria may turn on. Active also includes `recurrence` and `relapse`, per
+      US Core — a literal `active` match would lose a relapsed problem.
+    - **The `Authorization` header is set per request, never on the shared
+      client**, which also performs unauthenticated discovery against other
+      hosts. A test asserts the header is present on the request rather than
+      trusting the construction.
+    - **CORS is installed here after all.** An earlier draft of this task
+      deferred it to TASK-070; `src/main.py`'s own docstring, written in
+      TASK-051, already said TASK-052 should do it, and that was the better
+      reading — this is where the browser-facing route appears. It needed one
+      entry added to `packages/cors-policy`'s `ALLOWED_HEADERS`, which selects
+      that package's CI job too.
+    - **The audit patch in the route tests is not the shortcut the moto rule
+      forbids.** `audit_log` is our own function and the assertion is on our
+      call to it; nothing about a third-party service is stubbed and then
+      asserted as though it had answered.
+    - **Still unverified against any real EHR.** The HAPI tests prove the
+      mapping against a conformant R4 server, not against a vendor. The
+      Athenahealth job is committed and gated but has never run green, and the
+      sandbox-access blocker above is unchanged.
 
 - [ ] **TASK-052b:** Populate encounter payer, plan type and state at SMART launch
   - Prerequisite: **TASK-051** (the SMART launch that produces a session),
