@@ -219,9 +219,15 @@ jobs:
           POSTGRES_PASSWORD: medauth_ci
         run: docker compose up -d --wait postgres redis qdrant
 
-      # Started only for the member that tests against it. It is a Spring Boot
+      # Started only for the members that test against it. It is a Spring Boot
       # application that builds a schema on first start, so it costs a couple of
       # minutes and every other job would pay that for nothing.
+      #
+      # track-b-rag joined fhir-integration here in TASK-052b: its end-to-end
+      # test runs fhir-integration as a subprocess against this server, which is
+      # the only way the launch half and the transcript half of that task are
+      # proven in one run. Synthea cannot stand in for the resources it posts —
+      # it emits no searchable Coverage at all.
       #
       # `--wait` is deliberately NOT used here, and readiness is polled from
       # outside instead. The image is distroless — no /bin/sh, no wget, no curl
@@ -231,14 +237,14 @@ jobs:
       # actually tells us it is up, and it fails loudly with logs rather than
       # letting the tests race the boot.
       - name: Start HAPI FHIR
-        if: matrix.member == 'services/fhir-integration'
+        if: matrix.member == 'services/fhir-integration' || matrix.member == 'services/track-b-rag'
         env:
           POSTGRES_DB: medauth_test
           POSTGRES_PASSWORD: medauth_ci
         run: docker compose up -d hapi-fhir
 
       - name: Wait for HAPI FHIR to serve
-        if: matrix.member == 'services/fhir-integration'
+        if: matrix.member == 'services/fhir-integration' || matrix.member == 'services/track-b-rag'
         run: |
           for attempt in $(seq 1 60); do
             if curl -sSf --max-time 5 http://localhost:8080/fhir/metadata >/dev/null 2>&1; then
@@ -265,13 +271,12 @@ jobs:
         working-directory: ${{ matrix.member }}
         shell: bash
         env:
-          # fhir-integration's HAPI tests skip when no server answers, so a
-          # laptop without the stack up still runs a clean suite. In CI the
-          # server is started above for that member, so a skip would mean the
-          # tests quietly stopped running — this turns that into a failure
-          # instead. Same reasoning as pairing an env-gated test with a
-          # scheduled run.
-          REQUIRE_HAPI_TESTS: ${{ matrix.member == 'services/fhir-integration' && '1' || '0' }}
+          # The HAPI tests skip when no server answers, so a laptop without
+          # the stack up still runs a clean suite. In CI the server is started
+          # above for these members, so a skip would mean the tests quietly
+          # stopped running — this turns that into a failure instead. Same
+          # reasoning as pairing an env-gated test with a scheduled run.
+          REQUIRE_HAPI_TESTS: ${{ (matrix.member == 'services/fhir-integration' || matrix.member == 'services/track-b-rag') && '1' || '0' }}
         run: |
           set -uo pipefail
           # `shell: bash` runs with -e already set by the runner, so the exit

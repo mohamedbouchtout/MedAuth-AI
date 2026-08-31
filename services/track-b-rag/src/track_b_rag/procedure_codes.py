@@ -69,10 +69,14 @@ of which is spoken. See TASK-024 for what would change either.
 **The codes in this table are not clinically verified and CPT is AMA-licensed
 material.** The descriptors here are short paraphrases, not the AMA's own long
 descriptors, and both the codes and the pairings need a certified coder's review
-before anything they produce reaches a provider. Nothing can reach one yet:
-:func:`track_b_rag.policy_dispatch.resolve_query_parameters` still cannot build
-a query at all, so no code in this file can be queried on until TASK-052b lands.
-That review is a prerequisite on TASK-052b for exactly this reason.
+before anything they produce reaches a provider. **That review has not
+happened, and since TASK-052b these codes can reach a provider** — the payer
+columns are populated, so a query is built and a nudge carrying one of these
+codes fires. It is deferred deliberately and narrowly, for a v1 proof of concept
+run against synthetic patients on a local FHIR server with no real patient, no
+real provider and no submission to a real payer. Issue #70 holds both this and
+the AMA CPT licensing position, and no real encounter goes through Track B until
+a certified coder has signed off.
 
 **How a new specialty extends this.** The shape is deliberately the one
 ``packages/payer-vocab`` uses: a deterministic matcher over a curated table,

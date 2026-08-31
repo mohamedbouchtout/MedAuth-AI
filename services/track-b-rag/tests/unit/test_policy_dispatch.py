@@ -123,8 +123,8 @@ def fake_encounter(
     Args:
         monkeypatch: pytest's patcher.
         payer, plan_type, state: The columns to report as populated. An empty
-            string stands for a NULL column, which is what every encounter has
-            until TASK-052b.
+            string stands for a NULL column, which is what an encounter
+            started without a SMART launch has (TASK-052b).
         row: Pass ``None`` for "no such encounter". Omit it to build a row from
             the three column arguments.
         raises: Raise this from ``execute`` instead, for the transient-failure path.
@@ -185,7 +185,7 @@ class TestResolveQueryParameters:
     async def test_it_builds_a_query_from_a_fully_populated_encounter(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """What TASK-052b will make true for real encounters."""
+        """What TASK-052b made true for an encounter started from a SMART launch."""
         fake_encounter(monkeypatch, payer="Aetna", plan_type="PPO", state="MA")
 
         parameters = await resolve_query_parameters(session_id=SESSION_ID, mention=KNEE_MENTION)
@@ -223,8 +223,9 @@ class TestResolveQueryParameters:
     ) -> None:
         """The raise reports this encounter's gap, not a fixed list.
 
-        A static list would keep saying "payer, plan_type, state" while TASK-052b
-        filled them in one at a time, and the log would stop meaning anything.
+        A static list would keep saying "payer, plan_type, state" even for an
+        encounter whose launch supplied two of the three, and the log would stop
+        meaning anything.
         """
         populated = {"payer": "Aetna", "plan_type": "PPO", "state": "MA"}
         populated[column] = ""
