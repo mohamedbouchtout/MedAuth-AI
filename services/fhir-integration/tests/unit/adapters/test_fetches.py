@@ -1,4 +1,4 @@
-"""The base adapter's four fetches and the composed context. TASK-052.
+"""The base adapter's primitives and its two composed methods. TASK-052, TASK-052b.
 
 Two things get most of the attention here, because they are the two the task
 settled explicitly and the two a later change is most likely to erode:
@@ -11,6 +11,8 @@ settled explicitly and the two a later change is most likely to erode:
 """
 
 from __future__ import annotations
+
+import logging
 
 import httpx
 import pytest
@@ -28,6 +30,10 @@ from tests.unit.conftest import (
     FakeFHIRServer,
     condition_resource,
     coverage_resource,
+    encounter_resource,
+    location_resource,
+    organization_resource,
+    patient_resource,
     search_bundle,
 )
 
@@ -400,3 +406,190 @@ class TestTheEmptyBundleIsNotANotFound:
         ehr.fail("/Coverage", httpx.Response(200, json=search_bundle()))
 
         assert await adapter_for(ehr).get_coverage("synthea-123") is None
+
+
+class TestTheEncounterCoverageContext:
+    """TASK-052b's composed method — the three ``encounters`` columns in one call."""
+
+    async def test_it_assembles_the_payer_half_and_the_site_of_care(
+        self, ehr: FakeFHIRServer
+    ) -> None:
+        context = await adapter_for(ehr).get_encounter_coverage_context("encounter-1")
+
+        assert context.encounter_id == "encounter-1"
+        assert context.patient_id == "synthea-123"
+        assert context.coverage is not None
+        assert context.coverage.payer == "Aetna Better Health of MA"
+        assert context.coverage.plan_type == "PPO"
+        assert context.state == "MA"
+        assert context.requires_manual_confirmation is False
+
+    async def test_the_patient_is_read_off_the_encounter_not_taken_as_a_parameter(
+        self, ehr: FakeFHIRServer
+    ) -> None:
+        """So a caller cannot pair one encounter with another patient's coverage."""
+        ehr.encounter = encounter_resource(subject="Patient/someone-else")
+        ehr.patient = patient_resource("someone-else")
+
+        await adapter_for(ehr).get_encounter_coverage_context("encounter-1")
+
+        assert any("Patient/someone-else" in url for url in ehr.requested_paths)
+        assert all("patient=synthea-123" not in url for url in ehr.requested_paths)
+
+    async def test_the_payer_is_kept_as_the_resource_spelled_it(self, ehr: FakeFHIRServer) -> None:
+        """``/policies/query`` is the single normalisation site; slugging twice is drift.
+
+        The column is documented as the payer's own spelling, so a slug arriving
+        here would make the column disagree with its own schema comment.
+        """
+        context = await adapter_for(ehr).get_encounter_coverage_context("encounter-1")
+
+        assert context.coverage is not None
+        assert context.coverage.payer == "Aetna Better Health of MA"
+
+    async def test_a_coverage_with_no_plan_type_leaves_it_none(self, ehr: FakeFHIRServer) -> None:
+        """Never a default guessed from the payer's name — a fabricated key segment."""
+        ehr.coverages = [coverage_resource(plan_type_text=None)]
+
+        context = await adapter_for(ehr).get_encounter_coverage_context("encounter-1")
+
+        assert context.coverage is not None
+        assert context.coverage.payer == "Aetna Better Health of MA"
+        assert context.coverage.plan_type is None
+        assert context.requires_manual_confirmation is True
+
+    async def test_no_coverage_leaves_the_payer_half_empty_but_still_answers_the_state(
+        self, ehr: FakeFHIRServer
+    ) -> None:
+        """The Synthea case: no searchable ``Coverage`` exists, and the state still does.
+
+        Synthea contains the ``Coverage`` inside an ``ExplanationOfBenefit``
+        rather than storing it as its own resource, so ``Coverage?patient=``
+        comes back empty. That is the honest NULL outcome, asserted here so
+        nobody later "fixes" it by digging the contained resource out of an EOB
+        — its ``type`` is the payer's name, not a plan type, so it would not
+        help anyway.
+        """
+        ehr.coverages = []
+
+        context = await adapter_for(ehr).get_encounter_coverage_context("encounter-1")
+
+        assert context.coverage is None
+        assert context.requires_manual_confirmation is True
+        assert context.state == "MA"
+
+
+class TestWhereTheStateComesFrom:
+    async def test_the_location_wins_over_the_service_provider(self, ehr: FakeFHIRServer) -> None:
+        """A Location is the room; an Organization can span states, so it is coarser."""
+        ehr.locations = {"loc-1": location_resource(state="NH")}
+        ehr.organizations = {"org-1": organization_resource(addresses=[{"state": "MA"}])}
+
+        context = await adapter_for(ehr).get_encounter_coverage_context("encounter-1")
+
+        assert context.state == "NH"
+
+    async def test_the_service_provider_answers_when_no_location_does(
+        self, ehr: FakeFHIRServer
+    ) -> None:
+        ehr.encounter = encounter_resource(locations=[])
+        ehr.organizations = {"org-1": organization_resource(addresses=[{"state": "NH"}])}
+
+        context = await adapter_for(ehr).get_encounter_coverage_context("encounter-1")
+
+        assert context.state == "NH"
+
+    async def test_a_location_with_no_address_falls_through_to_the_next_location(
+        self, ehr: FakeFHIRServer
+    ) -> None:
+        """A better answer than falling all the way through to the organization."""
+        ehr.encounter = encounter_resource(
+            locations=[
+                {"location": {"reference": "Location/no-address"}},
+                {"location": {"reference": "Location/loc-2"}},
+            ]
+        )
+        ehr.locations = {
+            "no-address": location_resource("no-address", state=None),
+            "loc-2": location_resource("loc-2", state="NH"),
+        }
+        ehr.organizations = {"org-1": organization_resource(addresses=[{"state": "MA"}])}
+
+        context = await adapter_for(ehr).get_encounter_coverage_context("encounter-1")
+
+        assert context.state == "NH"
+
+    async def test_a_dangling_location_reference_falls_through_rather_than_failing(
+        self, ehr: FakeFHIRServer
+    ) -> None:
+        """A coarser answer beats no answer; a SMART launch must not fail over this."""
+        ehr.locations = {}
+        ehr.organizations = {"org-1": organization_resource(addresses=[{"state": "NH"}])}
+
+        context = await adapter_for(ehr).get_encounter_coverage_context("encounter-1")
+
+        assert context.state == "NH"
+
+    async def test_an_outage_reading_a_location_still_propagates(self, ehr: FakeFHIRServer) -> None:
+        """An EHR that was down must not read as an encounter with no location."""
+        ehr.fail("/Location/", httpx.Response(503))
+
+        with pytest.raises(FHIRUpstreamUnavailable):
+            await adapter_for(ehr).get_encounter_coverage_context("encounter-1")
+
+    async def test_the_patients_address_is_never_a_fallback(self, ehr: FakeFHIRServer) -> None:
+        """The guard on the whole rule. NULL is the honest answer; a residence is not.
+
+        This is the obvious "fix" for a NULL state and it produces a plausible
+        value nearly every time, which is exactly what makes it dangerous: the
+        value keys a cache, so a wrong state serves one plan's answer to a
+        patient on another. The policy documents say the site of care, and a
+        residence is a different fact that merely coincides most of the time.
+        """
+        ehr.encounter = encounter_resource(locations=[], service_provider=None)
+        ehr.patient = patient_resource(address_state="NH")
+
+        context = await adapter_for(ehr).get_encounter_coverage_context("encounter-1")
+
+        assert context.state is None
+
+    async def test_a_disagreement_with_the_patients_address_is_logged(
+        self, ehr: FakeFHIRServer, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The site-of-care answer still goes out; the disagreement becomes visible.
+
+        The commercial payers in the corpus state no geographic rule at all, so
+        the site-of-care rule is carried over for them rather than documented.
+        This is what makes that carry-over auditable instead of invisible.
+        """
+        ehr.locations = {"loc-1": location_resource(state="NH")}
+        ehr.patient = patient_resource(address_state="MA")
+
+        with caplog.at_level(logging.WARNING):
+            context = await adapter_for(ehr).get_encounter_coverage_context("encounter-1")
+
+        assert context.state == "NH"
+        assert "different states" in caplog.text
+
+    async def test_a_cms_sub_state_code_is_normalised_before_it_is_stored(
+        self, ehr: FakeFHIRServer
+    ) -> None:
+        """``CHAR(2)`` could not hold ``CNMI``, and ``QN`` would match no policy row."""
+        ehr.locations = {"loc-1": location_resource(state="QN")}
+
+        context = await adapter_for(ehr).get_encounter_coverage_context("encounter-1")
+
+        assert context.state == "NY"
+
+    async def test_an_encounter_with_no_readable_subject_still_answers_the_state(
+        self, ehr: FakeFHIRServer
+    ) -> None:
+        """The state belongs to the encounter, so it survives an unreadable patient."""
+        ehr.encounter = encounter_resource(subject=None)
+
+        context = await adapter_for(ehr).get_encounter_coverage_context("encounter-1")
+
+        assert context.patient_id is None
+        assert context.coverage is None
+        assert context.requires_manual_confirmation is True
+        assert context.state == "MA"

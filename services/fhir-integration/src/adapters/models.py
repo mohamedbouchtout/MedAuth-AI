@@ -33,6 +33,15 @@ class PatientInfo(BaseModel):
         gender: Administrative gender, used for record matching and for the
             demographics a payer rule may key on (TASK-059). Not a statement
             about gender identity — see ``fhir_types.Patient``.
+        address_state: The patient's residence state as a USPS code, when the
+            resource carried one this vocabulary recognises. **Not a source for
+            the encounter's ``state`` column**, and TASK-052b's only use of it
+            is the disagreement warning: the policy documents scope themselves
+            by the site of care, so a patient's residence is a different fact
+            that merely coincides most of the time. Reading it as the site of
+            care is the mistake this field's presence makes easy, which is why
+            the ban is written on the field rather than only in
+            :mod:`src.adapters.site_of_care`.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -42,6 +51,7 @@ class PatientInfo(BaseModel):
     given_names: list[str] = []
     birth_date: str | None = None
     gender: AdministrativeGender | None = None
+    address_state: str | None = None
 
 
 class CoverageInfo(BaseModel):
@@ -88,6 +98,56 @@ class PatientContext(BaseModel):
     patient: PatientInfo
     coverage: CoverageInfo | None = None
     conditions: list[Condition] = []
+    requires_manual_confirmation: bool = False
+
+
+class EncounterCoverageContext(BaseModel):
+    """What one encounter needs written onto its ``encounters`` row.
+
+    TASK-052b. This is what ``EHRAdapter.get_encounter_coverage_context()``
+    returns and what ``GET /fhir/encounter/{encounter_id}/coverage-context``
+    answers with, and it maps one-to-one onto three columns:
+    ``insurance_payer``, ``insurance_plan_type`` and ``state``.
+
+    **It is a separate shape from :class:`PatientContext` because it answers a
+    different question.** That one is "what do we know about this patient" and
+    is keyed on a patient; this one is "which payer policy set applies to this
+    visit, and where did it happen" and is keyed on an encounter. Only this one
+    can carry ``state``, because the site of care is a property of the encounter
+    and no patient-keyed shape has anywhere honest to put it.
+
+    Attributes:
+        encounter_id: The encounter's id on the EHR that answered.
+        patient_id: The subject read off ``Encounter.subject``, or None when the
+            reference could not be resolved — in which case no coverage was
+            read either.
+        coverage: The payer half, or None when the EHR held no usable
+            ``Coverage``. Reuses :class:`CoverageInfo` rather than flattening
+            it, so the enumerated rule in TASK-052 has exactly one shape to
+            produce.
+        state: The **site-of-care** state as a two-character USPS code, or None
+            when neither a ``Location`` nor an ``Organization`` yielded one.
+            Never the patient's residence — see
+            :mod:`src.adapters.site_of_care` for what the policy documents
+            actually say. Normalized through ``payer_vocab.normalize_state`` so
+            it speaks the vocabulary ``insurance_policies.state`` is matched
+            against.
+        requires_manual_confirmation: True when the payer information is
+            incomplete, by the same :func:`~src.adapters.base.needs_manual_confirmation`
+            rule the patient context uses. **A NULL ``state`` does not set it**,
+            deliberately: the flag is about payer details a provider can fill in
+            from the patient's card, and nobody at the bedside can supply a site
+            of care the EHR did not record. ``resolve_query_parameters()``
+            already names ``state`` when it is missing, which is where that gap
+            is visible.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    encounter_id: str
+    patient_id: str | None = None
+    coverage: CoverageInfo | None = None
+    state: str | None = None
     requires_manual_confirmation: bool = False
 
 

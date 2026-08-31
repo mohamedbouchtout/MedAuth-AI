@@ -1,4 +1,4 @@
-"""``GET /fhir/patient/{id}/context`` and ``GET /fhir/encounter/{id}``. TASK-052.
+"""The three ``/fhir`` read routes. TASK-052, and TASK-052b's coverage context.
 
 What is asserted here beyond the happy path is mostly about identity and
 auditing: that the routes are keyed on ``launch_id`` and cannot be talked into
@@ -310,3 +310,108 @@ class TestAuditing:
         )
 
         assert audit.calls == []
+
+
+class TestEncounterCoverageContext:
+    """TASK-052b's route — what ``track-a-clinical`` calls at ``POST /sessions/start``."""
+
+    def test_it_returns_the_payer_half_and_the_site_of_care(
+        self, client: TestClient, audit: AuditRecorder
+    ) -> None:
+        response = client.get("/fhir/encounter/encounter-1/coverage-context", headers=HEADERS)
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["encounter_id"] == "encounter-1"
+        assert data["patient_id"] == "synthea-123"
+        assert data["coverage"]["payer"] == "Aetna Better Health of MA"
+        assert data["coverage"]["plan_type"] == "PPO"
+        assert data["state"] == "MA"
+        assert data["requires_manual_confirmation"] is False
+
+    def test_an_incomplete_answer_is_a_200_with_null_columns(
+        self, client: TestClient, ehr_server: FakeFHIRServer, audit: AuditRecorder
+    ) -> None:
+        """A NULL column is the correct record of something the EHR did not hold.
+
+        The dispatcher downstream names exactly which fields are still missing;
+        a guessed payer would instead write a real policy answer under a
+        ``rag:`` key standing for a plan the patient is not on.
+        """
+        ehr_server.coverages = []
+
+        response = client.get("/fhir/encounter/encounter-1/coverage-context", headers=HEADERS)
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["coverage"] is None
+        assert data["requires_manual_confirmation"] is True
+
+    def test_it_writes_one_audit_row_with_a_null_actor(
+        self, client: TestClient, audit: AuditRecorder
+    ) -> None:
+        """One row per call, not one per FHIR fetch — and this call makes four.
+
+        ``actor_id`` stays null until TASK-051c captures the SMART ``fhirUser``
+        claim; a service-account UUID would look like a real actor in the one
+        table an auditor reads to answer "who accessed patient X".
+        """
+        client.get("/fhir/encounter/encounter-1/coverage-context", headers=HEADERS)
+
+        assert len(audit.calls) == 1
+        call = audit.calls[0]
+        assert call["action"] is AuditAction.READ_PATIENT
+        assert call["resource_type"] == "Encounter"
+        assert call["resource_id"] == "encounter-1"
+        assert call["actor_id"] is None
+        assert call["session_id"] is None
+
+    def test_an_unknown_launch_is_a_404(self, client: TestClient) -> None:
+        """Including a ``session_id`` sent here by mistake. Nothing is rejected —
+        there is simply no such launch."""
+        response = client.get(
+            "/fhir/encounter/encounter-1/coverage-context",
+            headers={fhir_routes.LAUNCH_ID_HEADER: str(uuid.uuid4())},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == fhir_routes.ERROR_CODE_UNKNOWN_LAUNCH
+
+    def test_an_unknown_encounter_is_a_404(
+        self, client: TestClient, ehr_server: FakeFHIRServer
+    ) -> None:
+        ehr_server.encounter = None
+
+        response = client.get("/fhir/encounter/encounter-1/coverage-context", headers=HEADERS)
+
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == fhir_routes.ERROR_CODE_NOT_FOUND
+
+    def test_an_ehr_outage_is_a_502_and_writes_no_audit_row(
+        self, client: TestClient, ehr_server: FakeFHIRServer, audit: AuditRecorder
+    ) -> None:
+        """No PHI was read, so there is nothing to record."""
+        ehr_server.fail("/Encounter/", httpx.Response(503))
+
+        response = client.get("/fhir/encounter/encounter-1/coverage-context", headers=HEADERS)
+
+        assert response.status_code == 502
+        assert audit.calls == []
+
+    def test_the_response_never_names_an_encounter_session(
+        self, client: TestClient, audit: AuditRecorder
+    ) -> None:
+        """CLAUDE.md, "A SMART launch is not an encounter session".
+
+        ``encounter_id`` here is the *EHR's* Encounter id, not this platform's
+        ``session_id`` and not the ``encounters`` primary key. A ``session_id``
+        appearing on this payload is how the two identifiers would quietly
+        become one, and this route is the seam where that would happen: it is
+        the only one both services hold a value from.
+        """
+        data = client.get("/fhir/encounter/encounter-1/coverage-context", headers=HEADERS).json()[
+            "data"
+        ]
+
+        assert "session_id" not in data
+        assert "launch_id" not in data
