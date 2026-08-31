@@ -70,6 +70,27 @@ DEFAULT_BEDROCK_MODEL_ID_REASONING: Final = "anthropic.claude-sonnet-4-6"
 DEFAULT_BEDROCK_MODEL_ID_FAST: Final = "anthropic.claude-haiku-4-5-20251001"
 
 
+#: ``fhir-integration``'s base URL, from the local dev port table in CLAUDE.md.
+#: TASK-052b reads an encounter's payer and site of care through it at session
+#: start. The default exists so local dev works unset; code reads the setting.
+#:
+#: This binds ``FHIR_INTEGRATION_URL``, which has sat in ``.env.example`` unread
+#: since TASK-001 scaffolded the service-URL block. TASK-052b is its first real
+#: consumer, so it is bound rather than shadowed by a second near-identical name
+#: — the repository already carries one such pair in ``POLICY_QUERY_BASE_URL``
+#: beside ``TRACK_B_RAG_URL``, and that one is justified by being a loopback to
+#: the service's own address rather than a peer's.
+DEFAULT_FHIR_INTEGRATION_URL: Final = "http://localhost:8004"
+
+#: How long to wait for that read before giving up and leaving the payer columns
+#: NULL. **A round-number default, not a measurement.** It bounds a provider
+#: waiting on "start visit", and the call behind it is four FHIR round trips to
+#: an EHR — so it is deliberately shorter than the 15s policy-query timeout,
+#: which nobody is watching a button for. Overridable through
+#: ``FHIR_INTEGRATION_TIMEOUT_SECONDS``.
+DEFAULT_FHIR_INTEGRATION_TIMEOUT_SECONDS: Final = 8.0
+
+
 class Settings(BaseSettings):
     """Environment-backed settings for session lifecycle.
 
@@ -103,6 +124,18 @@ class Settings(BaseSettings):
     bedrock_model_id_fast: str = Field(
         default=DEFAULT_BEDROCK_MODEL_ID_FAST,
         min_length=1,
+    )
+
+    #: Where ``POST /sessions/start`` reads an encounter's payer and site of
+    #: care from (TASK-052b). Over HTTP rather than by import, so the audit row
+    #: that service's route writes cannot be bypassed.
+    fhir_integration_url: str = Field(
+        default=DEFAULT_FHIR_INTEGRATION_URL,
+        min_length=1,
+    )
+    fhir_integration_timeout_seconds: float = Field(
+        default=DEFAULT_FHIR_INTEGRATION_TIMEOUT_SECONDS,
+        gt=0,
     )
 
 

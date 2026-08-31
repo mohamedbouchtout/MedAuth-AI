@@ -57,6 +57,13 @@ class Encounter(Base):
     )
     #: The EHR's own Encounter resource id, when the visit was launched from one.
     ehr_encounter_id: Mapped[str | None] = mapped_column(sa.String(100), nullable=True)
+    #: The SMART launch this encounter was created under (TASK-052b), naming the
+    #: `fhir_token:{launch_id}` record that holds the EHR access token. **An
+    #: explicit mapping, never an equality with `session_id`** — the two are
+    #: different identifiers with different lifetimes, and one launch can outlive
+    #: several encounters. See CLAUDE.md, "A SMART launch is not an encounter
+    #: session". Null for an encounter started without a launch behind it.
+    launch_id: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
     patient_fhir_id: Mapped[str] = mapped_column(sa.String(100), nullable=False)
     provider_id: Mapped[uuid.UUID] = mapped_column(
         postgresql.UUID(as_uuid=True),

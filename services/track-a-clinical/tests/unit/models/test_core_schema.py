@@ -27,12 +27,16 @@ EXPECTED_TABLES = {
     "insurance_policies",
 }
 
-# Straight from TASK-005's inline SQL, in declaration order.
+# Straight from TASK-005's inline SQL, in declaration order, plus the columns
+# later migrations added: `state` (0003, TASK-024) and `launch_id` (0006,
+# TASK-052b). Written out rather than derived, so a column arrives here as a
+# deliberate edit and never as a side effect of touching a model.
 EXPECTED_COLUMNS = {
     "encounters": [
         "id",
         "session_id",
         "ehr_encounter_id",
+        "launch_id",
         "patient_fhir_id",
         "provider_id",
         "organization_id",
