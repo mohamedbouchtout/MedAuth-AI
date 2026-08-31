@@ -7,7 +7,7 @@
  */
 
 import type { DomainResource } from './base.js';
-import type { EncounterStatus } from './codes.js';
+import type { EncounterLocationStatus, EncounterStatus } from './codes.js';
 import type { CodeableConcept, Coding, Identifier, Period, Reference } from './datatypes.js';
 
 /** A practitioner or other person involved in the encounter. */
@@ -28,6 +28,31 @@ export interface EncounterDiagnosis {
   readonly use?: CodeableConcept;
   /** Ranking among the encounter's diagnoses, 1 being primary. */
   readonly rank?: number;
+}
+
+/**
+ * A place the patient was during the encounter.
+ *
+ * This is the primary source of the encounter's site of care (TASK-052b):
+ * `location` is resolved to a `Location` resource and its `address.state`
+ * becomes the `state` segment of the RAG cache key. The payer policies this
+ * platform reads scope themselves that way — CMS's Medicare Coverage Database
+ * says to search by "the state where the service took place" — and no document
+ * in the seed corpus points at the patient's residence.
+ *
+ * A visit can list several: admitted here, moved to a ward, seen in a theatre.
+ * `status` is what separates the ones the patient actually reached from the ones
+ * that were only ever planned.
+ */
+export interface EncounterLocation {
+  /** Reference to the `Location`. Required by FHIR. */
+  readonly location: Reference;
+  /** Whether the patient is or was present at this location. */
+  readonly status?: EncounterLocationStatus;
+  /** The kind of place — a bed, a room, a building. */
+  readonly physicalType?: CodeableConcept;
+  /** When the patient was at this location. */
+  readonly period?: Period;
 }
 
 /**
@@ -63,7 +88,11 @@ export interface Encounter extends DomainResource {
   readonly reasonReference?: readonly Reference[];
   /** Diagnoses relevant to this encounter. */
   readonly diagnosis?: readonly EncounterDiagnosis[];
-  /** Organization responsible for the encounter. */
+  /** Places the patient was during the encounter. The site of care TASK-052b
+   * reads `state` from. */
+  readonly location?: readonly EncounterLocation[];
+  /** Organization responsible for the encounter. The fallback site-of-care
+   * source when no `location` resolves. */
   readonly serviceProvider?: Reference;
   /** Encounter this one is a part of. */
   readonly partOf?: Reference;

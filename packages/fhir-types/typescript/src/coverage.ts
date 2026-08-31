@@ -1,10 +1,14 @@
 /**
  * The FHIR R4 Coverage resource, mirroring `src/fhir_types/coverage.py`.
  *
- * Coverage is what makes the RAG query answerable: the payer, plan type and member
- * details here select which insurance policy set applies. Together with the
- * patient's state and the ordered CPT code they form the
+ * Coverage is what makes the RAG query answerable: the payer and plan type here
+ * select which insurance policy set applies, and together with the encounter's
+ * state and the ordered CPT code they form the
  * `rag:{payer}:{plan_type}:{state}:{cpt_code}` cache key described in CLAUDE.md.
+ *
+ * The `state` segment does not come from here, and it is not the patient's. It
+ * is the site of care, read from the encounter's `Location`/`Organization`
+ * address — see `location.ts` and TASK-052b.
  */
 
 import type { DomainResource } from './base.js';

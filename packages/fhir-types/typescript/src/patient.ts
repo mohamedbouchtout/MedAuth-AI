@@ -51,8 +51,13 @@ export interface Patient extends DomainResource {
   readonly deceasedBoolean?: boolean;
   /** Date and time of death, when known. */
   readonly deceasedDateTime?: string;
-  /** Addresses for the patient. The state here selects which payer policy set
-   * applies during a prior authorization check. */
+  /** Addresses for the patient. This is *not* what selects the payer policy set
+   * — an earlier version of this comment said it was, written before anyone read
+   * what the policy documents say about their own applicability. They say the
+   * site of care, so the `state` segment of the RAG cache key comes from the
+   * encounter's `Location`/`Organization` address instead (TASK-052b). The state
+   * here is compared against that one and a disagreement is logged, so a patient
+   * treated out of state is visible rather than silent. */
   readonly address?: readonly Address[];
   /** Marital or civil status. */
   readonly maritalStatus?: CodeableConcept;

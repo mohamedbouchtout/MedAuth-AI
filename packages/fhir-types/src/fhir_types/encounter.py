@@ -12,7 +12,7 @@ from typing import Literal
 from pydantic import Field
 
 from .base import DomainResource, FHIRBase
-from .codes import EncounterStatus
+from .codes import EncounterLocationStatus, EncounterStatus
 from .datatypes import CodeableConcept, Coding, Identifier, Period, Reference
 
 
@@ -44,6 +44,34 @@ class EncounterDiagnosis(FHIRBase):
     rank: int | None = None
 
 
+class EncounterLocation(FHIRBase):
+    """A place the patient was during the encounter.
+
+    **This is the primary source of the encounter's site of care** (TASK-052b):
+    ``location`` is resolved to a ``Location`` resource and its
+    ``address.state`` becomes the ``state`` segment of the RAG cache key. The
+    payer policies this platform reads scope themselves that way — CMS's
+    Medicare Coverage Database says to search by "the state where the service
+    took place" — and no document in the seed corpus points at the patient's
+    residence.
+
+    A visit can list several: admitted here, moved to a ward, seen in a theatre.
+    ``status`` is what separates the ones the patient actually reached from the
+    ones that were only ever planned.
+
+    Attributes:
+        location: Reference to the ``Location``. Required by FHIR.
+        status: Whether the patient is or was present at this location.
+        physical_type: The kind of place — a bed, a room, a building.
+        period: When the patient was at this location.
+    """
+
+    location: Reference
+    status: EncounterLocationStatus | None = None
+    physical_type: CodeableConcept | None = None
+    period: Period | None = None
+
+
 class Encounter(DomainResource):
     """An interaction between a patient and one or more healthcare providers.
 
@@ -66,7 +94,10 @@ class Encounter(DomainResource):
         reason_code: Coded reason the encounter took place.
         reason_reference: Reason expressed as a reference to another resource.
         diagnosis: Diagnoses relevant to this encounter.
-        service_provider: Organization responsible for the encounter.
+        location: Places the patient was during the encounter. The site of
+            care TASK-052b reads ``state`` from.
+        service_provider: Organization responsible for the encounter. The
+            fallback site-of-care source when no ``location`` resolves.
         part_of: Encounter this one is a part of.
     """
 
@@ -83,5 +114,6 @@ class Encounter(DomainResource):
     reason_code: list[CodeableConcept] | None = None
     reason_reference: list[Reference] | None = None
     diagnosis: list[EncounterDiagnosis] | None = None
+    location: list[EncounterLocation] | None = None
     service_provider: Reference | None = None
     part_of: Reference | None = None
