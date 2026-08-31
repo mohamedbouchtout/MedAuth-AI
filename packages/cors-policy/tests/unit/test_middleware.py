@@ -61,6 +61,28 @@ class TestPreflight:
 
         assert "content-type" in response.headers["access-control-allow-headers"].lower()
 
+    def test_the_launch_id_header_is_granted(self) -> None:
+        """fhir-integration's chart reads carry launch_id in a custom header.
+
+        A custom request header is preflighted, so without this grant every
+        ``GET /fhir/patient/{id}/context`` from apps/web fails in the browser
+        before it reaches the service — and it fails as a CORS error rather than
+        as anything naming the header, which is why it is asserted rather than
+        left to be discovered in a console.
+        """
+        response = TestClient(build_app()).options(
+            "/thing",
+            headers={
+                "Origin": ALLOWED_ORIGIN,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "x-medauth-launch-id",
+            },
+        )
+
+        assert response.status_code == 200
+        granted = response.headers["access-control-allow-headers"].lower()
+        assert "x-medauth-launch-id" in granted
+
     def test_origin_outside_the_configured_list_is_not_granted(self) -> None:
         response = TestClient(build_app()).options(
             "/thing",

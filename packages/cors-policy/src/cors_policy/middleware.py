@@ -29,7 +29,15 @@ ALLOWED_METHODS: Final = ("GET", "POST", "PATCH", "OPTIONS")
 #: session token's carrier is a header everywhere else in this repository, so a
 #: browser-facing route that later takes one needs no change here — see the
 #: credentials note below for why that is a header and never a cookie.
-ALLOWED_HEADERS: Final = ("Authorization", "Content-Type")
+#:
+#: ``X-MedAuth-Launch-Id`` carries the SMART ``launch_id`` to fhir-integration's
+#: chart reads (TASK-052). It is a separate header rather than a second meaning
+#: for ``Authorization``: that one carries the MedAuth session token everywhere
+#: else here, and a ``launch_id`` is a different identifier with a different
+#: lifetime — CLAUDE.md, "A SMART launch is not an encounter session". Growing
+#: this tuple is how a browser-facing route gains a header; a service passing
+#: its own list is the per-service policy TASK-041c refused.
+ALLOWED_HEADERS: Final = ("Authorization", "Content-Type", "X-MedAuth-Launch-Id")
 
 #: Whether the browser may send credentials — **no**, and this is load-bearing
 #: rather than a default left alone.
