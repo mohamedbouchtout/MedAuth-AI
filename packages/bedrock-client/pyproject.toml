@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Shared AWS Bedrock access — client construction and reading what came back. See TASK-030."
 requires-python = ">=3.12"
 dependencies = [
-    "boto3>=1.43.77",
+    "boto3>=1.43.82",
     "langchain-aws>=0.2",
     "langchain-core>=0.3",
 ]
