@@ -14,7 +14,7 @@ dependencies = [
     # Canonical payer slugs and USPS state codes. CMS documents ingest as
     # cms-medicare, and MAC jurisdiction codes are not all USPS codes.
     "medauth-payer-vocab",
-    "pydantic>=2.9",
+    "pydantic>=2.13.5",
     "pydantic-settings>=2.6",
     "sqlalchemy[asyncio]>=2.0.52",
 ]

@@ -8,7 +8,7 @@ dependencies = [
     # — see "packages/hipaa-logger — Design Decisions" in CLAUDE.md.
     "alembic>=1.14",
     "asyncpg>=0.30",
-    "pydantic>=2.9",
+    "pydantic>=2.13.5",
     "sqlalchemy[asyncio]>=2.0.52",
 ]
 

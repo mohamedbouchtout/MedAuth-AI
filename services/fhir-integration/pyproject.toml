@@ -11,7 +11,7 @@ dependencies = [
     "medauth-fhir-types",
     "medauth-hipaa-logger",
     "medauth-payer-vocab",
-    "pydantic>=2.9",
+    "pydantic>=2.13.5",
     "pydantic-settings>=2.6",
     # The crypto extra is required, not optional: TASK-051c verifies an EHR
     # id_token's RS256/ES256 signature, and PyJWT cannot do that without it.
