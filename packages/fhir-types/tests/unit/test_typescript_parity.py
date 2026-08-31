@@ -181,7 +181,13 @@ def test_code_set_members_match(name: str) -> None:
 
 
 def test_resource_type_is_a_property_on_every_resource() -> None:
-    """The discriminator both sides narrow on. Missing it breaks ``AnyResource``."""
+    """The discriminator both sides narrow on. Missing it breaks ``AnyResource``.
+
+    The list is written out rather than derived, so adding a resource is a
+    deliberate edit here instead of something a new module changes silently.
+    ``Location`` and ``Organization`` joined it in TASK-052b, which reads an
+    encounter's site of care from them.
+    """
     resources = [name for name in MODELS if "resourceType" in _serialized_names(MODELS[name])]
 
     assert sorted(resources) == [
@@ -190,6 +196,27 @@ def test_resource_type_is_a_property_on_every_resource() -> None:
         "Coverage",
         "DocumentReference",
         "Encounter",
+        "Location",
         "MedicationRequest",
+        "Organization",
         "Patient",
     ]
+
+
+def test_any_resource_covers_every_modelled_resource() -> None:
+    """``AnyResource`` is what parses a Bundle entry of unknown type.
+
+    A resource that has a ``resourceType`` but was left out of the union parses
+    as nothing, and the failure looks like an unmodelled resource rather than a
+    forgotten export — which is exactly how ``Location`` would have behaved had
+    TASK-052b added the module and stopped there.
+    """
+    in_union = {arg.__name__ for arg in get_args(get_args(fhir_types.AnyResource)[0])}
+    with_discriminator = {
+        name for name in MODELS if "resourceType" in _serialized_names(MODELS[name])
+    }
+
+    assert in_union == with_discriminator, (
+        f"only in AnyResource: {sorted(in_union - with_discriminator)}; "
+        f"modelled but not in AnyResource: {sorted(with_discriminator - in_union)}"
+    )

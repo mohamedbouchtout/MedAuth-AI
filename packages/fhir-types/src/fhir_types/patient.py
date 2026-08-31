@@ -43,8 +43,14 @@ class Patient(DomainResource):
         birth_date: Date of birth, as a ``date`` string.
         deceased_boolean: Whether the patient is deceased, when no date is known.
         deceased_date_time: Date and time of death, when known.
-        address: Addresses for the patient. The state here selects which payer
-            policy set applies during a prior authorization check.
+        address: Addresses for the patient. **This is not what selects the payer
+            policy set** — an earlier version of this line said it was, written
+            before anyone read what the policy documents say about their own
+            applicability. They say the site of care, so the ``state`` segment
+            of the RAG cache key comes from the encounter's
+            ``Location``/``Organization`` address instead (TASK-052b). The state
+            here is compared against that one and a disagreement is logged, so a
+            patient treated out of state is visible rather than silent.
         marital_status: Marital or civil status.
         communication: Languages the patient can communicate in.
         general_practitioner: The patient's primary care providers.

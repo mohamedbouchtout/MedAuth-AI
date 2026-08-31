@@ -34,9 +34,12 @@ export type {
   ContactPointSystem,
   ContactPointUse,
   DocumentReferenceStatus,
+  EncounterLocationStatus,
   EncounterStatus,
   FinancialResourceStatus,
   IdentifierUse,
+  LocationMode,
+  LocationStatus,
   MedicationRequestIntent,
   MedicationRequestStatus,
   NameUse,
@@ -73,7 +76,14 @@ export type {
   DocumentReferenceContent,
   DocumentReferenceContext,
 } from './documentReference.js';
-export type { Encounter, EncounterDiagnosis, EncounterParticipant } from './encounter.js';
+export type {
+  Encounter,
+  EncounterDiagnosis,
+  EncounterLocation,
+  EncounterParticipant,
+} from './encounter.js';
+export type { Location, LocationPosition } from './location.js';
+export type { Organization } from './organization.js';
 export type { Dosage, DosageDoseAndRate, MedicationRequest } from './medicationRequest.js';
 export type { Patient, PatientCommunication } from './patient.js';
 
@@ -82,7 +92,9 @@ import type { Condition } from './condition.js';
 import type { Coverage } from './coverage.js';
 import type { DocumentReference } from './documentReference.js';
 import type { Encounter } from './encounter.js';
+import type { Location } from './location.js';
 import type { MedicationRequest } from './medicationRequest.js';
+import type { Organization } from './organization.js';
 import type { Patient } from './patient.js';
 
 /** The FHIR release these types target. See CLAUDE.md — R4, not R4B or R5. */
@@ -105,5 +117,7 @@ export type AnyResource =
   | Coverage
   | DocumentReference
   | Encounter
+  | Location
   | MedicationRequest
+  | Organization
   | Patient;

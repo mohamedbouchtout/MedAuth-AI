@@ -87,5 +87,32 @@ export type AddressUse = 'home' | 'work' | 'temp' | 'old' | 'billing';
 /** Address.type — https://hl7.org/fhir/R4/valueset-address-type.html */
 export type AddressType = 'postal' | 'physical' | 'both';
 
+/**
+ * Location.status — https://hl7.org/fhir/R4/valueset-location-status.html
+ *
+ * Whether the location record itself is in use. Not the same as
+ * `EncounterLocationStatus` below, which is about one visit's stay at a place.
+ */
+export type LocationStatus = 'active' | 'suspended' | 'inactive';
+
+/**
+ * Location.mode — a specific place (`instance`) or a class of place (`kind`).
+ *
+ * Only an `instance` has a meaningful address. A `kind` describes something like
+ * "a general practice room", so reading a state off one would be reading the
+ * address of a template rather than of anywhere a service happened.
+ */
+export type LocationMode = 'instance' | 'kind';
+
+/**
+ * Encounter.location.status —
+ * https://hl7.org/fhir/R4/valueset-encounter-location-status.html
+ *
+ * `planned` is a place the patient was expected at and may never have reached,
+ * which is why TASK-052b's site-of-care resolution does not treat it as where
+ * the service took place.
+ */
+export type EncounterLocationStatus = 'planned' | 'active' | 'reserved' | 'completed';
+
 /** Quantity.comparator — present only when the value is a bound, not a measurement. */
 export type QuantityComparator = '<' | '<=' | '>=' | '>';

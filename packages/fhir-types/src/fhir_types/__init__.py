@@ -1,9 +1,13 @@
 """FHIR R4 (4.0.1) resource models shared across services.
 
-Seven resources are modelled — Patient, Encounter, Condition, Coverage,
-MedicationRequest, DocumentReference and Claim — together with the datatypes they
-are built from. These are the resources listed in CLAUDE.md as the ones this
-project reads and writes.
+Nine resources are modelled — Patient, Encounter, Condition, Coverage,
+MedicationRequest, DocumentReference and Claim, which are the ones CLAUDE.md
+lists as what this project reads and writes, plus ``Location`` and
+``Organization``. Those two are here because TASK-052b needs them: an encounter's
+site of care is what selects which payer policy applies, and it is read from
+``Encounter.location`` -> ``Location.address.state``, falling back to
+``Encounter.serviceProvider`` -> ``Organization.address``. Neither is a resource
+this platform writes.
 
 This package is deliberately *not* a complete R4 implementation. Each resource
 carries the elements this platform actually uses, and ``extra="allow"`` on the base
@@ -55,9 +59,12 @@ from .codes import (
     ContactPointSystem,
     ContactPointUse,
     DocumentReferenceStatus,
+    EncounterLocationStatus,
     EncounterStatus,
     FinancialResourceStatus,
     IdentifierUse,
+    LocationMode,
+    LocationStatus,
     MedicationRequestIntent,
     MedicationRequestStatus,
     NameUse,
@@ -85,15 +92,30 @@ from .document_reference import (
     DocumentReferenceContent,
     DocumentReferenceContext,
 )
-from .encounter import Encounter, EncounterDiagnosis, EncounterParticipant
+from .encounter import (
+    Encounter,
+    EncounterDiagnosis,
+    EncounterLocation,
+    EncounterParticipant,
+)
+from .location import Location, LocationPosition
 from .medication_request import Dosage, DosageDoseAndRate, MedicationRequest
+from .organization import Organization
 from .patient import Patient, PatientCommunication
 
 FHIR_VERSION = "4.0.1"
 """The FHIR release these models target. See CLAUDE.md — R4, not R4B or R5."""
 
 AnyResource = Annotated[
-    Claim | Condition | Coverage | DocumentReference | Encounter | MedicationRequest | Patient,
+    Claim
+    | Condition
+    | Coverage
+    | DocumentReference
+    | Encounter
+    | Location
+    | MedicationRequest
+    | Organization
+    | Patient,
     Field(discriminator="resource_type"),
 ]
 """Any resource this package models, narrowed by ``resourceType``.
@@ -142,6 +164,8 @@ __all__ = [
     "DosageDoseAndRate",
     "Encounter",
     "EncounterDiagnosis",
+    "EncounterLocation",
+    "EncounterLocationStatus",
     "EncounterParticipant",
     "EncounterStatus",
     "FHIRBase",
@@ -149,12 +173,17 @@ __all__ = [
     "HumanName",
     "Identifier",
     "IdentifierUse",
+    "Location",
+    "LocationMode",
+    "LocationPosition",
+    "LocationStatus",
     "MedicationRequest",
     "MedicationRequestIntent",
     "MedicationRequestStatus",
     "Meta",
     "Money",
     "NameUse",
+    "Organization",
     "Patient",
     "PatientCommunication",
     "Period",
