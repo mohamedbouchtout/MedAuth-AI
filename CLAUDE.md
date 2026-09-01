@@ -1628,17 +1628,25 @@ search and TASK-053's note write-back are all the same shape.
   for a launch-time read should carry. **It goes in `fhir_practitioner_ref`, not
   in `actor_id`** — an earlier draft of this bullet said `actor_id`, written
   before anyone checked the two types against each other. See the next section.
-- **Capturing `fhirUser` is TASK-051c, an explicit follow-up, and is *not* in
-  TASK-052's scope.** Stated as a boundary rather than left ambiguous. TASK-051
-  requests the `openid fhirUser` scope already, but stores nothing from the
-  `id_token`: `LaunchToken` holds the access token, the refresh token and the
-  opaque launch context, and no code in this repository parses an `id_token` or
-  validates its signature. Doing that properly means fetching the EHR's JWKS,
-  verifying the token against it, and resolving a `Practitioner` reference —
-  which is a token-validation path of its own, not a field to bolt onto a
-  resource fetch. TASK-052 would be smuggling in an authentication mechanism
-  under cover of implementing four GETs, which is exactly what Known Constraints
-  #8 forbids.
+- **Capturing `fhirUser` was TASK-051c, and it is built.** It was kept out of
+  TASK-052 deliberately: reading the claim responsibly means fetching the EHR's
+  JWKS, verifying the token's signature and issuer against it, and resolving a
+  `Practitioner` reference — a token-validation path of its own, not a field to
+  bolt onto a resource fetch. Folding it into a task implementing four GETs
+  would have smuggled in an authentication mechanism, which is what Known
+  Constraints #8 forbids. The implementation is
+  `services/fhir-integration/src/smart/identity.py`; the launch's `issuer` and
+  `jwks_uri` come from the same SMART discovery document as its endpoints, and
+  the resolved reference is stored on the launch record so every later PHI read
+  audits with it.
+- **Verification failure is never a launch failure.** No `id_token`, no
+  published key set, a bad signature, a foreign `aud`, or a claim naming
+  anything but a `Practitioner` all leave the actor unknown and the launch
+  working. The *unverified* claim is never written in its place — that is the
+  same fabrication as a service-account UUID, one step subtler, and harder to
+  spot because it looks like a real identity. A `Patient` reference is refused
+  for a second reason on top: an actor column is not a place for a patient
+  identifier.
 - **`actor_id` stays `None` in this service permanently — it is not waiting on
   anything.** Before TASK-051c that null was provisional and every
   `audit_log()` call in `fhir-integration` named the task in a comment. It is

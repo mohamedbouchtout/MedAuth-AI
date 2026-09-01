@@ -4265,7 +4265,7 @@ logic do not change.
       `SESSION_REMINT_GRACE_SECONDS`, and TASK-055 is where a real vendor
       launch would settle them.
 
-- [ ] **TASK-051c:** Capture the SMART `fhirUser` claim as the audit actor
+- [x] **TASK-051c:** Capture the SMART `fhirUser` claim as the audit actor
   - Prerequisite: **TASK-051**; wanted by **TASK-052** and every later PHI read
     in this service
   - Service: `services/fhir-integration`
@@ -4287,8 +4287,10 @@ logic do not change.
     into a task that implements four FHIR GETs would be introducing an
     authentication mechanism as a side effect — what Known Constraints #8
     exists to prevent. It gets its own task so it gets its own review.
-  - Store the resolved identity on `LaunchToken` and pass it as `actor_id`;
-    remove the `actor_id=None` comments TASK-052 leaves at each call site.
+  - Store the resolved identity on `LaunchToken` and pass it as the audit row's
+    EHR-asserted actor — **`fhir_practitioner_ref`, not `actor_id`**, which
+    cannot hold it; see the Built note below. Remove the `actor_id=None`
+    comments TASK-052 leaves at each call site.
   - **An unverifiable or absent `fhirUser` stays `None`.** A claim that fails
     signature verification, or an EHR that returns no `id_token`, means the
     actor is still unknown — fall back to the null, never to the unverified
@@ -4299,9 +4301,57 @@ logic do not change.
     permanently actor-less and that is the truthful outcome.
   - **Test:** a launch whose `id_token` carries a verifiable `fhirUser` produces
     audit rows with that actor
-  - **Test:** an `id_token` failing signature verification leaves `actor_id`
+  - **Test:** an `id_token` failing signature verification leaves the actor
     null and does not fail the launch
   - **Test:** no `id_token`, claim or resolved identity reaches a log record
+  - **Built.** Three commits: the CLAUDE.md decision, the `hipaa-logger` column,
+    then the service. 316 tests pass in `fhir-integration` at 97% coverage (45
+    new here), and 42 in `hipaa-logger`. Every acceptance bullet above has a
+    test named for it. Decisions worth knowing before touching this:
+    - **The resolved identity does NOT go in `actor_id`, and the task text above
+      saying it would was wrong.** `audit_log.actor_id` is a Postgres UUID and
+      `hipaa_logger._as_uuid()` raises rather than coercing, while a FHIR
+      `Practitioner` id is `[A-Za-z0-9\-\.]{1,64}` — HAPI issues `"1"`. Passing
+      the claim as `actor_id` would have raised `InvalidAuditFieldError` on
+      exactly the launches where the capture succeeded. It goes in a new column,
+      `fhir_practitioner_ref`; widening `actor_id` was rejected because it
+      weakens a guarantee every other row depends on, and a
+      practitioner-to-UUID mapping table was rejected as scope. Settled in
+      CLAUDE.md, "The EHR-asserted actor is its own column", because it changes
+      a table every service writes.
+    - **`actor_id` is now permanently null in this service, not pending.** The
+      comments naming TASK-051c at each call site are removed; a comment naming
+      a completed task reads as an open gap. `session_id` is permanently null
+      too, and `src/audit.py` used to claim this task would fill it — it never
+      could, because a launch is not an encounter session.
+    - **The two guard tests were inverted, not replaced.**
+      `test_the_ehr_asserted_actor_is_recorded_in_its_own_column` and
+      `test_it_writes_one_audit_row_carrying_the_ehr_asserted_actor` are the
+      tests that used to assert a null actor and name this task as what would
+      fill `actor_id`. Both would have kept passing untouched against a fixture
+      whose `id_token` never verifies, which is why the verifiable case is what
+      drives them.
+    - **`issuer` and `jwks_uri` are carried on `PendingLaunch`**, from the same
+      discovery document as the endpoints, for that field's own reason: a
+      signature must be checked against keys published by the server that issued
+      it, and rediscovering at callback time would allow two halves of one OAuth
+      conversation to come from two documents.
+    - **The algorithm allow-list is asymmetric only.** A token naming `none` or
+      `HS256` cannot verify against a published public key. A `Patient`,
+      `RelatedPerson` or `Person` `fhirUser` is refused as well — `fhirUser` may
+      name those for a patient-facing app, and this is not one; writing a
+      patient identifier into an actor column would be wrong twice over.
+    - **Renewal carries the actor across**, and so does the record rewritten
+      after a grant is refused. The actor is resolved once, from an `id_token`
+      long gone by the first renewal; dropping it there would silently
+      anonymise every audit row after the first expiry.
+    - **`get_ehr_adapter` was split.** `get_launch_record` loads and renews;
+      `get_ehr_adapter` and `get_audit_actor` both depend on it, and FastAPI's
+      per-request dependency cache means one Redis load and one renewal.
+    - **Open item, not code:** the SMART 1.0 `profile` claim is deliberately not
+      read as a fallback for `fhirUser`, and no real vendor sandbox has been
+      launched against yet — TASK-055 is where a live launch would show whether
+      any priority EHR still emits only the older claim.
 
 - [ ] **TASK-051d:** Expose the SMART launch context to the client
   - Prerequisite: **TASK-051** (the launch that captures the context this
@@ -4354,9 +4404,12 @@ logic do not change.
     rejected: `AuditAction` exists so "who accessed patient X" is one query, and
     a second spelling for reading the same identifier out of a different store
     would fragment that answer rather than sharpen it.
-  - `actor_id` stays `None` with a comment naming **TASK-051c**, exactly as
-    TASK-052 and TASK-052b leave it — see CLAUDE.md, "Auditing a PHI read that
-    happens before any encounter exists".
+  - `actor_id` stays `None` — permanently, not pending, since **TASK-051c**
+    shipped — and the actor is the launch record's `fhir_practitioner_ref`,
+    passed through `audit_ehr_read()` like every other route in this service.
+    An earlier draft of this bullet said to leave a comment naming TASK-051c;
+    that task is built, and a comment naming it now would read as an open gap.
+    See CLAUDE.md, "The EHR-asserted actor is its own column".
   - **Fix the comment this falsifies.** `LaunchToken.patient_id` in
     `smart/store.py` says the service "never reads, returns or logs them" and
     names TASK-052 as the first reader. Returning them makes the first clause
@@ -4561,9 +4614,11 @@ logic do not change.
     auditable access is the context read, the same "one row per unit of work"
     rule the Redis consumers follow. `actor_id` is `None`, per CLAUDE.md's
     "Auditing a PHI read that happens before any encounter exists" — no
-    `encounters` row exists at launch time, and capturing the SMART `fhirUser`
-    claim is **TASK-051c**, explicitly not this task. Each call site names
-    TASK-051c in a comment. `session_id` is `None` for the same reason;
+    `encounters` row exists at launch time. Capturing the SMART `fhirUser` claim
+    was **TASK-051c**, explicitly not this task; it has since shipped, so the
+    `actor_id=None` comments this task left at each call site are gone and the
+    EHR-asserted actor rides in `fhir_practitioner_ref`. `actor_id` and
+    `session_id` are permanently `None` here rather than pending;
     `resource_type` is `Patient` or `Encounter`, `resource_id` the id in the path.
     The service needs `DATABASE_URL` in its config for this — it has none today.
 
