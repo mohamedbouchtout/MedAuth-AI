@@ -1520,15 +1520,22 @@ CREATE TABLE audit_log (
     request_id UUID,                      -- correlates to request tracing, nullable
     ip_address INET,
     user_agent TEXT,
+    fhir_practitioner_ref VARCHAR(512),    -- an EHR-asserted actor that is not a UUID
     occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX idx_audit_log_occurred_at ON audit_log(occurred_at);
 CREATE INDEX idx_audit_log_actor ON audit_log(actor_id);
 CREATE INDEX idx_audit_log_session ON audit_log(session_id);
+CREATE INDEX idx_audit_log_fhir_practitioner ON audit_log(fhir_practitioner_ref);
 ```
 `service_name` and `request_id` were added beyond the original architecture doc
 sketch — every service calls this package, so knowing which one wrote each row
 and being able to trace it to a specific request is worth the two extra columns.
+
+`fhir_practitioner_ref` was added by TASK-051c and is **not a second spelling of
+`actor_id`** — see "The EHR-asserted actor is its own column" below for why an
+identity the EHR asserts cannot go in `actor_id` and what a query against this
+table has to do as a result.
 
 `audit_log()` function signature:
 ```python
@@ -1542,6 +1549,7 @@ async def audit_log(
     request_id: str | None = None,
     ip_address: str | None = None,
     user_agent: str | None = None,
+    fhir_practitioner_ref: str | None = None,  # EHR-asserted actor — see below
     conn: asyncpg.Connection | None = None,  # injection hook — uses pool if omitted
 ) -> None: ...
 ```
@@ -1612,12 +1620,14 @@ search and TASK-053's note write-back are all the same shape.
   service-account UUID would be worse here than in a Redis consumer, because it
   would look like a real actor in the one table an auditor reads to answer "who
   accessed patient X".
-- **The eventual correct source is the SMART `fhirUser` claim.** SMART on FHIR
-  2.0 identifies the authorizing user through the `fhirUser` claim in the
-  `id_token` returned by the token exchange — a reference to a `Practitioner`
-  resource, which is precisely the provider whose access is being recorded. That
-  is a real identity asserted by the EHR, not one we invented, so it is what
-  `actor_id` should eventually carry.
+- **The correct source is the SMART `fhirUser` claim.** SMART on FHIR 2.0
+  identifies the authorizing user through the `fhirUser` claim in the `id_token`
+  returned by the token exchange — a reference to a `Practitioner` resource,
+  which is precisely the provider whose access is being recorded. That is a real
+  identity asserted by the EHR, not one we invented, so it is what an audit row
+  for a launch-time read should carry. **It goes in `fhir_practitioner_ref`, not
+  in `actor_id`** — an earlier draft of this bullet said `actor_id`, written
+  before anyone checked the two types against each other. See the next section.
 - **Capturing `fhirUser` is TASK-051c, an explicit follow-up, and is *not* in
   TASK-052's scope.** Stated as a boundary rather than left ambiguous. TASK-051
   requests the `openid fhirUser` scope already, but stores nothing from the
@@ -1629,15 +1639,83 @@ search and TASK-053's note write-back are all the same shape.
   resource fetch. TASK-052 would be smuggling in an authentication mechanism
   under cover of implementing four GETs, which is exactly what Known Constraints
   #8 forbids.
-- **So `actor_id=None` is provisional and says so at the call site.** Every
-  `audit_log()` call in `fhir-integration` names TASK-051c in a comment, so a
-  later reader sees a deferred source rather than an oversight. The rows written
-  before it lands are permanently actor-less; nothing backfills them, because
-  inventing the actor afterwards is the same fabrication one step removed.
+- **`actor_id` stays `None` in this service permanently — it is not waiting on
+  anything.** Before TASK-051c that null was provisional and every
+  `audit_log()` call in `fhir-integration` named the task in a comment. It is
+  now settled: the identity the EHR asserts is recorded, and it is recorded in
+  `fhir_practitioner_ref`, so `actor_id` has nothing to hold rather than
+  something still to come. Remove those comments when wiring the new column in;
+  a comment naming a completed task reads as an open gap.
+- **Rows written before TASK-051c carry neither identifier, and nothing
+  backfills them.** Inventing the actor afterwards is the same fabrication one
+  step removed. An audit trail that is honestly incomplete for a known window is
+  worth more than one made to look uniform.
 - **What does not change:** the read still audits. Absent provider identity is a
   reason the trail matters more, not less — the same argument the note routes
   and `PATCH /nudges/{nudge_id}/acknowledge` already make for shipping without a
   credential in v1.
+
+### The EHR-asserted actor is its own column (cross-cutting)
+Settled by TASK-051c, and settled here rather than inside it because it changes
+the shared `audit_log` table that every service writes — not only the rows
+`fhir-integration` produces.
+
+**The blocker that forced the decision.** `audit_log.actor_id` is
+`postgresql.UUID`, and `hipaa_logger._as_uuid()` *raises* rather than coercing
+or dropping a malformed value. A SMART `fhirUser` claim resolves to a FHIR
+`Practitioner` reference, and a FHIR `id` is `[A-Za-z0-9\-\.]{1,64}` — HAPI
+issues `"1"`, Epic issues opaque strings, and none of them is required to be a
+UUID. So "capture `fhirUser` and pass it as `actor_id`", which is what the
+section above used to say, would have raised `InvalidAuditFieldError` on exactly
+the launches where the capture succeeded. It would have failed loudest where it
+worked best.
+
+**The decision: a separate column, `fhir_practitioner_ref`.** Two alternatives
+were considered and rejected, and the reasons are recorded because both will
+look tempting again:
+
+- **Widening `actor_id` to text was rejected because its cost is not local.**
+  Every other row in the table — the session-keyed routes, the Redis consumers,
+  the prior-auth writes — depends on `actor_id` being a UUID that joins to a
+  provider. Relaxing the column's type to admit one new producer weakens that
+  guarantee for all of them, and a type guarantee most rows still honour is
+  worth more than one relaxed for a single caller.
+- **A practitioner-to-UUID mapping table was rejected as scope.** It is a real
+  piece of work — its own table, its own migration, its own questions about when
+  a mapping is created and what happens when an EHR reissues an id — and none of
+  it belongs inside a task whose subject is capturing and verifying one claim.
+  It remains available later if a provider identity ever needs to be the same
+  value across both columns.
+- **A distinctly named column records what we actually know without
+  overclaiming.** An EHR-asserted `Practitioner` reference genuinely is a
+  different kind of identifier from a `provider_id` this system minted, and two
+  names keep a later reader from assuming they are interchangeable.
+
+**What the column holds is the reference as the claim gave it, verbatim** —
+normally an absolute URL such as
+`https://ehr.example.com/fhir/Practitioner/abc-123`. Not the bare id: a
+`Practitioner` id is only unique within one EHR, so `Practitioner/1` on two
+servers is two different people, and storing the id alone would silently merge
+them. `VARCHAR(512)` rather than `resource_id`'s 200 for that reason.
+
+**A value only ever reaches this column after verification.** The column means
+"the EHR asserted this identity and we checked the assertion" — an unverified
+claim is written as `None`, exactly as the null-over-fabrication rule above
+requires. Nothing may write a practitioner reference taken on trust.
+
+**The consequence for reading the table, stated rather than left to be
+discovered:** "who accessed patient X" is now two columns, not one. A query
+that reads only `actor_id` silently omits every launch-time EHR read, and a
+query that reads only `fhir_practitioner_ref` omits everything else. Neither
+column is a fallback for the other and neither is ever populated from the
+other. This is the price of the decision, and it is written down here instead of
+being found by someone whose audit query quietly returned half the rows.
+
+**The general rule, for the next time this shape appears:** when an existing
+column's type is a guarantee other code depends on, do not relax it to admit a
+new producer. Ask first whether the new value is really the same kind of thing
+the column already holds; when it is not, give it its own field and let the
+names carry the distinction.
 
 **The action vocabulary is `hipaa_logger.AuditAction`, and it is the only
 definition.** Services import members from it; none declares its own action
