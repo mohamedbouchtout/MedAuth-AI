@@ -23,10 +23,18 @@ from .db import AuditLogError
 _INSERT_AUDIT_EVENT: Final[str] = """
     INSERT INTO audit_log (
         actor_id, action, resource_type, resource_id, session_id,
-        service_name, request_id, ip_address, user_agent
+        service_name, request_id, ip_address, user_agent,
+        fhir_practitioner_ref
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 """
+
+#: The ``fhir_practitioner_ref`` column's width. A FHIR reference is normally an
+#: absolute URL, so this is wider than ``resource_id``. Enforced here as well as
+#: in the schema: asyncpg would surface an over-long value as a database error
+#: naming the column, and an audit write that fails should say which field the
+#: caller got wrong.
+_MAX_FHIR_REFERENCE_LENGTH: Final = 512
 
 
 class InvalidAuditFieldError(AuditLogError, ValueError):
@@ -79,6 +87,36 @@ def _as_ip(
         raise InvalidAuditFieldError(f"ip_address is not a valid IP address: {value!r}") from exc
 
 
+def _as_fhir_reference(value: str | None) -> str | None:
+    """Coerce the EHR-asserted actor field.
+
+    Deliberately not validated against a reference grammar. What this column
+    records is what the EHR asserted, verbatim, and a caller has already
+    verified the assertion before reaching here — re-parsing it would be this
+    package second-guessing a check it did not perform and cannot repeat. The
+    only refusals are the two that would corrupt the record rather than merely
+    look unusual: a value the column cannot hold, and an empty string, which
+    would read as an identity where there is none.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InvalidAuditFieldError(
+            f"fhir_practitioner_ref must be a string reference, got {type(value).__name__}"
+        )
+    stripped = value.strip()
+    if not stripped:
+        raise InvalidAuditFieldError(
+            "fhir_practitioner_ref is empty. Pass None for an unknown or "
+            "unverified actor — an empty string reads as an identity."
+        )
+    if len(stripped) > _MAX_FHIR_REFERENCE_LENGTH:
+        raise InvalidAuditFieldError(
+            f"fhir_practitioner_ref exceeds {_MAX_FHIR_REFERENCE_LENGTH} characters"
+        )
+    return stripped
+
+
 async def audit_log(
     actor_id: str | None,
     action: AuditAction,
@@ -89,13 +127,16 @@ async def audit_log(
     request_id: str | None = None,
     ip_address: str | None = None,
     user_agent: str | None = None,
+    fhir_practitioner_ref: str | None = None,
     conn: asyncpg.Connection | None = None,
 ) -> None:
     """Record one PHI access in the ``audit_log`` table.
 
     Args:
         actor_id: UUID of the provider or service account responsible. None only
-            for unauthenticated paths that still touch PHI.
+            for unauthenticated paths that still touch PHI. Never filled from
+            ``fhir_practitioner_ref``: the two are different kinds of
+            identifier and neither is a fallback for the other.
         action: What was done, as a member of :class:`~hipaa_logger.AuditAction`.
             A string outside that vocabulary is refused rather than written.
         resource_type: FHIR or domain resource kind, e.g. ``Patient``.
@@ -105,11 +146,17 @@ async def audit_log(
         request_id: UUID correlating this event to a traced request.
         ip_address: Client IP, when the call originated from a request.
         user_agent: Client user agent, when the call originated from a request.
+        fhir_practitioner_ref: The actor as an EHR asserted it — a FHIR
+            ``Practitioner`` reference, stored verbatim. Pass it **only after
+            verifying the assertion**; an unverified or absent claim is None,
+            because an unverified identity in an audit trail is a fabrication.
+            See CLAUDE.md, "The EHR-asserted actor is its own column".
         conn: Write on this connection instead of the shared pool. Use it to put
             the audit write inside the caller's transaction.
 
     Raises:
-        InvalidAuditFieldError: A UUID or IP field could not be coerced, or the
+        InvalidAuditFieldError: A UUID or IP field could not be coerced, the
+            practitioner reference is empty or too long for its column, or the
             action is not in the vocabulary.
         AuditLogError: The database write failed. Never suppressed — an audit
             failure has to stop the operation it was recording.
@@ -131,6 +178,7 @@ async def audit_log(
         _as_uuid(request_id, "request_id"),
         _as_ip(ip_address),
         user_agent,
+        _as_fhir_reference(fhir_practitioner_ref),
     )
 
     connection = conn or db.get_injected_connection()

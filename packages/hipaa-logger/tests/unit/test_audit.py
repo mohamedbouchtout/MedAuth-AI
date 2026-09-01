@@ -27,6 +27,10 @@ from hipaa_logger import (
 ACTOR_ID = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
 SESSION_ID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 REQUEST_ID = "550e8400-e29b-41d4-a716-446655440000"
+#: An EHR-asserted actor, as a SMART fhirUser claim gives it: an absolute
+#: reference, and deliberately not a UUID — that is the whole reason this
+#: column exists rather than the value going into actor_id.
+PRACTITIONER_REF = "https://ehr.example.org/fhir/Practitioner/abc-123"
 
 
 @pytest.fixture(autouse=True)
@@ -127,6 +131,7 @@ async def test_parameters_are_bound_in_column_order() -> None:
         request_id=REQUEST_ID,
         ip_address="198.51.100.7",
         user_agent="MedAuth/1.0",
+        fhir_practitioner_ref=PRACTITIONER_REF,
         conn=conn,
     )
 
@@ -141,6 +146,7 @@ async def test_parameters_are_bound_in_column_order() -> None:
         uuid.UUID(REQUEST_ID),
         ipaddress.ip_address("198.51.100.7"),
         "MedAuth/1.0",
+        PRACTITIONER_REF,
     ]
 
 
@@ -158,7 +164,7 @@ async def test_optional_fields_default_to_none() -> None:
     )
 
     _, *params = conn.execute.await_args.args
-    assert params[6:] == [None, None, None]
+    assert params[6:] == [None, None, None, None]
 
 
 async def test_ipv6_address_is_accepted() -> None:
@@ -341,3 +347,193 @@ async def test_uuid_objects_are_accepted_as_well_as_strings() -> None:
 
     _, *params = conn.execute.await_args.args
     assert params[0] == actor
+
+
+class TestTheEhrAssertedActor:
+    """The fhir_practitioner_ref column — CLAUDE.md, "The EHR-asserted actor is
+    its own column"."""
+
+    async def test_a_non_uuid_reference_is_accepted(self) -> None:
+        """The reason the column exists at all.
+
+        A FHIR Practitioner id is [A-Za-z0-9\\-\\.]{1,64} — HAPI issues "1",
+        Epic issues opaque strings. Passing one as actor_id raises; this column
+        takes it as it comes.
+        """
+        conn = make_connection()
+
+        await audit_log(
+            actor_id=None,
+            action=AuditAction.READ_PATIENT,
+            resource_type="Patient",
+            resource_id="p-1",
+            session_id=None,
+            service_name="fhir-integration",
+            fhir_practitioner_ref="Practitioner/1",
+            conn=conn,
+        )
+
+        _, *params = conn.execute.await_args.args
+        assert params[9] == "Practitioner/1"
+
+    async def test_the_same_value_is_refused_as_actor_id(self) -> None:
+        """The two columns are not interchangeable, and the type says so.
+
+        This is the failure the separate column exists to prevent: it would have
+        fired on exactly the launches where capturing the claim succeeded.
+        """
+        conn = make_connection()
+
+        with pytest.raises(InvalidAuditFieldError, match="actor_id"):
+            await audit_log(
+                actor_id="Practitioner/1",
+                action=AuditAction.READ_PATIENT,
+                resource_type="Patient",
+                resource_id="p-1",
+                session_id=None,
+                service_name="fhir-integration",
+                conn=conn,
+            )
+
+        conn.execute.assert_not_awaited()
+
+    async def test_an_absolute_reference_is_stored_verbatim(self) -> None:
+        """Stored whole, not reduced to the bare id.
+
+        A Practitioner id is unique only within one EHR, so dropping the server
+        would silently merge two providers into one audit identity.
+        """
+        conn = make_connection()
+
+        await audit_log(
+            actor_id=None,
+            action=AuditAction.READ_ENCOUNTER,
+            resource_type="Encounter",
+            resource_id="e-1",
+            session_id=None,
+            service_name="fhir-integration",
+            fhir_practitioner_ref=PRACTITIONER_REF,
+            conn=conn,
+        )
+
+        _, *params = conn.execute.await_args.args
+        assert params[9] == PRACTITIONER_REF
+
+    async def test_surrounding_whitespace_is_stripped(self) -> None:
+        conn = make_connection()
+
+        await audit_log(
+            actor_id=None,
+            action=AuditAction.READ_PATIENT,
+            resource_type="Patient",
+            resource_id="p-1",
+            session_id=None,
+            service_name="fhir-integration",
+            fhir_practitioner_ref=f"  {PRACTITIONER_REF}\n",
+            conn=conn,
+        )
+
+        _, *params = conn.execute.await_args.args
+        assert params[9] == PRACTITIONER_REF
+
+    @pytest.mark.parametrize("value", ["", "   ", "\n"])
+    async def test_an_empty_reference_is_refused_rather_than_written(self, value: str) -> None:
+        """Pass None for an unknown actor — an empty string reads as an identity."""
+        conn = make_connection()
+
+        with pytest.raises(InvalidAuditFieldError, match="fhir_practitioner_ref"):
+            await audit_log(
+                actor_id=None,
+                action=AuditAction.READ_PATIENT,
+                resource_type="Patient",
+                resource_id="p-1",
+                session_id=None,
+                service_name="fhir-integration",
+                fhir_practitioner_ref=value,
+                conn=conn,
+            )
+
+        conn.execute.assert_not_awaited()
+
+    async def test_a_reference_too_long_for_the_column_is_refused(self) -> None:
+        """Named here rather than surfacing as a database error naming a column."""
+        conn = make_connection()
+
+        with pytest.raises(InvalidAuditFieldError, match="512"):
+            await audit_log(
+                actor_id=None,
+                action=AuditAction.READ_PATIENT,
+                resource_type="Patient",
+                resource_id="p-1",
+                session_id=None,
+                service_name="fhir-integration",
+                fhir_practitioner_ref="https://ehr.example.org/fhir/Practitioner/" + ("x" * 512),
+                conn=conn,
+            )
+
+        conn.execute.assert_not_awaited()
+
+    async def test_it_defaults_to_none_so_existing_callers_are_unaffected(self) -> None:
+        """Every audit call in the repository predates this column.
+
+        None of them passes it, and each must keep writing a row with a null
+        there rather than needing to be touched.
+        """
+        conn = make_connection()
+
+        await audit_log(
+            actor_id=ACTOR_ID,
+            action=AuditAction.WRITE_NOTE,
+            resource_type="ClinicalNote",
+            resource_id="note-1",
+            session_id=SESSION_ID,
+            service_name="track-a-clinical",
+            conn=conn,
+        )
+
+        _, *params = conn.execute.await_args.args
+        assert params[9] is None
+
+    async def test_it_is_never_populated_from_actor_id(self) -> None:
+        """Neither column is a fallback for the other.
+
+        A row with a UUID actor and no EHR assertion leaves this null; the
+        reverse leaves actor_id null. An audit query has to read both.
+        """
+        conn = make_connection()
+
+        await audit_log(
+            actor_id=ACTOR_ID,
+            action=AuditAction.READ_PATIENT,
+            resource_type="Patient",
+            resource_id="p-1",
+            session_id=None,
+            service_name="track-a-clinical",
+            conn=conn,
+        )
+
+        _, *params = conn.execute.await_args.args
+        assert params[0] == uuid.UUID(ACTOR_ID)
+        assert params[9] is None
+
+    async def test_a_non_string_reference_is_refused(self) -> None:
+        """Defensive, like the UUID and IP coercions beside it.
+
+        mypy rejects this at a typed call site; the check is here for the
+        callers static typing does not reach.
+        """
+        conn = make_connection()
+
+        with pytest.raises(InvalidAuditFieldError, match="fhir_practitioner_ref"):
+            await audit_log(
+                actor_id=None,
+                action=AuditAction.READ_PATIENT,
+                resource_type="Patient",
+                resource_id="p-1",
+                session_id=None,
+                service_name="fhir-integration",
+                fhir_practitioner_ref=uuid.UUID(ACTOR_ID),  # type: ignore[arg-type]
+                conn=conn,
+            )
+
+        conn.execute.assert_not_awaited()

@@ -90,6 +90,7 @@ async def test_audit_row_lands_with_every_column_populated(
         request_id=str(request_id),
         ip_address="198.51.100.7",
         user_agent="MedAuth/1.0 (integration test)",
+        fhir_practitioner_ref="https://ehr.example.org/fhir/Practitioner/abc-123",
     )
 
     row = await connection.fetchrow(
@@ -106,7 +107,41 @@ async def test_audit_row_lands_with_every_column_populated(
     assert row["request_id"] == request_id
     assert str(row["ip_address"]) == "198.51.100.7"
     assert row["user_agent"] == "MedAuth/1.0 (integration test)"
+    assert row["fhir_practitioner_ref"] == "https://ehr.example.org/fhir/Practitioner/abc-123"
     assert row["occurred_at"] is not None
+
+
+async def test_a_non_uuid_practitioner_reference_round_trips(
+    connection: asyncpg.Connection,
+) -> None:
+    """The column's whole purpose, proven against the real schema.
+
+    A FHIR Practitioner id is not required to be a UUID — HAPI issues "1". The
+    same value in actor_id is refused before the write; here it survives a round
+    trip unchanged, which is what makes the separate column worth having rather
+    than a widened actor_id.
+    """
+    resource_id = f"patient-{uuid.uuid4()}"
+
+    await audit_log(
+        actor_id=None,
+        action=AuditAction.READ_PATIENT,
+        resource_type="Patient",
+        resource_id=resource_id,
+        session_id=None,
+        service_name="fhir-integration",
+        fhir_practitioner_ref="Practitioner/1",
+    )
+
+    row = await connection.fetchrow(
+        "SELECT actor_id, fhir_practitioner_ref FROM audit_log WHERE resource_id = $1",
+        resource_id,
+    )
+
+    assert row is not None
+    assert row["fhir_practitioner_ref"] == "Practitioner/1"
+    # Never populated from the other column, in either direction.
+    assert row["actor_id"] is None
 
 
 async def test_nullable_columns_accept_none(connection: asyncpg.Connection) -> None:
@@ -132,6 +167,7 @@ async def test_nullable_columns_accept_none(connection: asyncpg.Connection) -> N
     assert row["request_id"] is None
     assert row["ip_address"] is None
     assert row["user_agent"] is None
+    assert row["fhir_practitioner_ref"] is None
 
 
 async def test_caller_transaction_rollback_discards_the_audit_row(
