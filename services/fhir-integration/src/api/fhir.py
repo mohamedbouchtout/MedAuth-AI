@@ -48,13 +48,25 @@ from src.adapters.errors import (
     FHIRUpstreamUnavailable,
 )
 from src.adapters.models import EncounterCoverageContext, PatientContext
-from src.api.dependencies import get_http_client, get_redis
+from src.api.dependencies import (
+    get_app_settings,
+    get_http_client,
+    get_redis,
+    require_credentials,
+)
 from src.audit import (
     RESOURCE_TYPE_ENCOUNTER,
     RESOURCE_TYPE_PATIENT,
     audit_ehr_read,
 )
+from src.config import Settings
 from src.smart import store
+from src.smart.oauth import (
+    TokenEndpointUnavailable,
+    TokenExchangeError,
+    TokenGrantRejected,
+    refresh_access_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +79,7 @@ LAUNCH_ID_HEADER: Final = "X-MedAuth-Launch-Id"
 
 ERROR_CODE_UNKNOWN_LAUNCH: Final = "FHIR_UNKNOWN_LAUNCH"
 ERROR_CODE_LAUNCH_EXPIRED: Final = "FHIR_LAUNCH_EXPIRED"
+ERROR_CODE_REFRESH_UNAVAILABLE: Final = "FHIR_TOKEN_REFRESH_UNAVAILABLE"
 ERROR_CODE_NOT_FOUND: Final = "FHIR_RESOURCE_NOT_FOUND"
 ERROR_CODE_UPSTREAM_UNAVAILABLE: Final = "FHIR_UPSTREAM_UNAVAILABLE"
 ERROR_CODE_MALFORMED: Final = "FHIR_MALFORMED_RESPONSE"
@@ -87,6 +100,7 @@ async def get_ehr_adapter(
     ],
     redis: Annotated[Redis, Depends(get_redis)],
     http_client: Annotated[httpx.AsyncClient, Depends(get_http_client)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
 ) -> EHRAdapter:
     """Resolve the launch's stored token into an adapter for that EHR.
 
@@ -96,8 +110,20 @@ async def get_ehr_adapter(
     rejected, there is simply no such launch. The presented value is never
     logged.
 
+    **This is where an EHR access token is renewed** (TASK-051b), before an
+    adapter exists and before any fetch is attempted, so no route body and no
+    adapter primitive knows renewal happens at all. Reactive renewal — catching
+    the EHR's 401 and retrying — was the alternative and is not possible here:
+    this is a FastAPI dependency, so it has already returned by the time a route
+    body's fetch raises, and a reactive path would mean a retry wrapper at every
+    fetch call site and at every one added later. See CLAUDE.md, "The launch
+    record outlives its access token", including what proactive renewal cannot
+    catch.
+
     Raises:
-        ApiHTTPException: 404 when no launch record answers.
+        ApiHTTPException: 404 when no launch record answers; 401 when the launch
+            is over and must be repeated; 502 or 504 when renewal could not be
+            completed but the grant may still be good.
     """
     token = await store.load_launch_token(redis, x_medauth_launch_id)
     if token is None:
@@ -111,11 +137,129 @@ async def get_ehr_adapter(
             ),
         )
 
+    if store.access_token_is_stale(token, skew_seconds=settings.smart_token_refresh_skew_seconds):
+        token = await _renew_access_token(redis, http_client, settings, x_medauth_launch_id, token)
+
     return get_adapter(
         token.ehr_type,
         token.fhir_base_url,
         token.access_token,
         http_client,
+    )
+
+
+async def _renew_access_token(
+    redis: Redis,
+    http_client: httpx.AsyncClient,
+    settings: Settings,
+    launch_id: str,
+    token: store.LaunchToken,
+) -> store.LaunchToken:
+    """Renew one launch's EHR access token, returning the record that replaced it.
+
+    ``launch_id`` is unchanged by this and is never re-issued: it names the
+    launch, not the token, so a client holding one is not made to re-learn it.
+    Nothing here touches an ``encounters`` row either — an EHR token's lifetime
+    and a visit's are independent, the same separation CLAUDE.md draws for the
+    MedAuth session token.
+
+    No audit row: obtaining a credential is not using it, which is the same test
+    that keeps TASK-051's own two routes out of the audit trail. The PHI read
+    this renewal is on the way to audits as it already did.
+
+    Raises:
+        ApiHTTPException: 401 when the grant is gone and the launch must be
+            repeated; 502 or 504 when the answer never arrived.
+    """
+    if token.refresh_token is None:
+        # An EHR that issued no refresh token, or a grant already refused. Either
+        # way there is nothing to present, and the honest answer is the one
+        # TASK-051 already documented.
+        raise _launch_expired()
+
+    credentials = require_credentials(settings, token.ehr_type)
+
+    try:
+        renewed = await refresh_access_token(
+            http_client,
+            token_endpoint=token.token_endpoint,
+            credentials=credentials,
+            refresh_token=token.refresh_token,
+        )
+    except TokenGrantRejected as exc:
+        # The authorization server decided: this grant is not one it will
+        # honour. The launch is over, and the record is rewritten without the
+        # refused grant so the next request does not present it again.
+        logger.warning(
+            "Refusing to renew launch for %s: the grant was rejected (%s).",
+            token.ehr_type.value,
+            exc.oauth_error or "no error code",
+        )
+        await store.discard_refresh_grant(redis, launch_id, token)
+        raise _launch_expired() from None
+    except TokenEndpointUnavailable as exc:
+        # We do not know whether the grant is still good, so nothing is written
+        # and the launch is left intact. Ending it here would end a working
+        # launch over a network hiccup.
+        logger.warning(
+            "Could not reach the token endpoint to renew a %s launch: %s",
+            token.ehr_type.value,
+            exc.detail,
+        )
+        raise _refresh_unavailable(timed_out=exc.timed_out) from None
+    except TokenExchangeError as exc:
+        # An answer arrived and was unusable — not JSON, or carrying no access
+        # token. That is not the server refusing the grant, so the grant is kept
+        # and this is reported as the same "we do not know" outcome.
+        logger.warning(
+            "Unusable renewal answer for a %s launch: %s", token.ehr_type.value, exc.detail
+        )
+        raise _refresh_unavailable(timed_out=False) from None
+
+    updated = token.model_copy(
+        update={
+            "access_token": renewed.access_token,
+            "access_token_expires_at": store.access_token_expiry(renewed.ttl_seconds),
+            # Rotation: many servers issue a new refresh token and invalidate the
+            # one just presented. Keeping the old value here would leave the
+            # *second* renewal presenting a token the server has already thrown
+            # away, while this one appeared to succeed.
+            "refresh_token": renewed.refresh_token or token.refresh_token,
+        }
+    )
+    await store.save_launch_token(
+        redis,
+        launch_id,
+        updated,
+        ttl_seconds=store.record_ttl_seconds(
+            updated, refresh_grant_ttl_seconds=settings.smart_launch_record_ttl_seconds
+        ),
+    )
+    logger.info("Renewed the EHR access token for a %s launch.", token.ehr_type.value)
+    return updated
+
+
+def _launch_expired() -> ApiHTTPException:
+    """The 401 that says this launch is over and must be started again."""
+    return ApiHTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        code=ERROR_CODE_LAUNCH_EXPIRED,
+        message=(
+            "This launch's EHR authorization is no longer valid. The SMART "
+            "launch must be repeated from the EHR."
+        ),
+    )
+
+
+def _refresh_unavailable(*, timed_out: bool) -> ApiHTTPException:
+    """The 502/504 that says renewal failed without settling the grant's fate."""
+    return ApiHTTPException(
+        status_code=(status.HTTP_504_GATEWAY_TIMEOUT if timed_out else status.HTTP_502_BAD_GATEWAY),
+        code=ERROR_CODE_REFRESH_UNAVAILABLE,
+        message=(
+            "The EHR's authorization server could not be reached to renew this "
+            "launch's access token. This is transient — retrying is reasonable."
+        ),
     )
 
 
@@ -183,10 +327,10 @@ def _as_api_error(exc: Exception) -> ApiHTTPException:
         502,
         504,
         descriptions={
-            401: "The EHR rejected this launch's access token; repeat the launch.",
+            401: "This launch's EHR authorization is no longer valid; repeat the launch.",
             404: "No such SMART launch, or the EHR holds no such patient.",
-            502: "The EHR was unreachable or answered with something unusable.",
-            504: "The EHR did not answer in time.",
+            502: "The EHR, or its authorization server, was unreachable or unusable.",
+            504: "The EHR or its authorization server did not answer in time.",
         },
     ),
 )
@@ -235,10 +379,10 @@ async def read_patient_context(
         502,
         504,
         descriptions={
-            401: "The EHR rejected this launch's access token; repeat the launch.",
+            401: "This launch's EHR authorization is no longer valid; repeat the launch.",
             404: "No such SMART launch, or the EHR holds no such encounter.",
-            502: "The EHR was unreachable or answered with something unusable.",
-            504: "The EHR did not answer in time.",
+            502: "The EHR, or its authorization server, was unreachable or unusable.",
+            504: "The EHR or its authorization server did not answer in time.",
         },
     ),
 )
@@ -281,10 +425,10 @@ async def read_encounter(
         502,
         504,
         descriptions={
-            401: "The EHR rejected this launch's access token; repeat the launch.",
+            401: "This launch's EHR authorization is no longer valid; repeat the launch.",
             404: "No such SMART launch, or the EHR holds no such encounter.",
-            502: "The EHR was unreachable or answered with something unusable.",
-            504: "The EHR did not answer in time.",
+            502: "The EHR, or its authorization server, was unreachable or unusable.",
+            504: "The EHR or its authorization server did not answer in time.",
         },
     ),
 )

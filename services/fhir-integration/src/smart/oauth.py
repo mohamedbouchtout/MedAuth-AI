@@ -65,11 +65,51 @@ class TokenExchangeError(RuntimeError):
     ``redirect_uri`` from an expired code. It never carries the response body,
     which holds the token on the success path and can hold echoes of the request
     on the failure path.
+
+    **Two subclasses split what a refresh has to tell apart** — see
+    ``TokenGrantRejected`` and ``TokenEndpointUnavailable``. The base class is
+    still raised on its own, for an answer that was neither a refusal nor a
+    failure to arrive: a body that is not JSON, or one carrying no access token.
+    A code exchange treats all three the same way, because a launch that has not
+    completed simply fails; only renewal has a live grant to protect.
     """
 
     def __init__(self, detail: str) -> None:
         self.detail = detail
         super().__init__(f"Token exchange failed: {detail}")
+
+
+class TokenGrantRejected(TokenExchangeError):
+    """The authorization server answered, and refused.
+
+    A 4xx from a token endpoint is a decision rather than an accident: the grant
+    presented is not one this server will honour. For a refresh that means the
+    grant is gone — revoked, or a refresh token already rotated out — and the
+    launch must be repeated.
+
+    ``oauth_error`` carries RFC 6749's machine-readable code where the server
+    supplied one. It is kept as a field rather than only in the message because
+    ``invalid_grant`` and ``invalid_client`` send whoever is debugging a launch
+    to two different places: a dead grant, or a misconfigured registration.
+    """
+
+    def __init__(self, detail: str, *, oauth_error: str | None = None) -> None:
+        self.oauth_error = oauth_error
+        super().__init__(detail)
+
+
+class TokenEndpointUnavailable(TokenExchangeError):
+    """No usable answer arrived, so the grant's fate is unknown.
+
+    A connect error, a read timeout, or a 5xx. This is a separate type rather
+    than a message difference because reading it as a dead grant would end a
+    working launch over a network hiccup — the same "silence is not a negative
+    determination" error CLAUDE.md rejects in the CRD path, one layer down.
+    """
+
+    def __init__(self, detail: str, *, timed_out: bool = False) -> None:
+        self.timed_out = timed_out
+        super().__init__(detail)
 
 
 def authorization_redirect_url(
@@ -160,13 +200,89 @@ async def exchange_code_for_token(
         TokenExchangeError: If the request fails, the server refuses, or the
             response carries no access token.
     """
-    form = {
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": redirect_uri,
-        "code_verifier": code_verifier,
-        "client_id": credentials.client_id,
-    }
+    return await _post_token_request(
+        client,
+        token_endpoint=token_endpoint,
+        credentials=credentials,
+        form={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
+            "client_id": credentials.client_id,
+        },
+    )
+
+
+async def refresh_access_token(
+    client: httpx.AsyncClient,
+    *,
+    token_endpoint: str,
+    credentials: ClientCredentials,
+    refresh_token: str,
+) -> TokenResponse:
+    """Renew an EHR access token from the refresh token a launch already holds.
+
+    TASK-051b. This is the same conversation with the same authorization server
+    as ``exchange_code_for_token``, differing only in the grant presented, so it
+    shares that function's client authentication and its response handling
+    rather than restating them — a second spelling of how a vendor's client
+    authenticates is how the two would come to disagree.
+
+    No PKCE here: ``code_verifier`` proves that whoever redeems a code is who
+    requested it, and a refresh redeems no code. The refresh token is itself the
+    proof.
+
+    The caller is expected to distinguish ``TokenGrantRejected`` from
+    ``TokenEndpointUnavailable``: only the first means the launch is over. See
+    CLAUDE.md, "The launch record outlives its access token".
+
+    Args:
+        client: The HTTP client to post with.
+        token_endpoint: Carried on the launch record, from the same discovery
+            document the authorization request used.
+        credentials: The registered client for this EHR.
+        refresh_token: The value stored at the last exchange or refresh.
+
+    Returns:
+        The parsed token response. Its ``refresh_token`` may be a *new* value —
+        servers commonly rotate — and the caller must store whichever it gets.
+
+    Raises:
+        TokenGrantRejected: The server refused the grant; the launch is over.
+        TokenEndpointUnavailable: No usable answer; the grant may still be good.
+        TokenExchangeError: The answer was unusable in some other way.
+    """
+    return await _post_token_request(
+        client,
+        token_endpoint=token_endpoint,
+        credentials=credentials,
+        form={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": credentials.client_id,
+        },
+    )
+
+
+async def _post_token_request(
+    client: httpx.AsyncClient,
+    *,
+    token_endpoint: str,
+    credentials: ClientCredentials,
+    form: dict[str, str],
+) -> TokenResponse:
+    """Post one grant to a token endpoint and parse what comes back.
+
+    Shared by the code exchange and the refresh because the parts that are easy
+    to get subtly wrong — confidential-versus-public client authentication, and
+    which failures are which — must be identical for both.
+
+    Raises:
+        TokenGrantRejected: On a 4xx, which is the server deciding.
+        TokenEndpointUnavailable: On a transport failure or a 5xx.
+        TokenExchangeError: On an answer that is neither, and is unusable.
+    """
     # A public client sends no Authorization header at all, which httpx spells
     # with its USE_CLIENT_DEFAULT sentinel. The sentinel is public; only its
     # class is not, which is why the annotation reaches into httpx._client
@@ -183,13 +299,21 @@ async def exchange_code_for_token(
             headers={"Accept": "application/json"},
             timeout=TOKEN_TIMEOUT_SECONDS,
         )
+    except httpx.TimeoutException as exc:
+        raise TokenEndpointUnavailable(
+            f"request failed ({type(exc).__name__})", timed_out=True
+        ) from exc
     except httpx.HTTPError as exc:
-        raise TokenExchangeError(f"request failed ({type(exc).__name__})") from exc
+        raise TokenEndpointUnavailable(f"request failed ({type(exc).__name__})") from exc
+
+    if response.status_code >= httpx.codes.INTERNAL_SERVER_ERROR:
+        raise TokenEndpointUnavailable(f"authorization server answered HTTP {response.status_code}")
 
     if response.status_code != httpx.codes.OK:
-        raise TokenExchangeError(
+        raise TokenGrantRejected(
             f"authorization server answered HTTP {response.status_code}"
-            f"{_oauth_error_suffix(response)}"
+            f"{_oauth_error_suffix(response)}",
+            oauth_error=_oauth_error_code(response),
         )
 
     try:
@@ -212,10 +336,22 @@ def _oauth_error_suffix(response: httpx.Response) -> str:
     read — never ``error_description``, which is free text an authorization
     server may fill with an echo of the request.
     """
+    code = _oauth_error_code(response)
+    return f" ({code})" if code else ""
+
+
+def _oauth_error_code(response: httpx.Response) -> str | None:
+    """Return RFC 6749's ``error`` code from a refused token request, if present.
+
+    Split out from the message-building above because a refresh needs the code
+    as a value rather than as prose: ``invalid_grant`` is what tells the caller
+    the grant is dead rather than merely refused this once. The same rule
+    applies — only the code is read, never ``error_description``.
+    """
     try:
         body = response.json()
     except ValueError:
-        return ""
+        return None
     if isinstance(body, dict) and isinstance(body.get("error"), str):
-        return f" ({body['error']})"
-    return ""
+        return str(body["error"])
+    return None

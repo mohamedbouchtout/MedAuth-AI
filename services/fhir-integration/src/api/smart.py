@@ -1,4 +1,4 @@
-"""``GET /fhir/launch`` and ``GET /fhir/callback`` â€” the SMART on FHIR OAuth flow.
+"""``GET /fhir/launch`` and ``GET /fhir/callback`` — the SMART on FHIR OAuth flow.
 
 TASK-051. These two routes are the whole of the launch: the first sends a
 provider's browser to their EHR's authorization server, the second takes the
@@ -14,7 +14,7 @@ belongs when there is no audit row to write.
 **What must never reach a log line here**: the ``launch`` parameter, the
 authorization ``code``, the ``state``, the ``code_verifier``, the client secret,
 the access token, and the SMART launch context the token response carries. The
-``iss`` is logged as a **host**, never in full â€” a launch URL can carry context
+``iss`` is logged as a **host**, never in full — a launch URL can carry context
 in its query string. What is left to log is the vendor key and the launch's
 outcome, which is what an operator actually needs.
 
@@ -37,8 +37,13 @@ from redis.asyncio import Redis
 
 from api_envelope import ApiHTTPException, ApiResponse, error_responses
 from src.adapters.factory import EHRType, detect_ehr_from_issuer
-from src.api.dependencies import get_app_settings, get_http_client, get_redis
-from src.config import ClientCredentials, MissingClientCredentialsError, Settings
+from src.api.dependencies import (
+    get_app_settings,
+    get_http_client,
+    get_redis,
+    require_credentials,
+)
+from src.config import Settings
 from src.smart import store
 from src.smart.discovery import DiscoveryError, fetch_smart_configuration
 from src.smart.issuer import issuer_host, normalize_fhir_base_url
@@ -55,7 +60,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/fhir", tags=["smart"])
 
 ERROR_CODE_DISCOVERY_FAILED: Final = "SMART_DISCOVERY_FAILED"
-ERROR_CODE_CLIENT_NOT_REGISTERED: Final = "SMART_CLIENT_NOT_REGISTERED"
 ERROR_CODE_UNKNOWN_STATE: Final = "SMART_UNKNOWN_STATE"
 ERROR_CODE_AUTHORIZATION_DENIED: Final = "SMART_AUTHORIZATION_DENIED"
 ERROR_CODE_TOKEN_EXCHANGE_FAILED: Final = "SMART_TOKEN_EXCHANGE_FAILED"
@@ -92,20 +96,6 @@ class LaunchSessionData(BaseModel):
     expires_in: int = Field(
         description="Seconds until the stored EHR access token expires.",
     )
-
-
-def _require_credentials(settings: Settings, ehr_type: EHRType) -> ClientCredentials:
-    """Return the registered client for an EHR, or fail with a named error."""
-    try:
-        return settings.credentials_for(ehr_type)
-    except MissingClientCredentialsError as exc:
-        # exc names the environment variable to set and never a secret's value.
-        logger.error("Cannot launch: %s", exc)
-        raise ApiHTTPException(
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-            ERROR_CODE_CLIENT_NOT_REGISTERED,
-            f"No SMART client registered for EHR '{ehr_type.value}'",
-        ) from None
 
 
 @router.get(
@@ -161,7 +151,7 @@ async def smart_launch(
     for ``launch/patient`` instead, so the authorization server prompts for the
     patient the EHR would otherwise have named.
 
-    Touches no PHI and writes no audit row â€” it obtains no patient data, only
+    Touches no PHI and writes no audit row — it obtains no patient data, only
     permission to ask for some later.
     """
     host = issuer_host(iss)
@@ -170,7 +160,7 @@ async def smart_launch(
     # its own requests. See src/smart/issuer.py.
     fhir_base_url = normalize_fhir_base_url(iss)
     ehr_type = detect_ehr_from_issuer(iss)
-    credentials = _require_credentials(settings, ehr_type)
+    credentials = require_credentials(settings, ehr_type)
 
     try:
         configuration = await fetch_smart_configuration(http, fhir_base_url, issuer_host=host)
@@ -258,8 +248,8 @@ async def callback(
 ) -> ApiResponse[LaunchSessionData]:
     """Exchange the authorization code for an EHR access token.
 
-    Claims the launch record for this ``state`` â€” atomically, so a replayed
-    callback finds nothing and cannot mint a second token â€” presents the PKCE
+    Claims the launch record for this ``state`` — atomically, so a replayed
+    callback finds nothing and cannot mint a second token — presents the PKCE
     verifier held with it, and stores the resulting token under
     `fhir_token:{launch_id}` for as long as the EHR says it lives.
 
@@ -299,7 +289,7 @@ async def callback(
             "The callback carried neither an authorization code nor an error",
         )
 
-    credentials = _require_credentials(settings, pending.ehr_type)
+    credentials = require_credentials(settings, pending.ehr_type)
 
     try:
         # The token endpoint comes from the launch record, not from a second
