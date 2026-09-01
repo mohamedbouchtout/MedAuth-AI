@@ -96,6 +96,27 @@ class Settings(BaseSettings):
     #: human completing a login, and no real flow has been timed against it.
     smart_launch_ttl_seconds: int = Field(default=600, gt=0)
 
+    #: How long ``fhir_token:{launch_id}`` lives when the launch holds a refresh
+    #: token — a bound on the refresh grant, not on the access token, which
+    #: carries its own expiry as a field. TASK-051b, reversing TASK-051's rule
+    #: that the record cannot outlive its credential; see CLAUDE.md, "The launch
+    #: record outlives its access token", for why that reversal is the fix.
+    #:
+    #: Eight hours is a round stand-in for one clinical working day, **not a
+    #: measurement**: SMART on FHIR gives no ``refresh_expires_in``, so nothing
+    #: the EHR tells us bounds this. What it really bounds is how long a
+    #: compromised Redis yields a usable EHR credential, which is the reason it
+    #: is bounded at all and the reason to think before raising it.
+    smart_launch_record_ttl_seconds: int = Field(default=28800, gt=0)
+
+    #: How far ahead of expiry an access token is renewed. The margin covers
+    #: ordinary clock skew between this service and the EHR, plus the round trip
+    #: of the FHIR call about to be made — a token with two seconds left is
+    #: expired by the time it is presented. Skew wider than this still reaches
+    #: the EHR as a 401 and ends the launch, which CLAUDE.md states as the named
+    #: limit of proactive renewal rather than leaving it to be discovered.
+    smart_token_refresh_skew_seconds: int = Field(default=120, ge=0)
+
     athena_client_id: str = ""
     athena_client_secret: SecretStr | None = None
     ecw_client_id: str = ""

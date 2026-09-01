@@ -13,6 +13,7 @@ import hashlib
 import httpx
 import pytest
 
+from src.adapters.factory import EHRType
 from src.smart.discovery import (
     SMART_CONFIGURATION_PATH,
     DiscoveryError,
@@ -25,6 +26,12 @@ from src.smart.pkce import (
     CODE_CHALLENGE_METHOD,
     derive_code_challenge,
     generate_code_verifier,
+)
+from src.smart.store import (
+    LaunchToken,
+    access_token_expiry,
+    access_token_is_stale,
+    record_ttl_seconds,
 )
 
 
@@ -167,3 +174,68 @@ class TestTokenTtl:
         token = TokenResponse(access_token="t", expires_in=expires_in)
 
         assert token.ttl_seconds == DEFAULT_TOKEN_TTL_SECONDS
+
+
+class TestTheRecordTtlRule:
+    """TASK-051b's storage fix, at the level of the function that decides it.
+
+    The route suites prove the fix end to end; these cover the arithmetic and
+    the two branches directly, because the whole defect was one lifetime being
+    used to represent two.
+    """
+
+    def _record(self, *, expires_in: int, refresh_token: str | None) -> LaunchToken:
+        return LaunchToken(
+            ehr_type=EHRType.GENERIC,
+            fhir_base_url="https://fhir.example.org/r4",
+            access_token="token",
+            access_token_expires_at=access_token_expiry(expires_in),
+            token_endpoint="https://auth.example.org/token",
+            refresh_token=refresh_token,
+        )
+
+    def test_a_renewable_record_outlives_its_access_token(self) -> None:
+        record = self._record(expires_in=3600, refresh_token="grant")
+
+        assert record_ttl_seconds(record, refresh_grant_ttl_seconds=28800) == 28800
+
+    def test_a_record_with_no_grant_expires_with_its_access_token(self) -> None:
+        record = self._record(expires_in=900, refresh_token=None)
+
+        assert record_ttl_seconds(record, refresh_grant_ttl_seconds=28800) == 900
+
+    def test_an_access_token_outliving_the_grant_bound_still_wins(self) -> None:
+        """An EHR issuing a token longer-lived than our bound must not be truncated."""
+        record = self._record(expires_in=86400, refresh_token="grant")
+
+        assert record_ttl_seconds(record, refresh_grant_ttl_seconds=28800) == 86400
+
+    def test_an_already_expired_record_never_asks_redis_for_a_zero_ttl(self) -> None:
+        """Redis rejects a non-positive TTL, so the floor is one second, not zero."""
+        record = self._record(expires_in=-500, refresh_token=None)
+
+        assert record_ttl_seconds(record, refresh_grant_ttl_seconds=28800) == 1
+
+
+class TestWhenAnAccessTokenIsStale:
+    def _record(self, *, expires_in: int) -> LaunchToken:
+        return LaunchToken(
+            ehr_type=EHRType.GENERIC,
+            fhir_base_url="https://fhir.example.org/r4",
+            access_token="token",
+            access_token_expires_at=access_token_expiry(expires_in),
+            token_endpoint="https://auth.example.org/token",
+        )
+
+    @pytest.mark.parametrize("expires_in", [-60, 0, 60])
+    def test_expired_or_inside_the_margin_is_stale(self, expires_in: int) -> None:
+        """The margin covers clock skew and the round trip about to be made."""
+        assert access_token_is_stale(self._record(expires_in=expires_in), skew_seconds=120)
+
+    def test_comfortably_live_is_not_stale(self) -> None:
+        assert not access_token_is_stale(self._record(expires_in=3600), skew_seconds=120)
+
+    def test_a_zero_margin_renews_only_once_the_token_is_actually_expired(self) -> None:
+        """The margin is configuration, and zero must mean zero."""
+        assert not access_token_is_stale(self._record(expires_in=5), skew_seconds=0)
+        assert access_token_is_stale(self._record(expires_in=-5), skew_seconds=0)

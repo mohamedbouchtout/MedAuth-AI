@@ -23,7 +23,7 @@ from src.api.dependencies import get_http_client, get_redis
 from src.main import create_app
 from src.smart import store
 from src.smart.store import LaunchToken
-from tests.unit.api.conftest import FakeRedis
+from tests.unit.api.conftest import TOKEN_ENDPOINT, FakeRedis
 from tests.unit.conftest import ACCESS_TOKEN, FHIR_BASE_URL, FakeFHIRServer, coverage_resource
 
 LAUNCH_ID = "3f2a7c18-0d64-4a51-9f0e-8b1c2d3e4f50"
@@ -67,6 +67,11 @@ def redis_with_launch() -> FakeRedis:
         ehr_type=EHRType.GENERIC,
         fhir_base_url=FHIR_BASE_URL,
         access_token=ACCESS_TOKEN,
+        # Comfortably inside its lifetime, so these routes are exercised without
+        # renewal running at all. Renewal has its own suite.
+        access_token_expires_at=store.access_token_expiry(3600),
+        token_endpoint=TOKEN_ENDPOINT,
+        refresh_token="ehr-refresh-token",
         patient_id="synthea-123",
         encounter_id="encounter-1",
     )
