@@ -2501,8 +2501,9 @@ The insurance policy RAG is the technical core. Build and validate before other 
     than assuming it, so it is built once in the service and not per app.
   - **Search is the standalone-launch half of this, not the whole of it.** When
     the app was launched from a chart, the patient is the one the EHR named, and
-    **TASK-051d** returns it. Offering a search there would let a provider start
-    a visit against a different patient than the chart in front of them. Take
+    **TASK-051d**'s `GET /fhir/launch-context` returns it. Offering a search
+    there would let a provider start a visit against a different patient than
+    the chart in front of them. Take
     the launch context when there is one and search only when there is not.
   - It reads patient demographics, so it audits through hipaa-logger like every
     other route in that service.
@@ -4369,7 +4370,7 @@ logic do not change.
       launched against yet — TASK-055 is where a live launch would show whether
       any priority EHR still emits only the older claim.
 
-- [ ] **TASK-051d:** Expose the SMART launch context to the client
+- [x] **TASK-051d:** Expose the SMART launch context to the client
   - Prerequisite: **TASK-051** (the launch that captures the context this
     returns); wanted by **TASK-025b** and **TASK-070**, which cannot start a
     visit without it
@@ -4440,6 +4441,40 @@ logic do not change.
   - **Test:** an unknown, expired or already-consumed `launch_id` is a 404
   - **Test:** the response carries no access token, refresh token or scope, and
     the `launch_id` appears in no log line
+  - **Built.** `GET /fhir/launch-context` in
+    `services/fhir-integration/src/api/fhir.py`, returning a `LaunchContextData`
+    of `patient_id` and `encounter_id`, keyed on the `X-MedAuth-Launch-Id`
+    header through the existing `get_launch_record` dependency.
+    - **The path was the one thing the task did not fix**, which is why it is
+      recorded here: other tasks call it "the launch-context route" and no
+      bullet named a URL. `/fhir/launch-context` takes no path parameter,
+      because the launch it is about is named by the header.
+    - **`launch_id` is not echoed in the response.** The caller sent it and
+      learns nothing from seeing it again, and it resolves to an EHR access
+      token — the class of value this service already keeps out of URLs and
+      logs. Naming the two fields explicitly, rather than serialising
+      `LaunchToken`, is also what stops a field added to storage later from
+      being disclosed by accident.
+    - **A launch carrying no patient at all is a third case the task did not
+      enumerate**, and `LaunchToken.patient_id` permits it. It answers 200 with
+      both fields null and writes **no** audit row: nothing was disclosed, so a
+      row naming no resource would record an access that never happened — the
+      same reason a failed chart read writes none. It is still not a 404: "this
+      launch named nobody" and "no such launch" are different facts.
+    - **A 401, 502 or 504 is reachable from a route that spends no token**,
+      because `get_launch_record` renews the EHR access token proactively. That
+      is the accepted cost of one loading path: a launch whose grant is gone
+      then answers the same way everywhere, instead of this route alone handing
+      back a patient identifier under a launch that can no longer read the chart
+      it names.
+    - **The falsified comment was rewritten, not annotated.**
+      `LaunchToken.patient_id` in `smart/store.py` said the service "never
+      reads, returns or logs them"; the never-logged half still holds and is now
+      stated as the part that matters, alongside why `GET /fhir/callback` goes
+      on withholding them.
+    - **`test_every_router_is_mounted` in `tests/unit/test_main.py` was updated
+      deliberately** — it enumerates the mounted paths, so it is meant to fail
+      when a route appears.
 
 - [x] **TASK-052:** Base FHIR resource fetching (implements base.py methods)
   - Service: `services/fhir-integration`
@@ -5232,8 +5267,8 @@ logic do not change.
 - [ ] **TASK-070:** Session management UI
   - App: `apps/web`
   - Start session: after an EHR launch, take the patient and encounter from
-    **TASK-051d**'s launch-context route rather than searching for a patient the
-    EHR has already named; fall back to patient search via
+    **TASK-051d**'s `GET /fhir/launch-context` rather than searching for a
+    patient the EHR has already named; fall back to patient search via
     `GET /fhir/patient/search?query=...` for a standalone launch (TASK-025b adds
     that route). Then `POST /sessions/start` (TASK-006) with the selected
     patient — passing `launch_id` and `ehr_encounter_id` too, which is what
@@ -5578,6 +5613,6 @@ helpful."
 
    **Patient search is for a standalone launch only.** After an EHR launch the
    EHR has already named the patient and TASK-051 stored it, so the identifier
-   comes from **TASK-051d**'s launch-context route and searching for it would be
-   asking a question we hold the answer to. The two routes answer different
+   comes from **TASK-051d**'s `GET /fhir/launch-context` and searching for it
+   would be asking a question we hold the answer to. The two routes answer different
    launch types; neither replaces the other.
