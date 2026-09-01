@@ -824,8 +824,13 @@ fhir_launch:{state}              cache, TTL = OAuth flow timeout (~10 min) —
                                   authorization redirect and the callback that
                                   consumes it, which deletes it. A state is
                                   single-use (TASK-051)
-fhir_token:{launch_id}           cache, TTL = token expiry — EHR access token
-                                  + fhir_base_url + ehr_type (TASK-051).
+fhir_token:{launch_id}           cache, TTL = the refresh grant's lifetime, NOT
+                                  the access token's — EHR access token +
+                                  refresh token + token_endpoint +
+                                  fhir_base_url + ehr_type, plus the access
+                                  token's own expiry as a field (TASK-051,
+                                  amended by TASK-051b — see "The launch record
+                                  outlives its access token" below).
                                   Keyed on launch_id, NOT on session_id: a
                                   SMART launch and an encounter session are two
                                   different things with two different
@@ -838,6 +843,96 @@ Redis key pattern not listed here, add it to this list in the same PR.
 The `{payer}` segment is the canonical slug from `packages/payer-vocab`, never a
 payer's display name — see "Payer and jurisdiction identity" below for why a raw
 name in this key silently halves the hit rate and hides a retrieval miss.
+
+### The launch record outlives its access token (reverses a TASK-051 rule)
+**This reverses a rule TASK-051 stated deliberately, and the reversal is written
+down here so a later reader recognises a considered fix rather than a
+regression.** TASK-051 held that `fhir_token:{launch_id}` "cannot outlive the
+credential it holds", and set the key's Redis TTL to the EHR's own `expires_in`.
+That was a sound instinct — a record holding a dead credential and a patient
+identifier earns nothing by lingering — and it is wrong for one reason nobody
+had reached yet when it was written: **the record is also the only place the
+refresh token lives.**
+
+The consequence is not a design gap but a shipped defect. The record was deleted
+at the exact moment renewal became necessary, so at the first request after
+expiry `load_launch_token()` returned `None`, the adapter dependency answered
+404 `FHIR_UNKNOWN_LAUNCH`, and the refresh token had already been discarded
+unused. TASK-051b's whole feature was structurally impossible against that
+storage contract, and no amount of refresh code would have made it work. The
+fix is a change to the contract, not an addition on top of it.
+
+**What holds now:**
+- **The key's TTL bounds the refresh grant, not the access token.** A refresh
+  token outliving the access token it renews is the entire point of having one,
+  so a record that expires with the access token can never carry one usefully.
+- **The access token's own expiry is a field inside the record**
+  (`access_token_expires_at`, absolute UTC), never inferred from the key's
+  remaining TTL. Two different lifetimes cannot both be represented by one TTL,
+  and the reader that needs the access token's expiry is the one deciding
+  whether to refresh.
+- **A launch with no refresh token keeps the old behaviour**, and that is what
+  is preserved from the reversed rule rather than discarded. When the EHR
+  returned no `refresh_token` there is nothing to renew, so the record still
+  expires with the access token: holding patient identifiers and a dead
+  credential for longer would buy nothing and cost exactly what TASK-051 was
+  right to avoid.
+- **The TTL is bounded and configurable, never unbounded.** SMART on FHIR gives
+  no `refresh_expires_in`, so this value is a chosen bound rather than something
+  the EHR told us — `SMART_LAUNCH_RECORD_TTL_SECONDS`, defaulting to 8 hours as
+  a round stand-in for one clinical working day. It is not a measurement. What
+  it actually bounds is how long a compromised Redis yields a usable EHR
+  credential, which is why it is bounded at all and why it should not be raised
+  casually.
+- **The record is still a credential store.** Everything TASK-050 and TASK-051
+  require of an access token applies unchanged to the refresh token: never a log
+  line, never an exception message, never a `repr`.
+
+**Renewal is proactive, at the point the adapter is built.** `get_ehr_adapter`
+in `services/fhir-integration/src/api/fhir.py` refreshes when the stored expiry
+is inside `SMART_TOKEN_REFRESH_SKEW_SECONDS`, before handing back an adapter, so
+no route body and no adapter primitive knows renewal exists. The alternative —
+catching the EHR's 401 and retrying — was considered and not taken: the adapter
+is resolved by a FastAPI dependency that has already returned by the time a
+fetch raises, so a reactive path means a retry wrapper at every fetch call site
+and at every one added later, which is the per-call-site duplication this
+repository refuses elsewhere.
+
+**What proactive refresh cannot catch, stated rather than left to be
+discovered.** A grant revoked by an administrator, and clock skew larger than
+the margin, both reach the EHR as a 401 with no renewal attempted. Those answer
+401 `FHIR_LAUNCH_EXPIRED` and the launch is repeated — the behaviour TASK-051
+already documented, so nothing regresses. This is a judgement between two
+reasonable options rather than the only defensible one, and the condition to
+revisit it is a real vendor whose skew exceeds the margin, not a hypothetical.
+
+**A refresh that fails is two different outcomes, and only one ends the launch.**
+The distinction matters because collapsing them would either strand a working
+launch on a transient network blip, or keep presenting a revoked grant as
+retryable:
+- **An OAuth-level rejection** — the authorization server answered 4xx, e.g.
+  `invalid_grant` for a revoked or already-rotated refresh token — means the
+  grant is gone. The launch must be repeated: 401 `FHIR_LAUNCH_EXPIRED`. The
+  record is rewritten with its refresh token dropped and a short TTL, so the
+  next request answers from what we already know instead of asking a vendor's
+  token endpoint a question it has just refused.
+- **A transport failure or a 5xx** means we do not know. The record is left
+  exactly as it was, nothing about the launch changes, and the caller gets 502
+  `FHIR_TOKEN_REFRESH_UNAVAILABLE` (504 on timeout) — transient, retrying is
+  reasonable. Reading this as a dead grant would end a launch because a network
+  hiccup, which is the same "silence is not a negative determination" error this
+  document rejects in the CRD path.
+
+**Refreshing an EHR token neither extends nor ends an encounter.** Token
+lifetime and visit lifetime are independent — the same separation this document
+already draws for the MedAuth session token in "A visit outlasting the token
+re-mints", arriving from the EHR's side. Nothing in the refresh path touches an
+`encounters` row, and `launch_id` never changes: it names the launch, not the
+token, so a client holding one is never made to re-learn it.
+
+**Renewal writes no audit row.** Obtaining a credential is not using it — the
+same test TASK-051 applied to both its own routes. The PHI reads that surround
+it audit as they already do.
 
 ### The nudge payload — one shape (cross-cutting)
 What rides on `nudges:{session_id}` is fixed here rather than inside TASK-040,

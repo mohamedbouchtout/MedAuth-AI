@@ -4110,8 +4110,14 @@ logic do not change.
       OAuth conversation to come from two different documents if a vendor
       rotated endpoints mid-flow.
     - **A token response without a usable `expires_in` gets a short floor**
-      rather than an unbounded or absent TTL, so `fhir_token:{launch_id}` cannot
-      outlive the credential it holds.
+      rather than an unbounded or absent TTL. ~~so `fhir_token:{launch_id}`
+      cannot outlive the credential it holds.~~ **That second clause is reversed
+      by TASK-051b** — see CLAUDE.md, "The launch record outlives its access
+      token". Keying the record's TTL to the access token deleted the refresh
+      token at the exact moment renewal needed it, which made refresh
+      structurally impossible rather than merely unbuilt. The floor itself
+      survives: it still bounds the access token's stored expiry, and a record
+      carrying no refresh token still expires with the credential.
     - **`LaunchToken` already stores `refresh_token` and the SMART launch
       context** (`patient_id`, `encounter_id`, `scope`) as opaque identifiers.
       Nothing reads them yet by design: TASK-051b refreshes against the first,
@@ -4147,9 +4153,61 @@ logic do not change.
     `refresh_token`, rewriting `fhir_token:{launch_id}` with the new access
     token and TTL. `launch_id` does not change: it names the launch, not the
     token, and a client holding it must not have to re-learn it.
-  - Decide and write down what happens when the refresh itself fails — a
-    revoked grant is not the same as a network error, and only one of them
-    should end the launch.
+  - **This starts by fixing a shipped storage defect, not by adding a feature on
+    top of a correct foundation.** `save_launch_token()` sets the key's Redis TTL
+    to the access token's `expires_in`, so the record — the only place the
+    refresh token lives — is deleted at the exact moment renewal becomes
+    necessary. Every request after expiry gets 404 `FHIR_UNKNOWN_LAUNCH` from
+    `get_ehr_adapter` and the refresh token is discarded unused. Refresh is
+    structurally impossible until this changes. The full decision, including the
+    fact that it reverses a rule TASK-051 stated deliberately, is in CLAUDE.md,
+    "The launch record outlives its access token"; that section is authoritative
+    and this list does not restate it.
+    - Decouple the record's TTL from the access token's, bounding it by the
+      refresh grant instead, under `SMART_LAUNCH_RECORD_TTL_SECONDS`.
+    - Move the access token's own expiry into the record as an absolute UTC
+      field, rather than leaving it implied by the outer key's remaining TTL.
+    - A record carrying no `refresh_token` keeps the old behaviour and still
+      expires with the access token — there is nothing to renew, and holding a
+      patient identifier alongside a dead credential buys nothing.
+  - **Carry `token_endpoint` forward onto `LaunchToken` at callback time.** It
+    lives on `PendingLaunch` today, which `claim_launch()` consumes with `GETDEL`,
+    so nothing after the callback knows where to refresh against. Re-running
+    discovery is the alternative and is refused for the reason that field's own
+    comment already gives: it would let two halves of one OAuth conversation come
+    from two different documents if a vendor rotated endpoints in between. That
+    risk applies identically to a refresh.
+  - **Renewal is proactive, inside `get_ehr_adapter`**, against the stored expiry
+    and a `SMART_TOKEN_REFRESH_SKEW_SECONDS` margin — not a reactive retry after
+    the EHR's 401. Reasoning and the named limits of that choice are in the
+    CLAUDE.md section above; the deciding practical fact is that the adapter is
+    resolved by a FastAPI dependency that has already returned by the time a
+    fetch raises, so a reactive path needs a retry wrapper at all three fetch
+    call sites (`fhir.py:215`, `:261`, `:322`) and at every one added later.
+  - **A refresh that fails is two outcomes and only one ends the launch** — an
+    OAuth-level 4xx rejection is a dead grant (401 `FHIR_LAUNCH_EXPIRED`, record
+    rewritten without its refresh token at a short TTL so the vendor is not asked
+    again); a transport failure or 5xx is transient (502
+    `FHIR_TOKEN_REFRESH_UNAVAILABLE`, 504 on timeout, record untouched). This
+    requires splitting `TokenExchangeError`, which today collapses both into one
+    type — `_oauth_error_suffix()` already reads RFC 6749's `error` code
+    precisely because `invalid_grant` and `invalid_client` mean different things,
+    and that distinction currently reaches nothing that can act on it.
+  - **Store the rotated `refresh_token` when the server returns one.** Many
+    authorization servers issue a new one on each refresh and invalidate the
+    presented value. Missing this breaks the *second* refresh while the first
+    appears to succeed, which is the kind of failure that surfaces hours into a
+    working day rather than in the test that covers renewal.
+  - **The refresh-specific exchange reuses the existing client authentication and
+    credential selection** — HTTP Basic for a confidential client, PKCE-only for
+    a public one, the pair chosen off `EHRType` via `Settings.credentials_for()`.
+    A second code path for the same authentication would be a fourth spelling of
+    an identity this repository has already made a closed vocabulary.
+  - **No new route, and no audit row.** This is internal, transparent renewal
+    triggered by the adapter dependency, not a client-facing endpoint — unlike
+    TASK-006b, whose re-mint is called by a client that holds the expiring token.
+    And obtaining a credential is not using it, which is the same test that keeps
+    TASK-051's own two routes out of the audit trail.
   - Note what does **not** change: refreshing an EHR token neither extends nor
     ends an encounter. Token lifetime and visit lifetime are independent, the
     same separation CLAUDE.md already draws for the MedAuth session token.
@@ -4157,6 +4215,17 @@ logic do not change.
     `launch_id` is unchanged
   - **Test:** a rejected `refresh_token` surfaces as a launch that must be
     repeated, with a distinct error from a transient network failure
+  - **Test:** the launch record survives its access token's expiry — the
+    regression test for the defect above, which would fail against the shipped
+    TTL contract
+  - **Test:** a launch record carrying no `refresh_token` still expires with the
+    access token
+  - **Test:** a rotated `refresh_token` is stored, so a second refresh presents
+    the new value rather than the one the server has invalidated
+  - **Test:** a token still comfortably inside its lifetime triggers no refresh
+    call at all
+  - **Test:** no refresh token, access token or client secret reaches a log
+    record, asserted against caplog as TASK-051 does for its own credentials
 
 - [ ] **TASK-051c:** Capture the SMART `fhirUser` claim as the audit actor
   - Prerequisite: **TASK-051**; wanted by **TASK-052** and every later PHI read
@@ -4391,10 +4460,20 @@ logic do not change.
     longer good. Until TASK-051b lands there is no renewal path, so this returns
     **401** with `FHIR_LAUNCH_EXPIRED` and a message saying the SMART launch must
     be repeated — which is the limitation TASK-051 already states rather than a
-    new one. Keep it to **one place**: the helper that loads the launch token and
-    builds the adapter is where the 401 is recognised, not four copies inside the
-    primitives. TASK-051b replaces the body of that helper and touches none of
-    the fetches.
+    new one. Keep it to **one place**: `_as_api_error()` is where the 401 is
+    recognised, not four copies inside the primitives.
+    - **Corrected by TASK-051b:** this bullet used to say the recognition site
+      was "the helper that loads the launch token and builds the adapter", and
+      that TASK-051b would replace that helper's body. It described a mechanism
+      that cannot exist. That helper is `get_ehr_adapter`, a FastAPI dependency,
+      and a dependency has already returned by the time a route body's fetch
+      raises — so it never sees the 401 and could not have recognised it. In the
+      shipped code the recognition is in `_as_api_error()`, which the three route
+      bodies call, and that is what the wording above now names. What TASK-051b
+      actually does is add *proactive* renewal inside `get_ehr_adapter`, before
+      any fetch is attempted; the 401 mapping stays where it is, as the answer
+      for the cases renewal cannot reach. Either way the intent this bullet was
+      protecting holds: none of the fetch primitives is touched.
 
   - **What counts as incomplete coverage — the enumerated rule.**
     `requires_manual_confirmation` means *a human must confirm the payer
