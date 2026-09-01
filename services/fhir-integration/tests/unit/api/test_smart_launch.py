@@ -8,6 +8,7 @@ that is not there, and the rule that no credential reaches a log line.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -23,6 +24,7 @@ from .conftest import (
     AUTHORIZATION_ENDPOINT,
     GENERIC_ISS,
     REDIRECT_URI,
+    TOKEN_ENDPOINT,
     FakeAuthorizationServer,
     FakeRedis,
 )
@@ -72,13 +74,23 @@ class TestFullFlow:
         assert stored.fhir_base_url == GENERIC_ISS
         assert stored.ehr_type == EHRType.GENERIC
 
-    def test_the_token_record_expires_with_the_token(
+    def test_the_record_outlives_the_access_token_when_a_grant_can_renew_it(
         self,
         client: TestClient,
         ehr: FakeAuthorizationServer,
         fake_redis: FakeRedis,
     ) -> None:
-        """A record outliving the credential it holds would serve a dead token."""
+        """TASK-051b, reversing TASK-051 — and this is the regression test for it.
+
+        This test previously asserted the opposite (``== 3600``, the access
+        token's own lifetime), under the rule that a record must not outlive the
+        credential it holds. That rule deleted the only copy of the refresh
+        token at the exact moment renewal needed it, which made renewal
+        impossible rather than merely unbuilt. The assertion is inverted
+        deliberately, not relaxed to accommodate new code: against the shipped
+        contract this fails. See CLAUDE.md, "The launch record outlives its
+        access token".
+        """
         redirect_url = start_launch(client, launch="ctx")
         params = ehr.observe_authorization(redirect_url)
         response = client.get(
@@ -86,7 +98,37 @@ class TestFullFlow:
         )
 
         launch_id = response.json()["data"]["launch_id"]
-        assert fake_redis.expiries[token_key(launch_id)] == 3600
+        # The refresh grant's bound, not the access token's 3600.
+        assert fake_redis.expiries[token_key(launch_id)] == 28800
+
+        # And the access token's own expiry survives as a field, which is what
+        # renewal reads. One TTL cannot carry two lifetimes.
+        stored = LaunchToken.model_validate_json(fake_redis.values[token_key(launch_id)])
+        remaining = (stored.access_token_expires_at - datetime.now(UTC)).total_seconds()
+        assert 3590 < remaining <= 3600
+
+    def test_a_launch_with_no_refresh_token_still_expires_with_the_token(
+        self,
+        client: TestClient,
+        ehr: FakeAuthorizationServer,
+        fake_redis: FakeRedis,
+    ) -> None:
+        """What the reversed rule keeps rather than discards.
+
+        With nothing to renew, holding a patient identifier beside a dead
+        credential for eight hours buys nothing — so the original behaviour is
+        still right for this case, and is preserved on purpose.
+        """
+        ehr.token_body = {"access_token": "no-refresh-token", "expires_in": 900}
+
+        redirect_url = start_launch(client, launch="ctx")
+        params = ehr.observe_authorization(redirect_url)
+        response = client.get(
+            "/fhir/callback", params={"state": params["state"], "code": "auth-code"}
+        )
+
+        launch_id = response.json()["data"]["launch_id"]
+        assert fake_redis.expiries[token_key(launch_id)] == 900
 
     def test_a_token_response_without_expires_in_gets_a_short_floor(
         self,
@@ -94,7 +136,12 @@ class TestFullFlow:
         ehr: FakeAuthorizationServer,
         fake_redis: FakeRedis,
     ) -> None:
-        """SMART makes expires_in optional; a record with no TTL would never expire."""
+        """SMART makes expires_in optional; a record with no TTL would never expire.
+
+        This one is unchanged by TASK-051b's reversal, because the fake's body
+        here carries no refresh token either — the floor still bounds both the
+        stored expiry and, with nothing to renew, the record itself.
+        """
         ehr.token_body = {"access_token": "no-expiry-token"}
 
         redirect_url = start_launch(client, launch="ctx")
@@ -105,6 +152,28 @@ class TestFullFlow:
 
         launch_id = response.json()["data"]["launch_id"]
         assert fake_redis.expiries[token_key(launch_id)] == 300
+
+    def test_the_token_endpoint_is_carried_onto_the_launch_record(
+        self,
+        client: TestClient,
+        ehr: FakeAuthorizationServer,
+        fake_redis: FakeRedis,
+    ) -> None:
+        """Renewal must not have to rediscover it. TASK-051b.
+
+        ``PendingLaunch`` is consumed by the callback, so without this the
+        endpoint is gone by the time a refresh needs it — and rediscovering
+        would let two halves of one OAuth conversation come from two documents.
+        """
+        redirect_url = start_launch(client, launch="ctx")
+        params = ehr.observe_authorization(redirect_url)
+        response = client.get(
+            "/fhir/callback", params={"state": params["state"], "code": "auth-code"}
+        )
+
+        launch_id = response.json()["data"]["launch_id"]
+        stored = LaunchToken.model_validate_json(fake_redis.values[token_key(launch_id)])
+        assert stored.token_endpoint == TOKEN_ENDPOINT
 
     def test_refresh_token_and_launch_context_are_stored_for_later_tasks(
         self,

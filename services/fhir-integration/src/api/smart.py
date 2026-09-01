@@ -1,4 +1,4 @@
-"""``GET /fhir/launch`` and ``GET /fhir/callback`` — the SMART on FHIR OAuth flow.
+"""``GET /fhir/launch`` and ``GET /fhir/callback`` â€” the SMART on FHIR OAuth flow.
 
 TASK-051. These two routes are the whole of the launch: the first sends a
 provider's browser to their EHR's authorization server, the second takes the
@@ -14,7 +14,7 @@ belongs when there is no audit row to write.
 **What must never reach a log line here**: the ``launch`` parameter, the
 authorization ``code``, the ``state``, the ``code_verifier``, the client secret,
 the access token, and the SMART launch context the token response carries. The
-``iss`` is logged as a **host**, never in full — a launch URL can carry context
+``iss`` is logged as a **host**, never in full â€” a launch URL can carry context
 in its query string. What is left to log is the vendor key and the launch's
 outcome, which is what an operator actually needs.
 
@@ -161,7 +161,7 @@ async def smart_launch(
     for ``launch/patient`` instead, so the authorization server prompts for the
     patient the EHR would otherwise have named.
 
-    Touches no PHI and writes no audit row — it obtains no patient data, only
+    Touches no PHI and writes no audit row â€” it obtains no patient data, only
     permission to ask for some later.
     """
     host = issuer_host(iss)
@@ -258,8 +258,8 @@ async def callback(
 ) -> ApiResponse[LaunchSessionData]:
     """Exchange the authorization code for an EHR access token.
 
-    Claims the launch record for this ``state`` — atomically, so a replayed
-    callback finds nothing and cannot mint a second token — presents the PKCE
+    Claims the launch record for this ``state`` â€” atomically, so a replayed
+    callback finds nothing and cannot mint a second token â€” presents the PKCE
     verifier held with it, and stores the resulting token under
     `fhir_token:{launch_id}` for as long as the EHR says it lives.
 
@@ -318,19 +318,31 @@ async def callback(
             status.HTTP_502_BAD_GATEWAY, ERROR_CODE_TOKEN_EXCHANGE_FAILED, str(exc)
         ) from None
 
+    launch_token = LaunchToken(
+        ehr_type=pending.ehr_type,
+        fhir_base_url=pending.iss,
+        access_token=token.access_token,
+        access_token_expires_at=store.access_token_expiry(token.ttl_seconds),
+        # Carried from the launch record rather than rediscovered at renewal:
+        # see PendingLaunch.token_endpoint, whose reasoning applies to a refresh
+        # exactly as it does to this exchange.
+        token_endpoint=pending.token_endpoint,
+        refresh_token=token.refresh_token,
+        patient_id=token.patient,
+        encounter_id=token.encounter,
+        scope=token.scope,
+    )
+    # The record outlives the access token when there is a grant to renew it
+    # with, and expires with it when there is not. TASK-051b; see CLAUDE.md,
+    # "The launch record outlives its access token".
     await store.save_launch_token(
         redis,
         pending.launch_id,
-        LaunchToken(
-            ehr_type=pending.ehr_type,
-            fhir_base_url=pending.iss,
-            access_token=token.access_token,
-            refresh_token=token.refresh_token,
-            patient_id=token.patient,
-            encounter_id=token.encounter,
-            scope=token.scope,
+        launch_token,
+        ttl_seconds=store.record_ttl_seconds(
+            launch_token,
+            refresh_grant_ttl_seconds=settings.smart_launch_record_ttl_seconds,
         ),
-        ttl_seconds=token.ttl_seconds,
     )
 
     logger.info(
