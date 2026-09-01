@@ -49,6 +49,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -305,6 +306,18 @@ async def launch_id(hapi: str, redis: Redis) -> AsyncIterator[str]:
                 "ehr_type": "generic",
                 "fhir_base_url": hapi,
                 "access_token": "unused-by-hapi",
+                # Both required on LaunchToken since TASK-051b, and omitting
+                # them is what made this test fail: the record did not parse,
+                # load_launch_token() treats an unparseable record as absent,
+                # and every request 404'd exactly as the docstring warns.
+                #
+                # Far enough ahead that access_token_is_stale() is false, so no
+                # renewal is attempted and the token endpoint below is never
+                # called. HAPI is not an authorization server and has none; a
+                # value that looks like a real endpoint would be a worse lie
+                # than one that says so.
+                "access_token_expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                "token_endpoint": "http://token-endpoint.invalid/never-called",
                 "refresh_token": None,
                 "patient_id": None,
                 "encounter_id": None,

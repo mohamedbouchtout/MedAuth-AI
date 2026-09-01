@@ -4257,6 +4257,22 @@ logic do not change.
     - **`require_credentials()` moved to `src/api/dependencies.py`** so the
       launch flow and renewal share one answer to "which registration is this
       vendor's", rather than the second caller copying the first.
+    - **It broke track-b-rag's end-to-end test, and nothing noticed for a day.**
+      Recorded here rather than only in the fixing commit, because the lesson is
+      about this task's blast radius rather than about the fixture. Adding
+      `access_token_expires_at` and `token_endpoint` as *required* fields on
+      `LaunchToken` invalidated the `fhir_token:` record that
+      `services/track-b-rag/tests/integration/test_end_to_end_nudge.py`
+      hand-composes — it cannot import `src.smart.store`, so it writes the JSON
+      itself. `load_launch_token()` treats an unparseable record as absent, so
+      every request 404'd and the encounter's payer columns came back NULL,
+      exactly as that fixture's own docstring warns. The test never ran: a
+      change confined to `services/fhir-integration` selected no `track-b-rag`
+      job, so `main` sat red on a job that had not executed since before the
+      break, and it surfaced only when an unrelated `packages/` change
+      re-selected every service. Both halves are fixed — the fixture, and the
+      missing selection rule with its own case in
+      `.github/scripts/detect-changed-members.test.sh`.
     - **Open item, not code:** `SMART_LAUNCH_RECORD_TTL_SECONDS` is 8 hours as a
       round stand-in for a working day, and no vendor's actual refresh-token
       lifetime has been checked against it — SMART returns no `refresh_expires_in`
