@@ -110,6 +110,26 @@ main() {
         selected+=("services/track-b-rag")
         selected+=("services/policy-scraper")
       fi
+
+      # track-b-rag's end-to-end test (TASK-052b) hand-composes a
+      # fhir_token:{launch_id} record and starts a real fhir-integration in a
+      # subprocess to read it back. The record's shape is owned one service
+      # over, and the test cannot import it — so the coupling is real and
+      # nothing but this rule expresses it.
+      #
+      # It is here because it was missed once, with consequences: TASK-051b
+      # added two required fields to LaunchToken, this fixture kept writing the
+      # old shape, and load_launch_token() treats an unparseable record as
+      # absent — so every request 404'd and the encounter's payer columns came
+      # back NULL. Nothing ran the test, because a change confined to
+      # services/fhir-integration selected no track-b-rag job, so main went red
+      # on a job that had not executed since before the break.
+      #
+      # Same rule as the two pairings above and as CLAUDE.md's OpenAPI note: a
+      # test that guards two things must re-run when either of them moves.
+      if changed_matches '^services/fhir-integration/src/'; then
+        selected+=("services/track-b-rag")
+      fi
     fi
 
     # A service's OpenAPI spec is half of a contract its own test checks:

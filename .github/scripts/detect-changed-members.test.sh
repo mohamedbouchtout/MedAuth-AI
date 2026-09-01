@@ -98,6 +98,17 @@ assert_members 'a track-a-clinical migration selects only the JWT pairing' \
   'services/track-a-clinical/migrations/versions/0005_x.py' \
   '["packages/session-auth","services/track-a-clinical"]'
 
+# track-b-rag's end-to-end test hand-composes a fhir_token:{launch_id} record
+# and reads it back through a real fhir-integration subprocess, so the record's
+# shape is a contract between two services that no import expresses. TASK-051b
+# changed that shape, nothing re-ran the test, and main went red on a job that
+# had not executed since before the break.
+assert_members 'fhir-integration src selects the end-to-end test that reads its record'   'services/fhir-integration/src/smart/store.py'   '["services/fhir-integration","services/track-b-rag"]'
+
+# As narrow as the coupling: the fixture mirrors src/, so a spec, a migration or
+# fhir-integration's own tests moving is no reason to re-run another service.
+assert_members 'a fhir-integration test change selects only itself'   'services/fhir-integration/tests/unit/x.py'   '["services/fhir-integration"]'
+
 # session-auth is a package like any other: editing it re-tests every service,
 # because audio-ingestion and nudge-service both authenticate through it.
 assert_members 'session-auth selects itself and every service' \
