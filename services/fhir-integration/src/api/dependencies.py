@@ -4,16 +4,34 @@ All three are declared as FastAPI dependencies rather than reached for directly,
 so a test can substitute a fake through ``app.dependency_overrides``. That is
 what lets the launch suite drive a whole OAuth round trip with neither a Redis
 server nor an authorization server in reach.
+
+``require_credentials()`` sits here too, though it is a helper rather than a
+dependency: both routers need it — the launch flow to obtain a token and
+TASK-051b's renewal to refresh one — and it reads settings to answer.
 """
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
+from typing import Final
 
 import httpx
+from fastapi import status
 from redis.asyncio import Redis
 
-from src.config import Settings, get_settings
+from api_envelope import ApiHTTPException
+from src.adapters.factory import EHRType
+from src.config import (
+    ClientCredentials,
+    MissingClientCredentialsError,
+    Settings,
+    get_settings,
+)
+
+logger = logging.getLogger(__name__)
+
+ERROR_CODE_CLIENT_NOT_REGISTERED: Final = "SMART_CLIENT_NOT_REGISTERED"
 
 
 @lru_cache(maxsize=1)
@@ -57,3 +75,28 @@ async def close_clients() -> None:
     if _http_client.cache_info().currsize:
         await _http_client().aclose()
     _http_client.cache_clear()
+
+
+def require_credentials(settings: Settings, ehr_type: EHRType) -> ClientCredentials:
+    """Return the registered client for an EHR, or fail with a named error.
+
+    Shared by the launch flow and by token renewal because both authenticate the
+    same client to the same authorization server. A second copy would be a
+    second answer to "which registration is this vendor's", which is what
+    ``EHRType`` exists to stop there being.
+
+    Raises:
+        ApiHTTPException: 500 when no ``client_id`` is configured for the
+            vendor. The message names the environment variable to set and never
+            a secret's value.
+    """
+    try:
+        return settings.credentials_for(ehr_type)
+    except MissingClientCredentialsError as exc:
+        # exc names the environment variable to set and never a secret's value.
+        logger.error("No SMART client registered: %s", exc)
+        raise ApiHTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            ERROR_CODE_CLIENT_NOT_REGISTERED,
+            f"No SMART client registered for EHR '{ehr_type.value}'",
+        ) from None
