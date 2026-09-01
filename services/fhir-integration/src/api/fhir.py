@@ -1,9 +1,15 @@
-"""``GET /fhir/patient/{id}/context`` and ``GET /fhir/encounter/{id}`` — reading the EHR.
+"""The launch-keyed read routes — reading the EHR, and reading what the launch stored.
 
-TASK-052. These are the first routes in this repository that read a patient's
-chart, and the first PHI accesses in this service.
+TASK-052 added ``GET /fhir/patient/{id}/context`` and
+``GET /fhir/encounter/{id}``, the first routes in this repository that read a
+patient's chart and the first PHI accesses in this service; TASK-052b added
+``GET /fhir/encounter/{id}/coverage-context``. TASK-051d added
+``GET /fhir/launch-context``, the one route here that reads no chart: it returns
+the SMART launch context the EHR handed us at callback time, out of this
+service's own store. It is a PHI disclosure all the same, and audits like the
+rest — a patient identifier is PHI whichever store it came out of.
 
-**Both are keyed on ``launch_id``, carried in the ``X-MedAuth-Launch-Id``
+**All of them are keyed on ``launch_id``, carried in the ``X-MedAuth-Launch-Id``
 header.** Not on ``session_id``: a SMART launch and an encounter session are two
 different things with two different lifetimes, neither derivable from the other,
 and at the time these routes run an encounter may not exist at all. Settled in
@@ -22,9 +28,9 @@ headers freely, unlike the native ``WebSocket`` constructor that forced the
 subprotocol carrier elsewhere, so nothing is given up by choosing a header.
 
 **The vendor is never a request parameter.** ``ehr_type`` comes back out of the
-launch record, and the handler asks ``get_adapter()`` for whatever answers.
-Neither route imports a concrete adapter, and neither branches on which EHR it
-is talking to.
+launch record, and the handler asks ``get_adapter()`` for whatever answers. No
+route here imports a concrete adapter, and none branches on which EHR it is
+talking to.
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ from typing import Annotated, Final
 
 import httpx
 from fastapi import APIRouter, Depends, Header, Path, status
+from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 
 from api_envelope import ApiHTTPException, ApiResponse, error_responses
@@ -83,6 +90,37 @@ ERROR_CODE_REFRESH_UNAVAILABLE: Final = "FHIR_TOKEN_REFRESH_UNAVAILABLE"
 ERROR_CODE_NOT_FOUND: Final = "FHIR_RESOURCE_NOT_FOUND"
 ERROR_CODE_UPSTREAM_UNAVAILABLE: Final = "FHIR_UPSTREAM_UNAVAILABLE"
 ERROR_CODE_MALFORMED: Final = "FHIR_MALFORMED_RESPONSE"
+
+
+class LaunchContextData(BaseModel):
+    """The SMART launch context one launch carried. TASK-051d.
+
+    **It names its fields rather than serialising ``LaunchToken``.** That record
+    also holds the EHR access token, the refresh token that renews it and the
+    granted scope, and a response model derived from it would start disclosing
+    whatever field the next task adds to storage. Naming two fields means a
+    third can only be disclosed by someone deciding to disclose it.
+
+    ``launch_id`` is deliberately not echoed back. The caller sent it in the
+    request header, so it learns nothing from seeing it again — and it resolves
+    to an EHR access token, which is the class of value this service already
+    keeps out of URLs and logs. There is no reason to put a capability handle in
+    one more place.
+    """
+
+    patient_id: str | None = Field(
+        description=(
+            "The patient the EHR launched us for, as an id on that EHR. Null "
+            "for a launch that carried no patient context at all."
+        ),
+    )
+    encounter_id: str | None = Field(
+        description=(
+            "The encounter the EHR launched us from, as an id on that EHR. Null "
+            "for a standalone launch, which has a patient and no encounter — "
+            "not an error, and not a reason to repeat the launch."
+        ),
+    )
 
 
 async def get_launch_record(
@@ -519,3 +557,86 @@ async def read_encounter_coverage_context(
         fhir_practitioner_ref=actor,
     )
     return ApiResponse[EncounterCoverageContext](data=context)
+
+
+@router.get(
+    "/launch-context",
+    response_model=ApiResponse[LaunchContextData],
+    status_code=status.HTTP_200_OK,
+    summary="Read the SMART launch context this launch carried",
+    response_description="The patient and encounter the EHR launched us for.",
+    responses=error_responses(
+        401,
+        404,
+        422,
+        502,
+        504,
+        descriptions={
+            401: "This launch's EHR authorization is no longer valid; repeat the launch.",
+            404: "No such SMART launch.",
+            502: "The EHR's authorization server was unreachable or unusable.",
+            504: "The EHR's authorization server did not answer in time.",
+        },
+    ),
+)
+async def read_launch_context(
+    token: Annotated[store.LaunchToken, Depends(get_launch_record)],
+    actor: Annotated[str | None, Depends(get_audit_actor)],
+) -> ApiResponse[LaunchContextData]:
+    """Return the patient and encounter the EHR named when it launched us.
+
+    TASK-051d. ``GET /fhir/callback`` withholds these deliberately — a credential
+    exchange is not the place to start handing out patient identifiers — so
+    until this route existed a client that had completed a launch knew it had a
+    launch and did not know who it was for, while ``POST /sessions/start`` needs
+    both identifiers. The only bridge was a human reading them out of the EHR's
+    own screen.
+
+    **This is not the patient search route and does not make that one
+    unnecessary.** ``GET /fhir/patient/search`` (TASK-025b) answers a
+    *standalone* launch, where nobody has told us who is in the room. This
+    answers an *EHR* launch, where the EHR already did and TASK-051 stored the
+    answer. Searching for a patient the EHR has already named would be asking a
+    question we hold the answer to, and would let a provider start a visit
+    against a different patient than the chart in front of them.
+
+    **A launch that carried no encounter is a 200 with a null ``encounter_id``.**
+    A standalone launch has a patient and no encounter; an EHR launch normally
+    has both. Collapsing "this launch had no encounter context" into "no such
+    launch" would tell a client to repeat a launch that is working perfectly —
+    the same conflation this repository rejects when a payer's silence is read
+    as a negative determination. A client given a null starts its session
+    without one and leaves the payer columns NULL, which
+    ``resolve_query_parameters()`` already reports per procedure.
+
+    **It reads no chart, and it is still a PHI disclosure.** Which patient a
+    provider was launched for is PHI whether it was read from the EHR just now
+    or from our own Redis, so the route audits as ``READ_PATIENT`` like any
+    other. A vocabulary member of its own was considered and rejected:
+    ``AuditAction`` exists so that "who accessed patient X" is one query, and a
+    second spelling for reading the same identifier out of a different store
+    would fragment that answer rather than sharpen it.
+
+    Renewing the EHR access token is not this route's business, but it happens
+    anyway, in ``get_launch_record`` — which is why a 401, 502 or 504 is
+    reachable here from a route that spends no token. That is the right trade:
+    one loading path means a launch whose grant is gone answers the same way
+    everywhere, rather than this route alone handing back a patient identifier
+    under a launch that can no longer read the chart it names.
+    """
+    context = LaunchContextData(
+        patient_id=token.patient_id,
+        encounter_id=token.encounter_id,
+    )
+
+    # No patient, nothing disclosed, no row. A launch may carry no patient
+    # context at all, and an audit row naming no resource would record an access
+    # that did not happen — the same reason a failed read writes none.
+    if context.patient_id is not None:
+        await audit_ehr_read(
+            action=AuditAction.READ_PATIENT,
+            resource_type=RESOURCE_TYPE_PATIENT,
+            resource_id=context.patient_id,
+            fhir_practitioner_ref=actor,
+        )
+    return ApiResponse[LaunchContextData](data=context)

@@ -538,6 +538,136 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse_NoneType_'
+  /fhir/launch-context:
+    get:
+      tags:
+        - fhir
+      summary: Read the SMART launch context this launch carried
+      description: 'Return the patient and encounter the EHR named when it launched us.
+
+
+        TASK-051d. ``GET /fhir/callback`` withholds these deliberately — a credential
+
+        exchange is not the place to start handing out patient identifiers — so
+
+        until this route existed a client that had completed a launch knew it had a
+
+        launch and did not know who it was for, while ``POST /sessions/start`` needs
+
+        both identifiers. The only bridge was a human reading them out of the EHR''s
+
+        own screen.
+
+
+        **This is not the patient search route and does not make that one
+
+        unnecessary.** ``GET /fhir/patient/search`` (TASK-025b) answers a
+
+        *standalone* launch, where nobody has told us who is in the room. This
+
+        answers an *EHR* launch, where the EHR already did and TASK-051 stored the
+
+        answer. Searching for a patient the EHR has already named would be asking a
+
+        question we hold the answer to, and would let a provider start a visit
+
+        against a different patient than the chart in front of them.
+
+
+        **A launch that carried no encounter is a 200 with a null ``encounter_id``.**
+
+        A standalone launch has a patient and no encounter; an EHR launch normally
+
+        has both. Collapsing "this launch had no encounter context" into "no such
+
+        launch" would tell a client to repeat a launch that is working perfectly —
+
+        the same conflation this repository rejects when a payer''s silence is read
+
+        as a negative determination. A client given a null starts its session
+
+        without one and leaves the payer columns NULL, which
+
+        ``resolve_query_parameters()`` already reports per procedure.
+
+
+        **It reads no chart, and it is still a PHI disclosure.** Which patient a
+
+        provider was launched for is PHI whether it was read from the EHR just now
+
+        or from our own Redis, so the route audits as ``READ_PATIENT`` like any
+
+        other. A vocabulary member of its own was considered and rejected:
+
+        ``AuditAction`` exists so that "who accessed patient X" is one query, and a
+
+        second spelling for reading the same identifier out of a different store
+
+        would fragment that answer rather than sharpen it.
+
+
+        Renewing the EHR access token is not this route''s business, but it happens
+
+        anyway, in ``get_launch_record`` — which is why a 401, 502 or 504 is
+
+        reachable here from a route that spends no token. That is the right trade:
+
+        one loading path means a launch whose grant is gone answers the same way
+
+        everywhere, rather than this route alone handing back a patient identifier
+
+        under a launch that can no longer read the chart it names.'
+      operationId: read_launch_context_fhir_launch_context_get
+      parameters:
+        - name: X-MedAuth-Launch-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            description: The launch_id returned by GET /fhir/callback. Names the SMART launch
+              whose EHR access token this read is made with. Not a session_id — the two are
+              different identifiers with different lifetimes.
+            title: X-Medauth-Launch-Id
+          description: The launch_id returned by GET /fhir/callback. Names the SMART launch
+            whose EHR access token this read is made with. Not a session_id — the two are different
+            identifiers with different lifetimes.
+      responses:
+        '200':
+          description: The patient and encounter the EHR launched us for.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_LaunchContextData_'
+        '401':
+          description: This launch's EHR authorization is no longer valid; repeat the launch.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '404':
+          description: No such SMART launch.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '422':
+          description: The request body or path parameter is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '502':
+          description: The EHR's authorization server was unreachable or unusable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '504':
+          description: The EHR's authorization server did not answer in time.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
 components:
   schemas:
     Annotation:
@@ -620,6 +750,18 @@ components:
             - type: 'null'
       type: object
       title: ApiResponse[HealthData]
+    ApiResponse_LaunchContextData_:
+      properties:
+        data:
+          anyOf:
+            - $ref: '#/components/schemas/LaunchContextData'
+            - type: 'null'
+        error:
+          anyOf:
+            - $ref: '#/components/schemas/ApiError'
+            - type: 'null'
+      type: object
+      title: ApiResponse[LaunchContextData]
     ApiResponse_LaunchSessionData_:
       properties:
         data:
@@ -1251,6 +1393,51 @@ components:
         \ the identifier's kind.\n    system: Namespace the value is unique within.\n    value:\
         \ The identifier itself. Frequently PHI (an MRN or member id).\n    period: When the\
         \ identifier was or is valid.\n    assigner: Organization that issued it."
+    LaunchContextData:
+      properties:
+        patient_id:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Patient Id
+          description: The patient the EHR launched us for, as an id on that EHR. Null for a launch
+            that carried no patient context at all.
+        encounter_id:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Encounter Id
+          description: The encounter the EHR launched us from, as an id on that EHR. Null for
+            a standalone launch, which has a patient and no encounter — not an error, and not
+            a reason to repeat the launch.
+      type: object
+      required:
+        - patient_id
+        - encounter_id
+      title: LaunchContextData
+      description: 'The SMART launch context one launch carried. TASK-051d.
+
+
+        **It names its fields rather than serialising ``LaunchToken``.** That record
+
+        also holds the EHR access token, the refresh token that renews it and the
+
+        granted scope, and a response model derived from it would start disclosing
+
+        whatever field the next task adds to storage. Naming two fields means a
+
+        third can only be disclosed by someone deciding to disclose it.
+
+
+        ``launch_id`` is deliberately not echoed back. The caller sent it in the
+
+        request header, so it learns nothing from seeing it again — and it resolves
+
+        to an EHR access token, which is the class of value this service already
+
+        keeps out of URLs and logs. There is no reason to put a capability handle in
+
+        one more place.'
     LaunchSessionData:
       properties:
         launch_id:

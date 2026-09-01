@@ -125,10 +125,17 @@ class LaunchToken(BaseModel):
     #: server has already invalidated.
     refresh_token: str | None = None
     #: The SMART launch context the token response carried, kept as opaque
-    #: identifiers. This service never reads, returns or logs them: TASK-052 is
-    #: the first reader, and the read is a PHI access that audits there. Storing
-    #: them is what stops that task needing a second token exchange to learn
-    #: which patient the EHR launched us for.
+    #: identifiers. Storing them is what stops a later read needing a second
+    #: token exchange to learn which patient the EHR launched us for.
+    #:
+    #: ``GET /fhir/launch-context`` returns them (TASK-051d) — an earlier draft
+    #: of this comment said the service "never reads, returns or logs them",
+    #: written when nothing did. Two thirds of that still hold and are the part
+    #: that matters: they are **never logged**, and the one route that returns
+    #: them audits the disclosure as ``READ_PATIENT``, because a patient
+    #: identifier is PHI whichever store it came out of. ``GET /fhir/callback``
+    #: still withholds them, for its own reason — a credential exchange is not
+    #: the place to start handing patient identifiers to a client.
     patient_id: str | None = None
     encounter_id: str | None = None
     scope: str | None = None
