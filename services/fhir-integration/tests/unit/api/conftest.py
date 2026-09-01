@@ -30,6 +30,7 @@ from fastapi.testclient import TestClient
 from src.api.dependencies import get_http_client, get_redis
 from src.config import get_settings
 from src.main import create_app
+from tests.unit import idtokens
 
 #: The issuer used by tests that do not care which vendor answers. Its host
 #: contains no vendor fragment, so it resolves to EHRType.GENERIC.
@@ -80,11 +81,20 @@ class FakeAuthorizationServer:
         discovery_body: dict[str, Any] | str | None = None,
         token_status: int = 200,
         token_body: dict[str, Any] | None = None,
+        jwks_body: dict[str, Any] | None = None,
+        publishes_sso: bool = True,
     ) -> None:
         self.discovery_status = discovery_status
         self.discovery_body = discovery_body
         self.token_status = token_status
         self.token_body = token_body
+        #: The key set served at ``JWKS_URI``. Defaults to the one that verifies
+        #: ``idtokens.id_token()``, so a launch resolves an actor by default.
+        self.jwks_body = jwks_body
+        #: Whether discovery advertises ``issuer`` and ``jwks_uri``. SMART marks
+        #: both conditional, so a server omitting them is conformant and simply
+        #: gives us no way to verify an id_token.
+        self.publishes_sso = publishes_sso
         #: The code_challenge last seen on an authorization request, set by a
         #: test through ``observe_authorization()``.
         self.code_challenge: str | None = None
@@ -120,9 +130,14 @@ class FakeAuthorizationServer:
                     "authorization_endpoint": AUTHORIZATION_ENDPOINT,
                     "token_endpoint": TOKEN_ENDPOINT,
                 }
+                if self.publishes_sso:
+                    body |= {"issuer": idtokens.ISSUER, "jwks_uri": idtokens.JWKS_URI}
             if isinstance(body, str):
                 return httpx.Response(self.discovery_status, text=body)
             return httpx.Response(self.discovery_status, json=body)
+
+        if str(request.url) == idtokens.JWKS_URI:
+            return httpx.Response(200, json=self.jwks_body or idtokens.jwks())
 
         if str(request.url) == TOKEN_ENDPOINT:
             form = {
@@ -145,6 +160,7 @@ class FakeAuthorizationServer:
                     "refresh_token": "ehr-refresh-token",
                     "scope": "launch user/*.read",
                     "patient": "Patient/synthea-123",
+                    "id_token": idtokens.id_token(),
                 }
             return httpx.Response(self.token_status, json=body)
 

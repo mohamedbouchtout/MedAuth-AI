@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from src.adapters.factory import EHRType
 from src.smart.pkce import derive_code_challenge
 from src.smart.store import LaunchToken, PendingLaunch, launch_key, token_key
+from tests.unit import idtokens
 
 from .conftest import (
     ATHENA_ISS,
@@ -635,3 +636,128 @@ class TestNoCredentialIsLogged:
             client.get("/fhir/launch", params={"iss": "https://fhir.epic.com/oauth"})
 
         assert "EPIC_CLIENT_ID" in self._our_records(caplog)
+
+
+class TestTheLaunchActor:
+    """TASK-051c: who authorized this launch, from a verified id_token.
+
+    The launch never fails over this. Every case below either records a
+    verified Practitioner or records nothing, and all of them return 200.
+    """
+
+    def complete(
+        self,
+        client: TestClient,
+        ehr: FakeAuthorizationServer,
+        fake_redis: FakeRedis,
+    ) -> LaunchToken:
+        """Run a whole launch and return the record it stored."""
+        redirect_url = start_launch(client, launch="opaque-ehr-context")
+        params = ehr.observe_authorization(redirect_url)
+        response = client.get(
+            "/fhir/callback", params={"state": params["state"], "code": "auth-code"}
+        )
+        assert response.status_code == status.HTTP_200_OK, response.text
+        launch_id = response.json()["data"]["launch_id"]
+        return LaunchToken.model_validate_json(fake_redis.values[token_key(launch_id)])
+
+    def test_a_verifiable_fhir_user_is_stored_as_the_actor(
+        self, client: TestClient, ehr: FakeAuthorizationServer, fake_redis: FakeRedis
+    ) -> None:
+        stored = self.complete(client, ehr, fake_redis)
+
+        assert stored.fhir_practitioner_ref == f"{GENERIC_ISS}/Practitioner/prov-77"
+
+    def test_an_id_token_that_does_not_verify_leaves_the_actor_null(
+        self, client: TestClient, ehr: FakeAuthorizationServer, fake_redis: FakeRedis
+    ) -> None:
+        """Signed by a key the EHR does not publish. The launch still works."""
+        ehr.token_body = {
+            "access_token": "ehr-access-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "refresh_token": "ehr-refresh-token",
+            "id_token": idtokens.id_token(tag="secondary"),
+        }
+
+        stored = self.complete(client, ehr, fake_redis)
+
+        assert stored.fhir_practitioner_ref is None
+        assert stored.access_token == "ehr-access-token"
+
+    def test_no_id_token_at_all_leaves_the_actor_null(
+        self, client: TestClient, ehr: FakeAuthorizationServer, fake_redis: FakeRedis
+    ) -> None:
+        ehr.token_body = {
+            "access_token": "ehr-access-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        }
+
+        stored = self.complete(client, ehr, fake_redis)
+
+        assert stored.fhir_practitioner_ref is None
+
+    def test_an_ehr_that_publishes_no_keys_leaves_the_actor_null(
+        self, client: TestClient, ehr: FakeAuthorizationServer, fake_redis: FakeRedis
+    ) -> None:
+        """SMART marks issuer and jwks_uri conditional — this server is conformant."""
+        ehr.publishes_sso = False
+
+        stored = self.complete(client, ehr, fake_redis)
+
+        assert stored.fhir_practitioner_ref is None
+
+    def test_a_token_minted_for_another_client_leaves_the_actor_null(
+        self, client: TestClient, ehr: FakeAuthorizationServer, fake_redis: FakeRedis
+    ) -> None:
+        ehr.token_body = {
+            "access_token": "ehr-access-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "id_token": idtokens.id_token(audience="a-different-app"),
+        }
+
+        stored = self.complete(client, ehr, fake_redis)
+
+        assert stored.fhir_practitioner_ref is None
+
+    def test_the_callback_response_carries_no_actor(
+        self, client: TestClient, ehr: FakeAuthorizationServer
+    ) -> None:
+        """A credential exchange hands back a launch_id and nothing else.
+
+        The actor is stored for the routes that audit, not returned: the same
+        reason the SMART launch context is withheld here.
+        """
+        redirect_url = start_launch(client, launch="opaque-ehr-context")
+        params = ehr.observe_authorization(redirect_url)
+
+        response = client.get(
+            "/fhir/callback", params={"state": params["state"], "code": "auth-code"}
+        )
+
+        assert set(response.json()["data"]) == {"launch_id", "ehr_type", "expires_in"}
+
+    def test_neither_the_id_token_nor_the_actor_reaches_a_log_line(
+        self,
+        client: TestClient,
+        ehr: FakeAuthorizationServer,
+        fake_redis: FakeRedis,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.DEBUG)
+        token = idtokens.id_token()
+        ehr.token_body = {
+            "access_token": "ehr-access-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "id_token": token,
+        }
+
+        stored = self.complete(client, ehr, fake_redis)
+
+        assert stored.fhir_practitioner_ref is not None
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert token not in logged
+        assert "prov-77" not in logged

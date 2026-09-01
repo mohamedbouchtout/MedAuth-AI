@@ -37,6 +37,11 @@ HEADERS = {fhir_routes.LAUNCH_ID_HEADER: LAUNCH_ID}
 STALE_TOKEN = "stale-access-token"
 RENEWED_TOKEN = "renewed-access-token"
 OLD_REFRESH = "refresh-token-one"
+
+#: The provider the EHR said authorized this launch (TASK-051c). Renewal
+#: must carry it across: renewing a credential does not change who started
+#: the launch, and losing it would silently anonymise every later audit row.
+PRACTITIONER_REF = "https://fhir.example-hospital.org/r4/Practitioner/prov-77"
 ROTATED_REFRESH = "refresh-token-two"
 
 
@@ -89,6 +94,7 @@ def stored_token(
         refresh_token=refresh_token,
         patient_id="synthea-123",
         encounter_id="encounter-1",
+        fhir_practitioner_ref=PRACTITIONER_REF,
     )
 
 
@@ -509,3 +515,61 @@ class TestNoCredentialIsLogged:
         # error_description is free text an authorization server may fill with
         # an echo of the request, which is why only the code is read.
         assert OLD_REFRESH not in logged
+
+
+class TestTheLaunchActorSurvivesRenewal:
+    """TASK-051c: renewing a credential does not change who authorized the launch.
+
+    The actor is resolved once, at callback time, from an id_token that is long
+    gone by the time a token is renewed. If renewal dropped it, every audit row
+    after the first expiry would silently lose its actor — the kind of gap that
+    reads as "we never knew" rather than "we forgot".
+    """
+
+    def test_a_renewed_record_keeps_the_actor(
+        self,
+        client: TestClient,
+        fake_redis: FakeRedis,
+        token_endpoint: FakeTokenEndpoint,
+    ) -> None:
+        put(fake_redis, stored_token(expires_in=-60))
+
+        client.get("/fhir/encounter/encounter-1", headers=HEADERS)
+
+        assert token_endpoint.requests[0]["grant_type"] == "refresh_token"
+        assert read_record(fake_redis).fhir_practitioner_ref == PRACTITIONER_REF
+
+    def test_the_audit_row_after_a_renewal_still_names_the_actor(
+        self,
+        client: TestClient,
+        fake_redis: FakeRedis,
+        audit: AuditRecorder,
+    ) -> None:
+        put(fake_redis, stored_token(expires_in=-60))
+
+        client.get("/fhir/encounter/encounter-1", headers=HEADERS)
+
+        assert audit.calls[0]["fhir_practitioner_ref"] == PRACTITIONER_REF
+
+    def test_a_refused_grant_leaves_the_actor_on_the_record(
+        self,
+        client: TestClient,
+        fake_redis: FakeRedis,
+        token_endpoint: FakeTokenEndpoint,
+    ) -> None:
+        """The record is rewritten without its refresh token, not without its actor.
+
+        An operator working out why a launch ended reads this record; who it was
+        for is part of that answer, and the grant being dead does not make the
+        provider unknown.
+        """
+        token_endpoint.status_code = 400
+        token_endpoint.body = {"error": "invalid_grant"}
+        put(fake_redis, stored_token(expires_in=-60))
+
+        response = client.get("/fhir/encounter/encounter-1", headers=HEADERS)
+
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+        rewritten = read_record(fake_redis)
+        assert rewritten.refresh_token is None
+        assert rewritten.fhir_practitioner_ref == PRACTITIONER_REF

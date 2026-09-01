@@ -37,10 +37,19 @@ class SmartConfiguration(BaseModel):
     to send the browser and somewhere to exchange the code. Parsing fields
     nothing uses would mean a vendor that omits one breaks a launch that never
     needed it.
+
+    ``issuer`` and ``jwks_uri`` are read too, and are the only optional fields:
+    they are what TASK-051c verifies an ``id_token`` against. **Optional is not
+    laxness** — SMART's own discovery specification marks both conditional, so a
+    server that does not support single sign-on omits them legitimately, and
+    requiring them would turn a working launch into a failed one to obtain an
+    audit actor. A launch without them simply records an unknown actor.
     """
 
     authorization_endpoint: str = Field(min_length=1)
     token_endpoint: str = Field(min_length=1)
+    issuer: str | None = None
+    jwks_uri: str | None = None
 
 
 class DiscoveryError(RuntimeError):

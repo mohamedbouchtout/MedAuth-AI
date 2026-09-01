@@ -239,3 +239,53 @@ class TestWhenAnAccessTokenIsStale:
         """The margin is configuration, and zero must mean zero."""
         assert not access_token_is_stale(self._record(expires_in=5), skew_seconds=0)
         assert access_token_is_stale(self._record(expires_in=-5), skew_seconds=0)
+
+
+class TestDiscoveryReadsTheSingleSignOnFields:
+    """TASK-051c needs `issuer` and `jwks_uri` to verify an id_token."""
+
+    @staticmethod
+    def _client(handler: object) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_they_are_parsed_when_the_document_carries_them(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "authorization_endpoint": "https://a",
+                    "token_endpoint": "https://t",
+                    "issuer": "https://auth.example.org",
+                    "jwks_uri": "https://auth.example.org/keys",
+                },
+            )
+
+        configuration = await fetch_smart_configuration(
+            self._client(handler), "https://fhir.example.org/r4", issuer_host="fhir.example.org"
+        )
+
+        assert configuration.issuer == "https://auth.example.org"
+        assert configuration.jwks_uri == "https://auth.example.org/keys"
+
+    @pytest.mark.asyncio
+    async def test_a_document_without_them_still_yields_a_usable_launch(self) -> None:
+        """SMART marks both conditional, so omitting them is conformant.
+
+        Requiring them would turn a working launch into a failed one purely to
+        obtain an audit actor, which is the wrong trade — the launch runs and
+        the actor stays unknown.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"authorization_endpoint": "https://a", "token_endpoint": "https://t"},
+            )
+
+        configuration = await fetch_smart_configuration(
+            self._client(handler), "https://fhir.example.org/r4", issuer_host="fhir.example.org"
+        )
+
+        assert configuration.issuer is None
+        assert configuration.jwks_uri is None
