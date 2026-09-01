@@ -13,7 +13,9 @@ dependencies = [
     "medauth-payer-vocab",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
-    "pyjwt>=2.13.0",
+    # The crypto extra is required, not optional: TASK-051c verifies an EHR
+    # id_token's RS256/ES256 signature, and PyJWT cannot do that without it.
+    "pyjwt[crypto]>=2.13.0",
     "redis>=8.1.0",
     "uvicorn[standard]>=0.52.4",
 ]

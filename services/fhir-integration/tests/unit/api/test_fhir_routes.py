@@ -29,6 +29,11 @@ from tests.unit.conftest import ACCESS_TOKEN, FHIR_BASE_URL, FakeFHIRServer, cov
 LAUNCH_ID = "3f2a7c18-0d64-4a51-9f0e-8b1c2d3e4f50"
 HEADERS = {fhir_routes.LAUNCH_ID_HEADER: LAUNCH_ID}
 
+#: The provider the EHR said authorized the launch, as TASK-051c resolves it:
+#: an absolute Practitioner reference, and deliberately not a UUID — which is
+#: why it is audited in a column of its own rather than as ``actor_id``.
+PRACTITIONER_REF = f"{FHIR_BASE_URL}/Practitioner/prov-77"
+
 
 class AuditRecorder:
     """Records what ``audit_log`` was called with, instead of writing a row."""
@@ -74,9 +79,40 @@ def redis_with_launch() -> FakeRedis:
         refresh_token="ehr-refresh-token",
         patient_id="synthea-123",
         encounter_id="encounter-1",
+        # Resolved from a verified id_token at callback time (TASK-051c). The
+        # launch that stored this record knew who authorized it, which is the
+        # ordinary case; ``redis_with_anonymous_launch`` below is the other one.
+        fhir_practitioner_ref=PRACTITIONER_REF,
     )
     fake.values[store.token_key(LAUNCH_ID)] = token.model_dump_json()
     return fake
+
+
+@pytest.fixture
+def redis_with_anonymous_launch(redis_with_launch: FakeRedis) -> FakeRedis:
+    """A launch whose id_token was absent or did not verify.
+
+    The actor is unknown, and unknown is recorded as a null rather than as
+    anything invented.
+    """
+    stored = LaunchToken.model_validate_json(redis_with_launch.values[store.token_key(LAUNCH_ID)])
+    redis_with_launch.values[store.token_key(LAUNCH_ID)] = stored.model_copy(
+        update={"fhir_practitioner_ref": None}
+    ).model_dump_json()
+    return redis_with_launch
+
+
+@pytest.fixture
+def anonymous_client(
+    redis_with_anonymous_launch: FakeRedis, ehr_server: FakeFHIRServer
+) -> Iterator[TestClient]:
+    """A client whose launch record carries no verified actor."""
+    app = create_app()
+    app.dependency_overrides[get_redis] = lambda: redis_with_anonymous_launch
+    http = ehr_server.client()
+    app.dependency_overrides[get_http_client] = lambda: http
+    with TestClient(app) as test_client:
+        yield test_client
 
 
 @pytest.fixture
@@ -281,20 +317,52 @@ class TestAuditing:
         assert audit.calls[0]["action"] is AuditAction.READ_ENCOUNTER
         assert audit.calls[0]["resource_id"] == "encounter-1"
 
-    def test_the_actor_is_null_rather_than_invented(
+    def test_the_ehr_asserted_actor_is_recorded_in_its_own_column(
         self, client: TestClient, audit: AuditRecorder
     ) -> None:
-        """No encounters row exists at launch time, so there is no provider to read.
+        """TASK-051c, and the inverse of what this test used to assert.
 
-        A fabricated service-account UUID would look like a real actor in the one
-        table an auditor reads to answer "who accessed patient X". TASK-051c is
-        what fills this from the SMART fhirUser claim.
+        It previously read "the actor is null rather than invented" and named
+        TASK-051c as what would fill ``actor_id``. That was never possible: a
+        Practitioner id is usually not a UUID and that column refuses one. So
+        ``actor_id`` stays null **permanently** and the identity the EHR
+        asserted is recorded beside it. See CLAUDE.md, "The EHR-asserted actor
+        is its own column".
         """
         client.get("/fhir/patient/synthea-123/context", headers=HEADERS)
 
-        assert audit.calls[0]["actor_id"] is None
-        assert audit.calls[0]["session_id"] is None
-        assert audit.calls[0]["service_name"] == "fhir-integration"
+        call = audit.calls[0]
+        assert call["fhir_practitioner_ref"] == PRACTITIONER_REF
+        # Not waiting on anything: no encounters row exists at launch time, and
+        # a fabricated service-account UUID would look like a real actor in the
+        # one table an auditor reads to answer "who accessed patient X".
+        assert call["actor_id"] is None
+        # A launch is not an encounter session, so nothing will ever fill this.
+        assert call["session_id"] is None
+        assert call["service_name"] == "fhir-integration"
+
+    def test_an_unverified_launch_records_no_actor_at_all(
+        self, anonymous_client: TestClient, audit: AuditRecorder
+    ) -> None:
+        """No id_token, or one that did not verify.
+
+        Both actor columns stay null. Falling back to the unverified claim is
+        the fabrication TASK-051c exists to remove, one step subtler than a
+        service-account UUID.
+        """
+        anonymous_client.get("/fhir/patient/synthea-123/context", headers=HEADERS)
+
+        call = audit.calls[0]
+        assert call["fhir_practitioner_ref"] is None
+        assert call["actor_id"] is None
+
+    def test_the_read_still_happens_without_a_known_actor(
+        self, anonymous_client: TestClient, audit: AuditRecorder
+    ) -> None:
+        """An unknown actor is audited, never a reason to refuse the read."""
+        response = anonymous_client.get("/fhir/patient/synthea-123/context", headers=HEADERS)
+
+        assert response.status_code == 200
 
     def test_a_failed_read_writes_no_audit_row(
         self, client: TestClient, ehr_server: FakeFHIRServer, audit: AuditRecorder
@@ -352,14 +420,15 @@ class TestEncounterCoverageContext:
         assert data["coverage"] is None
         assert data["requires_manual_confirmation"] is True
 
-    def test_it_writes_one_audit_row_with_a_null_actor(
+    def test_it_writes_one_audit_row_carrying_the_ehr_asserted_actor(
         self, client: TestClient, audit: AuditRecorder
     ) -> None:
         """One row per call, not one per FHIR fetch — and this call makes four.
 
-        ``actor_id`` stays null until TASK-051c captures the SMART ``fhirUser``
-        claim; a service-account UUID would look like a real actor in the one
-        table an auditor reads to answer "who accessed patient X".
+        ``actor_id`` is permanently null here and the provider the EHR asserted
+        is recorded in ``fhir_practitioner_ref`` (TASK-051c). This test named
+        TASK-051c as what would fill ``actor_id``; that is not what it does, and
+        the assertion is inverted rather than a new one written beside it.
         """
         client.get("/fhir/encounter/encounter-1/coverage-context", headers=HEADERS)
 
@@ -368,6 +437,7 @@ class TestEncounterCoverageContext:
         assert call["action"] is AuditAction.READ_PATIENT
         assert call["resource_type"] == "Encounter"
         assert call["resource_id"] == "encounter-1"
+        assert call["fhir_practitioner_ref"] == PRACTITIONER_REF
         assert call["actor_id"] is None
         assert call["session_id"] is None
 

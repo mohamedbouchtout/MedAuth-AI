@@ -90,6 +90,15 @@ class PendingLaunch(BaseModel):
     #: scope string sent to the authorization endpoint depends on it, and the
     #: token exchange must not have to guess which launch type it is completing.
     ehr_launch: bool
+    #: What TASK-051c verifies the ``id_token`` against, from the same discovery
+    #: document that supplied the endpoints above — carried forward for that
+    #: field's own reason, so the key set a signature is checked against and the
+    #: endpoint that issued the signature cannot come from two documents if a
+    #: vendor rotated between the redirect and the callback. ``None`` for a
+    #: server that publishes neither, which SMART permits; the launch then
+    #: records an unknown actor rather than failing.
+    oidc_issuer: str | None = None
+    jwks_uri: str | None = None
 
 
 class LaunchToken(BaseModel):
@@ -123,6 +132,22 @@ class LaunchToken(BaseModel):
     patient_id: str | None = None
     encounter_id: str | None = None
     scope: str | None = None
+    #: The provider who authorized this launch, as an absolute ``Practitioner``
+    #: reference resolved from a **verified** ``id_token`` (TASK-051c). Every
+    #: PHI read made under this launch records it as its audit actor, which is
+    #: why it is stored rather than re-derived: the ``id_token`` is consumed at
+    #: callback time and the routes that audit run long after it is gone.
+    #:
+    #: ``None`` means the actor is unknown — no ``id_token``, no published key
+    #: set, or a token that did not verify. It is never the unverified claim.
+    #: It is **not** an ``actor_id``: a ``Practitioner`` id is usually not a
+    #: UUID, which is why ``audit_log`` has a column of its own for it. See
+    #: CLAUDE.md, "The EHR-asserted actor is its own column".
+    #:
+    #: Carried across a token renewal unchanged. Renewing a credential does not
+    #: change who authorized the launch, and the refresh response's own
+    #: ``id_token``, if any, is not re-read for that reason.
+    fhir_practitioner_ref: str | None = None
 
 
 def new_state() -> str:

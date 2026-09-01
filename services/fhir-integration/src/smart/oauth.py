@@ -48,6 +48,11 @@ class TokenResponse(BaseModel):
     scope: str | None = None
     patient: str | None = None
     encounter: str | None = None
+    #: The OpenID Connect identity token, present when the launch requested the
+    #: ``openid fhirUser`` scopes and the EHR supports single sign-on. Read only
+    #: by ``smart.identity``, which verifies it before believing anything in it,
+    #: and never stored: what survives the callback is the actor it resolved to.
+    id_token: str | None = None
 
     @property
     def ttl_seconds(self) -> int:

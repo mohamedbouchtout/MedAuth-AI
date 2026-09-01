@@ -33,10 +33,19 @@ info:
 
 
     **The launch routes touch no PHI and write no audit row** — obtaining a
-    credential is not using it. **The FHIR routes do both**, one row per call
-    rather than one per underlying fetch. Their `actor_id` is null until
-    TASK-051c captures the SMART `fhirUser` claim; a fabricated
-    service-account id would be worse than an honest null.
+    credential is not using it, and neither is learning whose it is. **The FHIR
+    routes do both**, one row per call rather than one per underlying fetch.
+
+
+    **Their audit actor is the EHR's own, and it is not `actor_id`.** No
+    encounter exists at launch time, so there is no provider UUID to record and
+    `actor_id` stays null permanently rather than being filled with a fabricated
+    service-account id. What is recorded instead is the `Practitioner` the SMART
+    `id_token`'s `fhirUser` claim named, verified against the EHR's published
+    keys and stored in `audit_log.fhir_practitioner_ref` — a separate column
+    because a `Practitioner` id is usually not a UUID. An `id_token` that is
+    absent or does not verify leaves that null too; the unverified claim is
+    never written. See CLAUDE.md, "The EHR-asserted actor is its own column".
 
 
     **Incomplete payer information is not an error.** A patient whose `Coverage`

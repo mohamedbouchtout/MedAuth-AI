@@ -85,7 +85,7 @@ ERROR_CODE_UPSTREAM_UNAVAILABLE: Final = "FHIR_UPSTREAM_UNAVAILABLE"
 ERROR_CODE_MALFORMED: Final = "FHIR_MALFORMED_RESPONSE"
 
 
-async def get_ehr_adapter(
+async def get_launch_record(
     x_medauth_launch_id: Annotated[
         str,
         Header(
@@ -101,8 +101,13 @@ async def get_ehr_adapter(
     redis: Annotated[Redis, Depends(get_redis)],
     http_client: Annotated[httpx.AsyncClient, Depends(get_http_client)],
     settings: Annotated[Settings, Depends(get_app_settings)],
-) -> EHRAdapter:
-    """Resolve the launch's stored token into an adapter for that EHR.
+) -> store.LaunchToken:
+    """Load the launch's stored record, renewing its access token if it is stale.
+
+    Split out from ``get_ehr_adapter`` by TASK-051c, which needs a second thing
+    off the same record — the actor that launch was authorized by. FastAPI
+    caches a dependency's result within one request, so both readers share a
+    single Redis load and a single renewal rather than racing to renew twice.
 
     A missing header is a 422 from the standard validation handler, like any
     other absent required parameter. An unknown one — expired, never issued, or
@@ -140,6 +145,40 @@ async def get_ehr_adapter(
     if store.access_token_is_stale(token, skew_seconds=settings.smart_token_refresh_skew_seconds):
         token = await _renew_access_token(redis, http_client, settings, x_medauth_launch_id, token)
 
+    return token
+
+
+async def get_audit_actor(
+    token: Annotated[store.LaunchToken, Depends(get_launch_record)],
+) -> str | None:
+    """Return the provider who authorized this launch, for the audit row.
+
+    An absolute ``Practitioner`` reference resolved from a **verified**
+    ``id_token`` at callback time (TASK-051c), or ``None`` when the EHR did not
+    say who launched us or could not prove it. ``None`` is written as a null
+    actor, never replaced by an invented one.
+
+    It is deliberately not an ``actor_id``: a ``Practitioner`` id is usually not
+    a UUID, and ``audit_log`` keeps an EHR-asserted actor in a column of its own.
+    See CLAUDE.md, "The EHR-asserted actor is its own column".
+    """
+    return token.fhir_practitioner_ref
+
+
+async def get_ehr_adapter(
+    token: Annotated[store.LaunchToken, Depends(get_launch_record)],
+    http_client: Annotated[httpx.AsyncClient, Depends(get_http_client)],
+) -> EHRAdapter:
+    """Resolve the launch's stored token into an adapter for that EHR.
+
+    Everything about loading that record — the 404, and the proactive token
+    renewal — belongs to ``get_launch_record`` above. What is left here is
+    choosing the adapter, which is the part a route actually asked for.
+
+    The vendor comes out of the record and is never a request parameter, so
+    nothing in this module imports a concrete adapter or branches on which EHR
+    answered.
+    """
     return get_adapter(
         token.ehr_type,
         token.fhir_base_url,
@@ -337,6 +376,7 @@ def _as_api_error(exc: Exception) -> ApiHTTPException:
 async def read_patient_context(
     patient_id: Annotated[str, Path(description="The patient's id on the EHR.")],
     adapter: Annotated[EHRAdapter, Depends(get_ehr_adapter)],
+    actor: Annotated[str | None, Depends(get_audit_actor)],
 ) -> ApiResponse[PatientContext]:
     """Return one patient's demographics, insurance coverage and active conditions.
 
@@ -362,6 +402,7 @@ async def read_patient_context(
         action=AuditAction.READ_PATIENT,
         resource_type=RESOURCE_TYPE_PATIENT,
         resource_id=patient_id,
+        fhir_practitioner_ref=actor,
     )
     return ApiResponse[PatientContext](data=context)
 
@@ -389,6 +430,7 @@ async def read_patient_context(
 async def read_encounter(
     encounter_id: Annotated[str, Path(description="The encounter's id on the EHR.")],
     adapter: Annotated[EHRAdapter, Depends(get_ehr_adapter)],
+    actor: Annotated[str | None, Depends(get_audit_actor)],
 ) -> ApiResponse[Encounter]:
     """Return one ``Encounter`` resource as the EHR holds it.
 
@@ -408,6 +450,7 @@ async def read_encounter(
         action=AuditAction.READ_ENCOUNTER,
         resource_type=RESOURCE_TYPE_ENCOUNTER,
         resource_id=encounter_id,
+        fhir_practitioner_ref=actor,
     )
     return ApiResponse[Encounter](data=encounter)
 
@@ -435,6 +478,7 @@ async def read_encounter(
 async def read_encounter_coverage_context(
     encounter_id: Annotated[str, Path(description="The encounter's id on the EHR.")],
     adapter: Annotated[EHRAdapter, Depends(get_ehr_adapter)],
+    actor: Annotated[str | None, Depends(get_audit_actor)],
 ) -> ApiResponse[EncounterCoverageContext]:
     """Return the three things an ``encounters`` row needs about payer and place.
 
@@ -472,5 +516,6 @@ async def read_encounter_coverage_context(
         action=AuditAction.READ_PATIENT,
         resource_type=RESOURCE_TYPE_ENCOUNTER,
         resource_id=encounter_id,
+        fhir_practitioner_ref=actor,
     )
     return ApiResponse[EncounterCoverageContext](data=context)

@@ -11,9 +11,15 @@ that is where ``audit_log()`` starts. Both routes log at INFO through the
 standard logger per Known Constraints #6, which is where the operational trace
 belongs when there is no audit row to write.
 
+**Neither route audits, and TASK-051c does not change that.** The callback now
+verifies an ``id_token`` and records who authorized the launch, but obtaining a
+credential — or learning whose it is — is still not using one. That actor is
+written on every audit row the PHI routes produce, which is where it belongs.
+
 **What must never reach a log line here**: the ``launch`` parameter, the
 authorization ``code``, the ``state``, the ``code_verifier``, the client secret,
-the access token, and the SMART launch context the token response carries. The
+the access token, the ``id_token`` and any claim read out of it, and the SMART
+launch context the token response carries. The
 ``iss`` is logged as a **host**, never in full — a launch URL can carry context
 in its query string. What is left to log is the vendor key and the launch's
 outcome, which is what an operator actually needs.
@@ -46,6 +52,7 @@ from src.api.dependencies import (
 from src.config import Settings
 from src.smart import store
 from src.smart.discovery import DiscoveryError, fetch_smart_configuration
+from src.smart.identity import resolve_launch_actor
 from src.smart.issuer import issuer_host, normalize_fhir_base_url
 from src.smart.oauth import (
     TokenExchangeError,
@@ -187,6 +194,12 @@ async def smart_launch(
             code_verifier=code_verifier,
             token_endpoint=configuration.token_endpoint,
             ehr_launch=is_ehr_launch,
+            # From the same document as the endpoints above, for the same reason
+            # the token endpoint is carried rather than rediscovered: the key
+            # set an id_token is checked against must come from the document
+            # that named the server issuing it (TASK-051c).
+            oidc_issuer=configuration.issuer,
+            jwks_uri=configuration.jwks_uri,
         ),
         ttl_seconds=settings.smart_launch_ttl_seconds,
     )
@@ -253,10 +266,17 @@ async def callback(
     verifier held with it, and stores the resulting token under
     `fhir_token:{launch_id}` for as long as the EHR says it lives.
 
+    Also resolves who authorized the launch, from the ``id_token``'s verified
+    ``fhirUser`` claim, and stores it on the record as the actor for every PHI
+    read made under this launch (TASK-051c). That resolution never fails the
+    launch: an EHR that sends no ``id_token``, publishes no keys, or sends one
+    that does not verify leaves the actor unknown, which a null honestly
+    records — and an *unverified* claim is never written in its place.
+
     Returns the ``launch_id``. It does not return the SMART launch context the
-    token response carried: those identifiers are stored for TASK-052, which
-    audits when it reads them, and a credential exchange is not the place to
-    start handing patient identifiers to a client.
+    token response carried, nor the resolved actor: those identifiers are stored
+    for TASK-052, which audits when it reads them, and a credential exchange is
+    not the place to start handing patient identifiers to a client.
 
     Touches no PHI and writes no audit row, for the same reason as the launch
     route above.
@@ -308,6 +328,19 @@ async def callback(
             status.HTTP_502_BAD_GATEWAY, ERROR_CODE_TOKEN_EXCHANGE_FAILED, str(exc)
         ) from None
 
+    # Who authorized this launch, if the EHR both told us and can prove it.
+    # Never fails the launch: an unverifiable claim leaves the actor unknown,
+    # which is what a null honestly records. TASK-051c.
+    actor_reference = await resolve_launch_actor(
+        http,
+        id_token=token.id_token,
+        jwks_uri=pending.jwks_uri,
+        oidc_issuer=pending.oidc_issuer,
+        audience=credentials.client_id,
+        fhir_base_url=pending.iss,
+        issuer_host=host,
+    )
+
     launch_token = LaunchToken(
         ehr_type=pending.ehr_type,
         fhir_base_url=pending.iss,
@@ -321,6 +354,7 @@ async def callback(
         patient_id=token.patient,
         encounter_id=token.encounter,
         scope=token.scope,
+        fhir_practitioner_ref=actor_reference,
     )
     # The record outlives the access token when there is a grant to renew it
     # with, and expires with it when there is not. TASK-051b; see CLAUDE.md,
