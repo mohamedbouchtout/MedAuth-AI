@@ -29,6 +29,7 @@ def test_every_router_is_mounted() -> None:
         "/fhir/patient/{patient_id}/context",
         "/fhir/encounter/{encounter_id}",
         "/fhir/encounter/{encounter_id}/coverage-context",
+        "/fhir/launch-context",
     } == paths
 
 

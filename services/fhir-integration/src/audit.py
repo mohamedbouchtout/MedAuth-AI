@@ -56,7 +56,13 @@ async def audit_ehr_read(
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> None:
-    """Record one read of a patient's data from an EHR.
+    """Record one read of a patient's data made under a SMART launch.
+
+    Usually that is a chart read from the EHR itself. It also covers
+    ``GET /fhir/launch-context`` (TASK-051d), which discloses which patient a
+    launch was for out of this service's own Redis rather than out of the EHR:
+    the identifier is PHI whichever store answered, and where it was read from
+    is not what decides whether an access is auditable.
 
     **One row per route call, not one per FHIR fetch.** The auditable access is
     the context read a provider asked for; ``get_patient_context()`` happens to

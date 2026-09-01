@@ -88,6 +88,23 @@ def redis_with_launch() -> FakeRedis:
     return fake
 
 
+def _rewrite_launch(fake: FakeRedis, **changes: Any) -> None:
+    """Store the launch record again with some of its fields changed."""
+    key = store.token_key(LAUNCH_ID)
+    stored = LaunchToken.model_validate_json(fake.values[key])
+    fake.values[key] = stored.model_copy(update=changes).model_dump_json()
+
+
+def _client_over(fake: FakeRedis, ehr_server: FakeFHIRServer) -> Iterator[TestClient]:
+    """Yield a test client with Redis and the EHR replaced by these two fakes."""
+    app = create_app()
+    app.dependency_overrides[get_redis] = lambda: fake
+    http = ehr_server.client()
+    app.dependency_overrides[get_http_client] = lambda: http
+    with TestClient(app) as test_client:
+        yield test_client
+
+
 @pytest.fixture
 def redis_with_anonymous_launch(redis_with_launch: FakeRedis) -> FakeRedis:
     """A launch whose id_token was absent or did not verify.
@@ -113,6 +130,34 @@ def anonymous_client(
     app.dependency_overrides[get_http_client] = lambda: http
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def standalone_launch_client(
+    redis_with_launch: FakeRedis, ehr_server: FakeFHIRServer
+) -> Iterator[TestClient]:
+    """A launch the EHR gave a patient and no encounter.
+
+    This is what a standalone launch looks like on the record: the provider
+    opened MedAuth outside a chart, so there is a patient in scope and no visit
+    to name. TASK-051d's route has to treat it as a working launch.
+    """
+    _rewrite_launch(redis_with_launch, encounter_id=None)
+    yield from _client_over(redis_with_launch, ehr_server)
+
+
+@pytest.fixture
+def contextless_launch_client(
+    redis_with_launch: FakeRedis, ehr_server: FakeFHIRServer
+) -> Iterator[TestClient]:
+    """A launch that carried no patient context at all.
+
+    ``LaunchToken`` allows it, so the route has to answer it — and what it has
+    to answer is "this launch named nobody", which is not the same fact as "no
+    such launch".
+    """
+    _rewrite_launch(redis_with_launch, patient_id=None, encounter_id=None)
+    yield from _client_over(redis_with_launch, ehr_server)
 
 
 @pytest.fixture
@@ -490,3 +535,167 @@ class TestEncounterCoverageContext:
 
         assert "session_id" not in data
         assert "launch_id" not in data
+
+
+class TestLaunchContext:
+    """TASK-051d's route — what a client calls before it can start a visit.
+
+    The route reads no chart. What is asserted here is mostly that it discloses
+    exactly two identifiers and nothing else, that a launch with no encounter is
+    a working launch rather than a missing one, and that the disclosure is
+    audited like any other PHI read.
+    """
+
+    def test_an_ehr_launch_returns_both_identifiers_and_audits(
+        self, client: TestClient, audit: AuditRecorder
+    ) -> None:
+        response = client.get("/fhir/launch-context", headers=HEADERS)
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["patient_id"] == "synthea-123"
+        assert data["encounter_id"] == "encounter-1"
+
+        assert len(audit.calls) == 1
+        call = audit.calls[0]
+        assert call["action"] is AuditAction.READ_PATIENT
+        assert call["resource_type"] == "Patient"
+        assert call["resource_id"] == "synthea-123"
+        assert call["fhir_practitioner_ref"] == PRACTITIONER_REF
+        assert call["actor_id"] is None
+        assert call["session_id"] is None
+
+    def test_a_standalone_launch_is_a_200_with_a_null_encounter(
+        self, standalone_launch_client: TestClient, audit: AuditRecorder
+    ) -> None:
+        """A launch with a patient and no encounter is working, not broken.
+
+        Answering 404 would tell a client to repeat a launch that succeeded —
+        the same conflation as reading a payer's silence as a negative
+        determination. The client starts a session without an encounter and
+        leaves the payer columns NULL, which the dispatcher reports per
+        procedure.
+        """
+        response = standalone_launch_client.get("/fhir/launch-context", headers=HEADERS)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["error"] is None
+        assert body["data"]["patient_id"] == "synthea-123"
+        assert body["data"]["encounter_id"] is None
+
+    def test_a_standalone_launch_still_audits_the_patient(
+        self, standalone_launch_client: TestClient, audit: AuditRecorder
+    ) -> None:
+        """The patient is what makes this a disclosure; the encounter is not."""
+        standalone_launch_client.get("/fhir/launch-context", headers=HEADERS)
+
+        assert len(audit.calls) == 1
+        assert audit.calls[0]["resource_id"] == "synthea-123"
+
+    def test_a_launch_carrying_no_patient_discloses_nothing_and_audits_nothing(
+        self, contextless_launch_client: TestClient, audit: AuditRecorder
+    ) -> None:
+        """Both nulls is a 200, and no access happened, so no row records one.
+
+        A launch may carry no patient context at all. That is still a launch, so
+        it is not a 404 — and nothing was disclosed, so an audit row naming no
+        resource would record an access that never took place.
+        """
+        response = contextless_launch_client.get("/fhir/launch-context", headers=HEADERS)
+
+        assert response.status_code == 200
+        assert response.json()["data"] == {"patient_id": None, "encounter_id": None}
+        assert audit.calls == []
+
+    def test_an_unverified_launch_records_no_actor(
+        self, anonymous_client: TestClient, audit: AuditRecorder
+    ) -> None:
+        """Both actor columns stay null rather than carrying the unverified claim."""
+        anonymous_client.get("/fhir/launch-context", headers=HEADERS)
+
+        assert audit.calls[0]["fhir_practitioner_ref"] is None
+        assert audit.calls[0]["actor_id"] is None
+
+    @pytest.mark.parametrize("launch_id", ["unknown", "expired", "consumed"])
+    def test_a_launch_id_with_no_record_is_a_404(
+        self, client: TestClient, audit: AuditRecorder, launch_id: str
+    ) -> None:
+        """Unknown, expired and already-rejected are one answer: there is no record.
+
+        Nothing distinguishes them at the Redis layer by design — a record that
+        expired, one that never existed, and one dropped after its grant was
+        refused all simply fail to load. None of them is a credential being
+        rejected, so none of them is a 401.
+        """
+        response = client.get(
+            "/fhir/launch-context",
+            headers={fhir_routes.LAUNCH_ID_HEADER: f"{launch_id}-{uuid.uuid4()}"},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == fhir_routes.ERROR_CODE_UNKNOWN_LAUNCH
+        assert audit.calls == []
+
+    def test_a_missing_header_is_a_422(self, client: TestClient) -> None:
+        response = client.get("/fhir/launch-context")
+
+        assert response.status_code == 422
+
+    def test_a_session_id_in_the_header_is_a_404(
+        self, client: TestClient, redis_with_launch: FakeRedis
+    ) -> None:
+        """CLAUDE.md, "A SMART launch is not an encounter session".
+
+        This route is the one a client calls holding both identifiers at once,
+        which makes it the likeliest place to send the wrong one. It must miss,
+        and no fallback may ever be added that tries it as the other kind.
+        """
+        session_id = str(uuid.uuid4())
+        redis_with_launch.values[f"session:{session_id}"] = "{}"
+
+        response = client.get(
+            "/fhir/launch-context",
+            headers={fhir_routes.LAUNCH_ID_HEADER: session_id},
+        )
+
+        assert response.status_code == 404
+
+    def test_the_response_carries_no_credential(
+        self, client: TestClient, audit: AuditRecorder
+    ) -> None:
+        """The stored record holds three secrets beside the context; none ships.
+
+        Asserted against the response text rather than its keys, so a token
+        nested inside some future field cannot pass this by not being a
+        top-level name.
+        """
+        response = client.get("/fhir/launch-context", headers=HEADERS)
+
+        assert set(response.json()["data"]) == {"patient_id", "encounter_id"}
+        assert ACCESS_TOKEN not in response.text
+        assert "ehr-refresh-token" not in response.text
+        assert "scope" not in response.text
+
+    def test_the_launch_id_reaches_no_log_line(
+        self, client: TestClient, audit: AuditRecorder, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """It resolves to an EHR access token, so it is a credential in a log."""
+        with caplog.at_level("DEBUG"):
+            client.get("/fhir/launch-context", headers=HEADERS)
+
+        assert LAUNCH_ID not in caplog.text
+
+    def test_it_reads_no_chart(
+        self, client: TestClient, ehr_server: FakeFHIRServer, audit: AuditRecorder
+    ) -> None:
+        """The whole point of the route: the EHR has already told us this.
+
+        Asking the EHR again would spend a token, add latency to the one call
+        standing between a launch and a visit, and could fail where a stored
+        answer cannot.
+        """
+        response = client.get("/fhir/launch-context", headers=HEADERS)
+
+        assert response.status_code == 200
+        assert ehr_server.requested_paths == []
