@@ -4140,7 +4140,7 @@ logic do not change.
       successful launch against a real vendor. TASK-055 is where that is
       settled; TASK-052's gated sandbox test carries the same caveat.
 
-- [ ] **TASK-051b:** EHR access token refresh
+- [x] **TASK-051b:** EHR access token refresh
   - Prerequisite: **TASK-051**
   - Service: `services/fhir-integration`
   - **Why this is its own task.** TASK-051 stores `refresh_token` and
@@ -4226,6 +4226,44 @@ logic do not change.
     call at all
   - **Test:** no refresh token, access token or client secret reaches a log
     record, asserted against caplog as TASK-051 does for its own credentials
+  - Built (`services/fhir-integration`, 273 tests across the service at 97.12%
+    coverage against the 80% gate — 27 of them new here). Every acceptance
+    bullet above has a test named for it. Decisions worth knowing before
+    touching this:
+    - **The first commit is a bugfix, and the feature sits on top of it.** The
+      storage change lands on its own with its own regression test, because a
+      reviewer should be able to see that the record TTL was wrong independently
+      of whether they agree with how renewal is built.
+    - **`test_the_record_outlives_the_access_token_when_a_grant_can_renew_it`
+      is the previous guard test with its assertion inverted**, not a new test
+      written beside a retired one. It asserted `== 3600` under the reversed
+      rule and asserts `== 28800` now, and its docstring says so — the point
+      being that the old contract is what fails it.
+    - **Renewal is proactive, in `get_ehr_adapter`.** Nothing in a route body or
+      an adapter primitive changed, which was the property TASK-052 asked for
+      even though its description of the mechanism was wrong.
+    - **A refused grant is recorded, not just reported.** The record is rewritten
+      without its refresh token at a 5-minute TTL, so the next request answers
+      401 from what we already know rather than re-presenting a grant the vendor
+      has just refused. Deleting the record outright would answer 404 — "no such
+      launch" — which tells a client the wrong thing.
+    - **An unusable answer is grouped with "unreachable", not with "refused".**
+      A 200 carrying no access token does not say the grant is dead, so the
+      grant survives and the caller gets the transient outcome.
+    - **`load_launch_token()` treats an unparseable record as absent.** The
+      record's shape changed here, so a record written by an older process would
+      otherwise surface as a 500 rather than as the 404 that is the truthful
+      answer for a launch this service cannot read.
+    - **`require_credentials()` moved to `src/api/dependencies.py`** so the
+      launch flow and renewal share one answer to "which registration is this
+      vendor's", rather than the second caller copying the first.
+    - **Open item, not code:** `SMART_LAUNCH_RECORD_TTL_SECONDS` is 8 hours as a
+      round stand-in for a working day, and no vendor's actual refresh-token
+      lifetime has been checked against it — SMART returns no `refresh_expires_in`
+      to check against. `SMART_TOKEN_REFRESH_SKEW_SECONDS` is 120 on the same
+      footing. Both are assumptions, like TASK-006b's
+      `SESSION_REMINT_GRACE_SECONDS`, and TASK-055 is where a real vendor
+      launch would settle them.
 
 - [ ] **TASK-051c:** Capture the SMART `fhirUser` claim as the audit actor
   - Prerequisite: **TASK-051**; wanted by **TASK-052** and every later PHI read
