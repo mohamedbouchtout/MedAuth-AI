@@ -5085,18 +5085,50 @@ logic do not change.
       no real patient, provider or payer submission.
 
 - [ ] **TASK-052c:** Implement `scripts/setup-dev.sh`
-  - **Why it is its own task.** The stub reads `# Implemented in TASK-052` and
-    CLAUDE.md's tree says "stub until TASK-052", but installing dependencies has
-    nothing to do with base FHIR resource fetching — the reference is an
-    artefact of TASK-001 writing one task number into two stubs. Split out
-    rather than absorbed, so TASK-052 is not carrying unrelated work.
-  - One command that installs all Python and Node dependencies: `uv sync` across
-    the workspace and `npm install` at the root for `apps/web`, `apps/mobile` and
-    `packages/fhir-types/typescript/`.
+  - **Why it is its own task.** The stub reads `# Implemented in TASK-052`, and
+    CLAUDE.md's tree said the same until it was corrected to this task, but
+    installing dependencies has nothing to do with base FHIR resource fetching
+    — the reference is an artefact of TASK-001 writing one task number into two
+    stubs. Split out rather than absorbed, so TASK-052 is not carrying
+    unrelated work.
+  - One command that installs all Python and Node dependencies:
+    `uv sync --all-packages` across the uv workspace, and `npm install` at the
+    root for the root npm workspaces.
+  - **`--all-packages`, not a bare `uv sync`, and that is a correctness matter
+    rather than a style one.** The root `pyproject.toml` is a *virtual* root: it
+    declares no package of its own, so a bare `uv sync` installs the dev group
+    and none of the workspace members. It exits 0 while leaving every service
+    and package uninstalled, which is the worst shape a setup script can fail
+    in. The root `pyproject.toml` header already documents
+    `uv sync --all-packages` as the install command; use it.
+  - **Do not enumerate the npm workspaces here.** An earlier draft of this task
+    named `apps/web`, `apps/mobile` and `packages/fhir-types/typescript/`, and
+    by the time anyone read it the root `package.json` had grown
+    `packages/audio-wire`, `packages/session-client` and
+    `packages/nudge-client` too. A root `npm install` covers every declared
+    workspace whatever the list holds, so naming them buys nothing and drifts
+    silently. Say "the root npm workspaces" and the sentence stays true as
+    packages are added.
   - It is documented in CLAUDE.md's "Start full local stack" as one of three
     commands a new developer runs, so it should fail with a readable message
     when `uv` or the pinned Node version is missing rather than a traceback.
+  - **`.nvmrc` is the authoritative Node pin; `engines.node` is a floor.** The
+    two disagree today — `.nvmrc` says `24` and the root `package.json` says
+    `>=24.15` — and CLAUDE.md already states that the version "lives in .nvmrc;
+    CI reads that file". Check the major version against `.nvmrc` and the full
+    version against `engines.node`, and **name which of the two files a failing
+    check came from in the message**. A developer told only "wrong Node
+    version" has to work out for themselves which pin actually governs, which
+    is the whole failure this bullet exists to prevent.
   - **Test:** running it twice in a row succeeds and is a no-op the second time
+  - **Verified manually, not in CI, and that is a deliberate choice.** No
+    workflow references `scripts/setup-dev.sh` or `scripts/seed-synthea.sh`;
+    this task matches the precedent `seed-synthea.sh` already set rather than
+    standing up a CI home for one shell script. Recorded here so a later reader
+    finds a decision rather than an oversight. **The trigger for revisiting it
+    is accumulation**: if enough manual-only developer scripts pile up that
+    nobody can say which of them still run, that is the point at which a small
+    task giving them a shared CI home earns its keep. Not now, with two.
 
 - [ ] **TASK-053:** SOAP note write-back (base.py)
   - Implement `write_clinical_note(encounter_id, note_text, icd10_codes)` in base.py
