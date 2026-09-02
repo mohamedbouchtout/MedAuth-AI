@@ -5169,14 +5169,189 @@ logic do not change.
       in the document that owns it.
 
 - [ ] **TASK-053:** SOAP note write-back (base.py)
-  - Implement `write_clinical_note(encounter_id, note_text, icd10_codes)` in base.py
-  - Creates FHIR DocumentReference resource (LOINC 11488-4 — Consult note)
-  - Route: `POST /fhir/notes`
-  - Updates `clinical_notes.ehr_document_ref_id` on success
-  - **Test:** write to local HAPI FHIR, verify DocumentReference created + stored
-  - **Test:** against Athenahealth sandbox
+  - Services: `services/fhir-integration` **and** `services/track-a-clinical`.
+    An earlier draft of this task listed one service and six lines; the eight
+    decisions below were settled before any code was written, because most of
+    them bind TASK-054 and TASK-071 as well.
+  - Prerequisite: TASK-030 (generates the note), TASK-032 (the note routes this
+    reads through), TASK-051 (the launch that holds the EHR credential),
+    TASK-052 (the adapter's fetch path this extends to writes).
+  - Implement `write_clinical_note()` in `adapters/base.py`, building a FHIR
+    `DocumentReference`, and expose it as `POST /fhir/notes`.
+
+  - **This is the first write to an EHR, and the cross-cutting rules live in
+    CLAUDE.md, "Writing clinical data out to the EHR".** Do not re-derive them
+    here: the `source` filter, the distinct audit action, the two audit rows,
+    the attestation rule, the two-service split, the server-side fetch, the
+    ordering, and the refusal to duplicate are all settled there and cited by
+    TASK-054. What follows is this task's own detail.
+
+  - **The three identifiers are all in scope, and none defaults from another.**
+    `session_id` finds the note, `launch_id` (in the `X-MedAuth-Launch-Id`
+    header, as every `/fhir/*` route already takes it) holds the EHR credential,
+    and `ehr_encounter_id` says which chart entry the note belongs to.
+    CLAUDE.md's "A SMART launch is not an encounter session" now names all
+    three. `ehr_encounter_id` is nullable on `encounters`: a session started
+    outside a SMART launch has none, and that is a **422** naming the missing
+    link, never a write to a guessed encounter.
+
+  - **The route body is `{session_id}` and nothing else.** Everything else is
+    read server-side: `fhir-integration` calls `track-a-clinical` for the note
+    and for the encounter's `ehr_encounter_id` and `patient_fhir_id`. The
+    browser holds all of it already and posting it back would be one line
+    shorter here and wrong for the reasons CLAUDE.md gives — chiefly that a
+    client-supplied note body produces no `READ_NOTE` row anywhere.
+    - **This is the first call from `fhir-integration` to `track-a-clinical`**,
+      the reverse of TASK-052b's direction. It needs a bound
+      `TRACK_A_CLINICAL_URL` in `src/config.py`, not merely an `.env.example`
+      entry, and `.env.example` gains it in the same change.
+    - `GET /notes/{session_id}` returns the note but not the encounter fields
+      the write needs. Decide deliberately whether to widen that response or
+      add a small server-to-server read, and write down which — do not reach
+      into the database from a service that has no connection to it.
+
+  - **Where the ICD-10 codes go: into the note document, not into a coded
+    element.** `DocumentReference` has no diagnosis element, and this is a
+    property of the resource rather than an oversight — it is a wrapper around a
+    document, and FHIR's home for a coded diagnosis is `Condition`. The two
+    alternatives were considered and rejected:
+    - **`context.event` is for clinical acts the document describes**, not for
+      diagnoses. Putting ICD-10 codes there asserts something the element does
+      not mean, and no consumer reads it as a problem list, so it would be
+      invisible where it matters and misleading where it is read.
+    - **Writing `Condition` resources is a bigger claim than this task makes.**
+      It adds entries to a patient's problem list, which is a clinical
+      assertion a provider makes, not a side effect of filing a note. If it is
+      ever wanted it is its own task with its own review.
+    So the codes are rendered into the document text as a clearly labelled
+    section, dotted as stored, which is where a clinician reading the chart will
+    see them. **Filtered on `source` first** — `llm-extraction` and
+    `provider-accepted` only, per CLAUDE.md. A `comprehend-medical` suggestion
+    must never reach a real chart.
+
+  - **LOINC `11488-4` was wrong, and this is the corrected code.** The old task
+    text said "11488-4 — Consult note", which was written down and then reused
+    without being checked. Verified against the real value sets rather than
+    assumed:
+    - **US Core binds `DocumentReference.type` as *required*** to
+      `us-core-documentreference-type` (all LOINC codes whose scale is `Doc`),
+      with a minimum binding to the ten "Common Clinical Notes" types in
+      `us-core-clinical-note-type`. `type` is `1..1` and Must Support, and
+      `category` is `1..*` with a required binding on its `uscore` slice — so
+      **both** must be sent, and an implementation that omits `category`
+      is non-conformant even where a server accepts it.
+    - **`11488-4` is the wrong member of that set for this note.** A Consult
+      note is the response to another clinician's request for an opinion. What
+      MedAuth records is an ambient office visit, and the code for that is
+      **`11506-3` — Progress note**, defined by ONC's own USCDI entry as
+      representing "a patient's interval status during a hospitalization,
+      outpatient visit, treatment with a post-acute care provider, or other
+      healthcare encounter."
+    - So: `type` = LOINC `11506-3`, `category` = `clinical-note` from
+      `us-core-documentreference-category`. Both are constants with the
+      reasoning above recorded beside them, and neither is a per-vendor value.
+    - The general lesson, since this is the second time it has bitten: **a code
+      or limit written into a task is a claim to check against its source, not
+      a decision already made.**
+
+  - **An unreviewed note may be written back, and `doc_status` carries which it
+    is.** `status` is always `current`; `doc_status` is `preliminary` when
+    `reviewed_by_provider` is false and `final` when it is true. Refusing to
+    write an unreviewed note was the alternative, and it was rejected because
+    the chart is where a provider actually reviews and signs, and because a
+    provider blocked from filing would copy the text out of our UI by hand,
+    which puts the same content on the chart with no provenance at all. FHIR has
+    an element whose entire purpose is to say a document is not yet attested,
+    and using it honestly is better than either extreme.
+    - **`authenticator` is deliberately left unset.** It names who attested to
+      the document, and this repository has no provider authentication before
+      Phase 5 — asserting an attester we cannot verify is the same fabrication
+      as a service-account UUID in an audit row.
+    - **The write-back never sets `reviewed_by_provider`.** Filing a note is not
+      a human reading one. Same rule, and the same failure class, as a note
+      screen load not marking a note reviewed.
+    - Revisit if a vendor's chart is found to surface `preliminary` documents
+      indistinguishably from signed ones — that would change the trade, and it
+      is a fact about a real vendor rather than a hypothetical.
+
+  - **A repeat write is refused, and the guard is a conditional update.** A note
+    whose `ehr_document_ref_id` is already set answers **409**
+    `NOTE_ALREADY_WRITTEN_TO_EHR` before any call to the EHR. That pre-check is
+    a fast path and not the guarantee: two concurrent requests would both pass
+    it, so the recording route's `UPDATE ... WHERE ehr_document_ref_id IS NULL`
+    is what actually decides, and a zero-row result is the same 409. Writing the
+    check only in the caller would leave the invariant enforced nowhere it
+    cannot be raced.
+
+  - **Order: EHR first, record second**, per CLAUDE.md. If the EHR write
+    succeeds and the record fails, answer **502** `EHR_NOTE_RECORD_FAILED` with
+    the created `DocumentReference` id in the message, and log at ERROR. The id
+    is an identifier, not patient content, which is what the adapter's error
+    module already permits. Never retry that automatically, and never report the
+    whole operation as failed — that invites the retry that duplicates the chart
+    entry.
+
+  - **New route on `track-a-clinical`: `PATCH /notes/{session_id}/ehr-reference`,
+    server-to-server.** Body is explicit — `{"ehr_document_ref_id": "..."}` —
+    per the rule that a PATCH performing a state transition names the transition
+    rather than relying on an empty body. It is not part of
+    `PATCH /notes/{session_id}`, whose `extra="forbid"` exists precisely to keep
+    a client from setting this field, and that stays true. It audits, with
+    `actor_id` from `encounters.provider_id`. `docs/api/track-a-clinical.yaml`
+    gains it in the same change.
+
+  - **A new `AuditAction` member: `WRITE_NOTE_TO_EHR`**, distinct from
+    `WRITE_NOTE`, which means the note was generated and stored here. Added to
+    `packages/hipaa-logger` in this change, per the vocabulary rule.
+
+  - **The adapter gains its first write path.** `_get()` is documented as the one
+    place an HTTP call to an EHR is made; that becomes two. The POST maps onto
+    the same four outcomes in `errors.py`, plus what only a create has: a **201
+    with a `Location` header** is the normal answer and the document id is
+    parsed from it, a 200 with a body is also acceptable, and neither the
+    `Location` nor any response body is trusted to be well-formed. A 4xx that is
+    not 401/403/404 stays "malformed" — the EHR refusing the resource we built
+    is our bug and is not worth retrying.
+
+  - **CORS needs no change.** `POST` and `X-MedAuth-Launch-Id` are both already
+    in `packages/cors-policy`'s fixed lists, and this service already installs
+    the middleware.
+
+  - **Test:** write to local HAPI FHIR and read the `DocumentReference` back —
+    correct `type` (`11506-3`), `category`, `subject`, `context.encounter`, and
+    a base64 attachment whose decoded text carries all four SOAP sections; then
+    assert `clinical_notes.ehr_document_ref_id` holds the created id. **This is
+    the acceptance gate for this task**, on the per-PR `REQUIRE_HAPI_TESTS`
+    footing TASK-052 established.
+  - **Test:** a `comprehend-medical` code on the note does not appear anywhere
+    in the written document, while `llm-extraction` and `provider-accepted`
+    codes do. Named as its own test because it is the rule most likely to be
+    "simplified" away by someone who sees three sources and sends all three.
+  - **Test:** a second write-back of the same note answers 409 and makes no call
+    to the EHR — asserted by the absence of a request, not by the response alone.
+  - **Test:** a note on an encounter with no `ehr_encounter_id` answers 422 and
+    writes nothing.
+  - **Test:** an unreviewed note writes `doc_status: preliminary`, a reviewed one
+    writes `final`, and neither path changes `reviewed_by_provider`.
+  - **Test:** a failure to record the id after a successful EHR write answers 502
+    with the document id in the message and leaves the column NULL.
+  - **Test:** `docs/api/fhir-integration.yaml` and `docs/api/track-a-clinical.yaml`
+    match their apps' generated schemas — the existing contract drift tests,
+    which fail if either spec is not updated in this change.
+  - **Test (Athenahealth sandbox):** exercised only by the nightly
+    `RUN_ATHENA_LIVE_TESTS` job. **This task cannot be closed on it**, in the
+    same terms TASK-052 uses: those credentials have never produced a passing
+    run, so a failure there should be read as an access question first. The HAPI
+    test above is what closes this task; genuine Athenahealth validation is
+    TASK-055.
 
 - [ ] **TASK-054:** Prior auth submission — base + Athena override
+  - **This is the second outbound writer, and it inherits CLAUDE.md's "Writing
+    clinical data out to the EHR" rules rather than re-deciding them** — the
+    `source` filter on any codes leaving this system, its own distinct audit
+    action, an audit row in each service that acts, the EHR/payer-write-first
+    ordering, and the refusal to submit twice what was already submitted. Cite
+    that section; do not restate it.
   - Implement `submit_prior_auth(bundle)` in base.py using FHIR Claim/$submit (Da Vinci PAS)
   - Override in `adapters/athena.py`: Athenahealth does not support FHIR PAS — override
     to submit via CoverMyMeds API instead
