@@ -599,8 +599,8 @@ depend on the answer, and because a task that settles it implicitly by choosing
 a Redis key name in isolation has decided a repository-wide vocabulary question
 by accident.
 
-**There are two identifiers. They are not the same value, neither is derivable
-from the other, and they have different lifetimes.**
+**There are three identifiers. No two of them are the same value, none is
+derivable from another, and they have three different lifetimes.**
 
 - **`session_id` — the encounter session.** Minted server-side by
   `POST /sessions/start` in `track-a-clinical` (TASK-006), which is the only
@@ -612,6 +612,32 @@ from the other, and they have different lifetimes.**
   and `launch`. It names one authorization flow and the EHR access token that
   flow produces. Its lifetime is the EHR's access token lifetime, which is the
   EHR's to decide and not ours.
+- **`ehr_encounter_id` — the encounter as the EHR knows it.** Minted by the
+  **EHR**, not by us, and handed to `POST /sessions/start` in the request body,
+  which stores it on `encounters.ehr_encounter_id`. Its lifetime is the EHR's
+  record, which outlives both of the others: the chart entry is still there
+  years after the visit, the session and the launch are both long gone.
+
+**How the third one relates to the other two, stated rather than inferred.**
+`session_id` and `ehr_encounter_id` name *the same clinical visit* in two
+namespaces — ours and the EHR's — which is exactly what makes them easy to
+conflate and expensive to conflate. `launch_id` names something else entirely.
+Three consequences follow, and none of them is optional:
+
+- **It is the EHR's namespace, so it is only unique within one EHR.** Two
+  vendors can both issue `Encounter/1`, the same property that puts an
+  EHR-asserted practitioner reference in `fhir_practitioner_ref` as an absolute
+  URL rather than a bare id. Never treat an `ehr_encounter_id` as globally
+  unique, and never key anything of ours on it alone.
+- **Every `/fhir/*` route keyed on an encounter takes this one**, never
+  `session_id` — `GET /fhir/encounter/{encounter_id}` and
+  `/coverage-context` already do, and the note write-back does too. The rule is
+  the one this section already states: a route takes one identifier and says
+  which, and giving it the wrong one is a 404 rather than a lookup that misses.
+- **It is nullable, and a null is a real state rather than an oversight.** A
+  session started outside a SMART launch has none, and anything that needs one
+  — the note write-back above all — must answer for its absence explicitly
+  instead of assuming a visit recorded here corresponds to a chart entry there.
 
 **Why conflating them would be wrong, concretely.** A SMART launch happens when
 a provider opens MedAuth from a chart; an encounter starts when they tap "start
@@ -633,7 +659,7 @@ flow's vocabulary at all, so the collision cannot be reintroduced by a later
 reader reaching for the obvious word.
 
 What follows, for the tasks that depend on this:
-- **TASK-052b is the one place both identifiers are in scope at once.** It runs
+- **TASK-052b was the first place two of them were in scope at once.** It runs
   at SMART launch and writes `insurance_payer`, `insurance_plan_type` and
   `state` onto an `encounters` row, so it needs an explicit recorded mapping
   from an encounter to the `launch_id` it was created under. An explicit mapping
@@ -643,12 +669,115 @@ What follows, for the tasks that depend on this:
   `/fhir/callback` and `session_id` from `/sessions/start`, and sends whichever
   one the route it is calling is keyed on. A route takes one or the other and
   says which; nothing accepts "the session id" unqualified.
-- **Neither is derivable from the other, and no route accepts them
+- **TASK-053 holds all three at once**, which is what forced the third one into
+  this section. Writing a note back to the chart needs `session_id` to find the
+  note, `launch_id` to hold the EHR credential, and `ehr_encounter_id` to say
+  which chart entry the note belongs to — three values, three parameters, no
+  defaulting of one from another.
+- **None is derivable from another, and no route accepts them
   interchangeably.** A route keyed on `launch_id` given a `session_id` is a 404,
   not a lookup that happens to miss.
-- **The two never share a key namespace.** `fhir_*` keys belong to the OAuth
+- **The three never share a key namespace.** `fhir_*` keys belong to the OAuth
   flow; everything keyed on `{session_id}` in the canonical list belongs to the
-  encounter.
+  encounter; an `ehr_encounter_id` keys nothing of ours at all — it is a value
+  we store and hand back to the EHR, never a key we look anything up by.
+
+### Writing clinical data out to the EHR (cross-cutting)
+Everything in this document before this section describes data coming *in* from
+an EHR, or moving between our own services. TASK-053 is the first write in the
+other direction — a generated SOAP note becoming a `DocumentReference` on a real
+patient's chart — and TASK-054 follows it with a prior-authorization submission
+to a payer. Settled here rather than inside TASK-053 because the rules below are
+about *leaving this system*, and the second and third outbound writer must not
+each decide them again.
+
+**Nothing a machine merely suggested may leave this system.** Every outbound
+writer filters `icd10_codes` and `cpt_codes` on `source` and sends only
+`llm-extraction` and `provider-accepted` entries. A `comprehend-medical` entry
+is a code the validating pass surfaced that no provider ever stated — the shape
+contract below already forbids TASK-060 from putting one in a payer bundle, and
+a patient's permanent chart is the more consequential artifact of the two, so
+the rule applies here with more force rather than less. The way such a code
+becomes sendable is unchanged and is the whole point of the `provider-accepted`
+value: a provider accepts it through `PATCH /notes/{session_id}`, which rewrites
+its `source`. Apply the filter by default in any new outbound path, and name
+this section at the filter site so a later reader finds a rule rather than an
+unexplained omission.
+
+**An outbound write is its own audited event, under its own action.**
+`AuditAction.WRITE_NOTE` means a note was generated and stored *here*; putting a
+note onto a chart is a different event with different consequences, and
+collapsing the two would make "was this note ever sent to the EHR" unanswerable
+from the audit trail. Add a distinct member — the same discipline that keeps
+`STREAM_AUDIO`, `WRITE_NUDGE` and `QUERY_POLICY` apart — in the change that
+writes it, per the action-vocabulary rule below.
+
+**One outbound write produces an audit row in each service that acted, and that
+is not double counting.** `fhir-integration` records that a note was sent to an
+EHR; `track-a-clinical` records that a `clinical_notes` row was mutated to carry
+the resulting document id. Two services made two distinct accesses to PHI and
+each records its own, with `service_name` telling them apart — the alternative,
+one service auditing on another's behalf, is the "one obligation in two places"
+arrangement this document rejects elsewhere. Each keeps its own actor rule
+unchanged: `fhir_practitioner_ref` from the launch on the `fhir-integration`
+side, `encounters.provider_id` on the `track-a-clinical` side.
+
+**A write-back never sets a provider-attestation flag.** `reviewed_by_provider`
+records that a human read and accepted the note, and sending the note somewhere
+is not a human reading it. This is the same rule as "loading the note screen
+does not mark it reviewed", one layer out, and it is written down before the
+first outbound writer exists rather than after one has quietly set the flag.
+
+**The service that owns the table records the result, over HTTP.** The write
+itself happens in `fhir-integration`, which holds the EHR credential and opens
+no database connection of its own; the resulting document id belongs on
+`clinical_notes`, which `track-a-clinical` owns. So the writer calls a
+**server-to-server route on the owning service** to record it. Neither service's
+existing constraint is relaxed to avoid the hop: `fhir-integration` does not grow
+a database connection it has deliberately never had, and `PATCH /notes/{session_id}`
+does not stop forbidding server-owned fields so that a client could send one.
+The two-service split is the correct shape, not a workaround — it is the same
+arrangement, and the same argument, as `track-a-clinical` calling
+`fhir-integration` over HTTP for coverage context, with the direction reversed.
+
+**PHI takes the shortest path, which means the server fetches it.** The note
+text and codes are read by `fhir-integration` from `track-a-clinical` over HTTP,
+never round-tripped through the browser, even though the review screen already
+holds them. A client that posts the note body back makes the content cross the
+network twice more and puts a chart write's payload under the control of the
+least trusted participant in it. The audit consequence is the one that settles
+it: read over HTTP and the owning service's route writes the `READ_NOTE` row
+that every other read of that data writes; accept it from a client and there is
+no such row, because from that service's point of view nothing was read.
+
+**A cross-service call needs a bound setting, not an `.env.example` line.** Any
+new service-to-service caller reads its target's base URL from its own config
+class. An entry that exists in `.env.example` and is read by nothing is a
+setting that looks configured and is not — the failure already found twice in
+the client apps' configuration, and once in this service's own
+`FHIR_INTEGRATION_URL`, which sat unread from TASK-001 until TASK-052b bound it.
+
+**Order an outbound write so the recoverable failure is the one that happens.**
+The external write goes first and the local record second. Both orders can fail
+in the middle, so the question is only which wreckage is findable: an EHR
+document that exists with nothing here pointing at it can be found on the chart,
+reconciled by its id, and is visible to the clinician who needs it, whereas a
+local row claiming a document exists when the write never happened is a silent
+lie that no query can distinguish from success. Same reasoning as the write
+ordering in TASK-011. When the second step fails, say so explicitly — name the
+created document's id in the error and log at ERROR — rather than reporting the
+whole operation as failed, which would invite a retry that duplicates it.
+
+**Duplicate clinical documentation is a real harm, so a repeat write is
+refused.** A note that already carries an EHR document id is not written again:
+the request is rejected before any call to the EHR, and never quietly turned
+into a second chart entry. Two copies of one encounter's note on a chart is not
+untidiness — it is a clinician reading one version while another is amended, and
+a downstream system counting one visit twice. If a genuine replacement is ever
+needed it is an explicit operation with its own name, using FHIR's own
+`status`/`relatesTo` machinery to supersede the first document; it is not what a
+provider clicking a button a second time should get.
+
 ### CORS and browser reachability — decided once, in the services (cross-cutting)
 Settled by TASK-041c. `apps/web` is the first browser caller in this repository:
 every route before it was service-to-service, so nothing ever needed to answer a
