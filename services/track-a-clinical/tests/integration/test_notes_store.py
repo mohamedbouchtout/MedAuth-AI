@@ -228,3 +228,127 @@ async def test_a_soft_deleted_encounter_is_not_found(
 
     async with sessions() as session:
         assert await notes.load_encounter(session, encounter.session_id) is None
+
+
+async def audit_rows_for_action(
+    sessions: async_sessionmaker[AsyncSession], session_id: uuid.UUID, action: AuditAction
+) -> int:
+    """Count audit rows for one session and one action.
+
+    A parametrised sibling of :func:`count_audit_rows`, which hardcodes
+    ``WRITE_NOTE``. TASK-053 writes a different action against the same session,
+    and a helper that could only count one of them would make "the write-back
+    audited" and "the note generation audited" indistinguishable.
+    """
+    statement = sa.text(
+        "SELECT count(*) FROM audit_log WHERE session_id = :sid AND action = :action"
+    )
+    async with sessions() as session:
+        return int(await session.scalar(statement, {"sid": session_id, "action": action}) or 0)
+
+
+async def store_first_note(
+    sessions: async_sessionmaker[AsyncSession], encounter: Encounter
+) -> ClinicalNote:
+    """Write a note for `encounter` and return the stored row."""
+    async with sessions() as session:
+        await notes.store_note(session, encounter=encounter, note=FIRST)
+    stored = await notes_for(sessions, encounter.id)
+    return stored[0]
+
+
+async def test_the_document_reference_is_recorded_on_the_note(
+    sessions: async_sessionmaker[AsyncSession], encounter: Encounter
+) -> None:
+    """The happy path: TASK-053's write-back records what the EHR created."""
+    note = await store_first_note(sessions, encounter)
+
+    async with sessions() as session:
+        recorded = await notes.record_ehr_document_ref(
+            session,
+            encounter=encounter,
+            note=await session.get_one(ClinicalNote, note.id),
+            ehr_document_ref_id="DocumentReference-11",
+        )
+
+    assert recorded is not None
+    # Read back from a fresh session rather than trusting the returned instance:
+    # the update was a Core statement, so an object that reported the new value
+    # without the explicit refresh would be reporting what the caller passed in.
+    assert (await notes_for(sessions, encounter.id))[0].ehr_document_ref_id == (
+        "DocumentReference-11"
+    )
+
+
+async def test_a_second_document_reference_is_refused(
+    sessions: async_sessionmaker[AsyncSession], encounter: Encounter
+) -> None:
+    """Write-once against a real database, which is where the guard actually runs.
+
+    The unit tests assert the 409 the route answers; this asserts the property
+    that makes it safe — the conditional update itself declines, so a caller that
+    skipped the pre-check would still not get a second document recorded.
+    """
+    note = await store_first_note(sessions, encounter)
+
+    # Two sessions, and the loser loads its row *before* the winner writes. That
+    # is what a real race looks like: an instance whose column still reads NULL,
+    # held by a caller whose pre-check has already passed.
+    #
+    # **Do not simulate this by setting the loaded object's column to None.** It
+    # marks the instance dirty, SQLAlchemy autoflushes that NULL before running
+    # the statement, and the conditional update then matches — so the test passes
+    # while asserting nothing about the guard. Verified against this database:
+    # the update returned an id, and the row's real value was restored only by
+    # the rollback. That version of this test was green in the way a guard test
+    # must never be green.
+    async with sessions() as loser, sessions() as winner:
+        stale = await loser.get_one(ClinicalNote, note.id)
+
+        await notes.record_ehr_document_ref(
+            winner,
+            encounter=encounter,
+            note=await winner.get_one(ClinicalNote, note.id),
+            ehr_document_ref_id="DocumentReference-first",
+        )
+
+        second = await notes.record_ehr_document_ref(
+            loser,
+            encounter=encounter,
+            note=stale,
+            ehr_document_ref_id="DocumentReference-second",
+        )
+
+    assert second is None
+    assert (await notes_for(sessions, encounter.id))[0].ehr_document_ref_id == (
+        "DocumentReference-first"
+    )
+
+
+async def test_recording_audits_once_and_a_refusal_audits_not_at_all(
+    sessions: async_sessionmaker[AsyncSession], encounter: Encounter
+) -> None:
+    """A refused write recorded nothing, so a row saying otherwise would be a lie."""
+    note = await store_first_note(sessions, encounter)
+
+    # The same two-session race as above, for the same reason: a stale instance
+    # has to come from a session that loaded it first, never from mutating one.
+    async with sessions() as loser, sessions() as winner:
+        stale = await loser.get_one(ClinicalNote, note.id)
+
+        await notes.record_ehr_document_ref(
+            winner,
+            encounter=encounter,
+            note=await winner.get_one(ClinicalNote, note.id),
+            ehr_document_ref_id="DocumentReference-first",
+        )
+        await notes.record_ehr_document_ref(
+            loser,
+            encounter=encounter,
+            note=stale,
+            ehr_document_ref_id="DocumentReference-second",
+        )
+
+    assert (
+        await audit_rows_for_action(sessions, encounter.session_id, AuditAction.WRITE_NOTE_TO_EHR)
+    ) == 1

@@ -364,6 +364,139 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /notes/{session_id}/ehr-reference:
+    get:
+      tags: [notes]
+      operationId: readNoteEhrReference
+      summary: Read a note's EHR linkage
+      description: >-
+        Returns the join between this note and the EHR's record of the same
+        visit: which chart entry it is (`ehr_encounter_id`), who the document
+        would be about (`patient_fhir_id`), and whether a document has already
+        been filed (`ehr_document_ref_id`).
+
+
+        **Server-to-server.** Its caller is `fhir-integration`'s note write-back
+        (TASK-053), which cannot answer either identifier for itself. It is a
+        sub-resource rather than fields on `GET /notes/{session_id}` because that
+        response is what a provider's browser reads, and widening it would put
+        encounter identifiers into every browser read to serve one service.
+
+
+        A null `ehr_encounter_id` is an ordinary answer rather than an error: the
+        visit was started outside a SMART launch, so there is no chart entry to
+        file against. The caller refuses at that point rather than addressing a
+        guessed encounter.
+
+
+        Unauthenticated in v1, as the note routes are. It returns a patient
+        identifier, so it is PHI and is recorded as `READ_ENCOUNTER` against the
+        row that holds both identifiers.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          description: The session whose note linkage is being read.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The identifiers a write-back needs, and whether one has happened.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NoteEhrReferenceResponse'
+        '404':
+          description: >-
+            Either the session is unknown or soft-deleted (`session_not_found`),
+            or it exists but no note has been generated for it yet
+            (`note_not_generated`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: The path parameter is not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    patch:
+      tags: [notes]
+      operationId: recordNoteEhrReference
+      summary: Record the EHR document a write-back created
+      description: >-
+        Records the `DocumentReference` id an EHR assigned to this note, and is
+        the only writer of `clinical_notes.ehr_document_ref_id`.
+        `PATCH /notes/{session_id}` still forbids that field: a provider's
+        browser must not be able to claim a note was filed to a chart. This route
+        is called by `fhir-integration` after it has actually created the
+        document.
+
+
+        **Write-once.** A note that already carries a document id answers 409
+        rather than recording a second — two `DocumentReference` resources for
+        one encounter is duplicate clinical documentation, which is a clinician
+        reading one version while another is amended. The guard is the update's
+        own `WHERE` clause rather than a read before it, so two concurrent
+        write-backs cannot both succeed.
+
+
+        The body names the transition explicitly rather than relying on an empty
+        PATCH. Unauthenticated in v1, as the note routes are; the actor is the
+        provider on the `encounters` row, never the calling service. Recorded as
+        `WRITE_NOTE_TO_EHR` — deliberately not `WRITE_NOTE`, which means the note
+        was generated and stored here.
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          description: The session whose note was filed to the EHR.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordEhrReferenceRequest'
+      responses:
+        '200':
+          description: The note's EHR linkage, now carrying the document id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NoteEhrReferenceResponse'
+        '404':
+          description: >-
+            Either the session is unknown or soft-deleted (`session_not_found`),
+            or it exists but no note has been generated for it yet
+            (`note_not_generated`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: >-
+            This note has already been filed to the EHR
+            (`note_already_written_to_ehr`). Refused rather than recorded twice:
+            two documents for one encounter is a duplicate entry on a patient's
+            chart.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: >-
+            The body is invalid — an unknown field, or a missing or empty
+            `ehr_document_ref_id`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   schemas:
     ComponentStatus:
@@ -685,6 +818,65 @@ components:
           description: >-
             The provider's attestation that they have reviewed the note. Setting
             it alone does not set `provider_edited`.
+
+    NoteEhrReferenceData:
+      type: object
+      description: >-
+        The join between this note and the EHR's record of the same visit. A
+        sub-resource of the note, served to the write-back rather than to a
+        browser.
+      required: [session_id, ehr_encounter_id, patient_fhir_id, ehr_document_ref_id]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+          description: >-
+            Echoed so a caller holding several write-backs in flight cannot
+            mismatch a response to a request.
+        ehr_encounter_id:
+          type: string
+          nullable: true
+          description: >-
+            The encounter as the EHR knows it. Null when the visit was started
+            outside a SMART launch, which is an ordinary state rather than an
+            error — there is simply no chart entry to file a note against.
+        patient_fhir_id:
+          type: string
+          description: >-
+            The patient as the EHR knows them — the subject of any
+            `DocumentReference` written for this note.
+        ehr_document_ref_id:
+          type: string
+          nullable: true
+          description: >-
+            The document already filed for this note, or null when none has been.
+            Non-null is what makes a second write-back a 409.
+
+    NoteEhrReferenceResponse:
+      type: object
+      description: The standard envelope, carrying a note's EHR linkage.
+      required: [data, error]
+      properties:
+        data:
+          $ref: '#/components/schemas/NoteEhrReferenceData'
+          nullable: true
+        error:
+          $ref: '#/components/schemas/Error'
+          nullable: true
+
+    RecordEhrReferenceRequest:
+      type: object
+      description: >-
+        Names the transition being recorded. The only way
+        `clinical_notes.ehr_document_ref_id` is ever set.
+      additionalProperties: false
+      required: [ehr_document_ref_id]
+      properties:
+        ehr_document_ref_id:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: The id of the `DocumentReference` the EHR created.
 
     NoteResponse:
       type: object

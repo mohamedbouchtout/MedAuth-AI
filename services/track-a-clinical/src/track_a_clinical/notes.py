@@ -5,6 +5,12 @@ it. The read and edit half is TASK-032's, driven by a provider's request. They
 share this module because they are the same row and the same invariant; they
 differ in who the actor is and what the audit trail records.
 
+TASK-053 adds a third writer with a third caller again — ``fhir-integration``,
+recording the ``DocumentReference`` id it created when filing the note to an
+EHR. It writes one column no other path may write, and it is the one write here
+whose guard has to survive a race, because losing that race would put a second
+copy of a note on a patient's chart.
+
 
 The write is idempotent because its caller is a Redis consumer and pub/sub
 delivery is not exactly-once. A redelivered ``session:ended`` signal, a consumer
@@ -217,5 +223,93 @@ async def apply_note_edits(
         note.id,
         encounter.id,
         content_changed,
+    )
+    return note
+
+
+async def record_ehr_document_ref(
+    session: AsyncSession,
+    *,
+    encounter: Encounter,
+    note: ClinicalNote,
+    ehr_document_ref_id: str,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> ClinicalNote | None:
+    """Record the ``DocumentReference`` a write-back created, once and only once.
+
+    **The guard is the ``WHERE`` clause, not a prior read.** A caller that checks
+    ``ehr_document_ref_id is None`` and then updates has a window between the two
+    in which a second caller does the same, and both file a document — which is a
+    duplicate entry on a patient's chart, the specific harm TASK-053 refuses. So
+    the update is conditional on the column still being NULL and its ``RETURNING``
+    decides: no id came back means somebody else got there first, and the caller
+    turns that into a 409. The same shape as :func:`store_note`'s conflict
+    handling one function up, for the same reason.
+
+    Returning None is therefore not a failure of this function; it is this
+    function working. The caller distinguishes it from success.
+
+    Args:
+        session: The session whose transaction the update and its audit join.
+        encounter: The note's encounter — its ``provider_id`` is the audit actor,
+            per the rule that an actor comes from the row rather than the caller.
+        note: The row to record against, already loaded.
+        ehr_document_ref_id: The id the EHR assigned the created document.
+        ip_address: Client IP, for the audit row.
+        user_agent: Client user agent, for the audit row.
+
+    Returns:
+        The updated note, or None when the note had already been filed.
+    """
+    # Read before the statement runs. ``session.rollback()`` below expires every
+    # instance in the session — unconditionally, unlike commit, which
+    # ``expire_on_commit=False`` opts out of — so touching ``note.id`` afterwards
+    # would lazy-load it, and lazy IO in an async session raises MissingGreenlet.
+    # That would turn the ordinary refusal this branch exists to report into a
+    # 500 from the route.
+    note_id = note.id
+
+    updated_id = await session.scalar(
+        sa.update(ClinicalNote)
+        .where(
+            ClinicalNote.id == note.id,
+            ClinicalNote.ehr_document_ref_id.is_(None),
+        )
+        .values(ehr_document_ref_id=ehr_document_ref_id)
+        .returning(ClinicalNote.id)
+    )
+
+    if updated_id is None:
+        # Roll back rather than commit: nothing was written, and an audit row
+        # claiming a note was filed to an EHR when this call filed nothing would
+        # be the same lie in the trail that a duplicate chart entry is on the
+        # chart. The row locks taken above are released with it.
+        await session.rollback()
+        logger.info(
+            "Note %s already carries an EHR document reference; this record was refused",
+            note_id,
+        )
+        return None
+
+    await audit.audit_note_access(
+        session,
+        action=AuditAction.WRITE_NOTE_TO_EHR,
+        note_id=note_id,
+        session_id=encounter.session_id,
+        provider_id=encounter.provider_id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    await session.commit()
+    # The update above was a Core statement, so the loaded object still carries
+    # the old NULL — and ``expire_on_commit=False`` means a commit will not
+    # reload it either (see ``db.get_sessionmaker``). Refresh explicitly, or the
+    # response would report the column as empty on the one call that filled it.
+    await session.refresh(note)
+    logger.info(
+        "Recorded EHR document reference for note %s on encounter %s",
+        note_id,
+        encounter.id,
     )
     return note
