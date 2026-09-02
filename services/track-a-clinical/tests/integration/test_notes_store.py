@@ -352,3 +352,32 @@ async def test_recording_audits_once_and_a_refusal_audits_not_at_all(
     assert (
         await audit_rows_for_action(sessions, encounter.session_id, AuditAction.WRITE_NOTE_TO_EHR)
     ) == 1
+
+
+async def test_a_duplicate_delivery_survives_an_encounter_loaded_in_the_same_session(
+    sessions: async_sessionmaker[AsyncSession], encounter: Encounter
+) -> None:
+    """The consumer's real shape: it loads the encounter through the session it writes on.
+
+    Every other test here passes the fixture's encounter, which was created in a
+    different session and is therefore detached — and a detached instance is not
+    expired by a rollback, so the duplicate path never touched an expired
+    attribute. The consumer does the opposite: ``load_encounter(session, ...)``
+    then ``store_note(session, ...)``. On a duplicate delivery the rollback
+    expires that instance, and reading it afterwards lazy-loads, which raises
+    MissingGreenlet in an async session.
+
+    The consumer catches every exception and logs "storing the note failed", so
+    the symptom of this was an ordinary redelivery reported as a failure.
+    """
+    async with sessions() as session:
+        loaded = await notes.load_encounter(session, encounter.session_id)
+        assert loaded is not None
+        await notes.store_note(session, encounter=loaded, note=FIRST)
+
+    async with sessions() as session:
+        loaded = await notes.load_encounter(session, encounter.session_id)
+        assert loaded is not None
+        assert await notes.store_note(session, encounter=loaded, note=SECOND) is None
+
+    assert len(await notes_for(sessions, encounter.id)) == 1
