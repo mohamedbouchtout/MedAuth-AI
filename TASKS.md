@@ -5084,7 +5084,7 @@ logic do not change.
       holds only for the v1 proof of concept, against synthetic patients, with
       no real patient, provider or payer submission.
 
-- [ ] **TASK-052c:** Implement `scripts/setup-dev.sh`
+- [x] **TASK-052c:** Implement `scripts/setup-dev.sh`
   - **Why it is its own task.** The stub reads `# Implemented in TASK-052`, and
     CLAUDE.md's tree said the same until it was corrected to this task, but
     installing dependencies has nothing to do with base FHIR resource fetching
@@ -5129,6 +5129,44 @@ logic do not change.
     is accumulation**: if enough manual-only developer scripts pile up that
     nobody can say which of them still run, that is the point at which a small
     task giving them a shared CI home earns its keep. Not now, with two.
+
+  - **Built.** `scripts/setup-dev.sh` runs `uv sync --all-packages` then
+    `npm install` from the repository root, behind preflight checks for `uv`,
+    `node` and `npm`.
+    - **The acceptance test passes and was run.** First invocation installed
+      (16.8s, updating moto, pydantic and ruff to the lockfile); second exited 0
+      in 3.1s with `uv` reporting "Checked 158 packages" and `npm` "up to date",
+      and `git status` showed no lockfile churn from either. The idempotency is
+      `uv sync`'s and `npm install`'s own no-op behaviour against an unchanged
+      lockfile, and the script's header says so explicitly, warning a later
+      editor off `--reinstall`, `npm ci` or an `rm -rf node_modules` — each of
+      which would turn the second run into a full reinstall and break exactly
+      the property this task asked for.
+    - **The Node check ended up asymmetric, which the task text did not
+      anticipate.** `engines.node` is enforced as a hard floor and stops the
+      run; a `.nvmrc` major mismatch only warns. The reason is that CLAUDE.md's
+      prerequisite line reads "node 24+" — a floor, not an exact pin — so
+      failing on a newer major would refuse to install for a developer whose
+      environment this repository's own documentation permits. It is not
+      hypothetical: the machine this was built on runs Node 26.5.0 against a
+      `.nvmrc` of `24`, so a hard failure would have made the script unusable
+      where it was written. `.nvmrc` stays authoritative in the sense that
+      matters — the warning names it as the version CI installs, so anyone
+      whose local build and CI disagree is told where to look.
+    - **Both failure paths were exercised**, not just reasoned about: a `PATH`
+      without `uv`, and a stub `node` reporting 24.14.0 against the 24.15 floor.
+      Each prints one sentence naming the file the constraint came from.
+    - **`version_ge` treats absent components as zero**, so a bare `24` is
+      correctly *not* `>= 24.15`. That case is the one a naive string or
+      float comparison gets wrong, and `.nvmrc` holds exactly that shape.
+    - **CLAUDE.md's script tree said "stub until TASK-052" for
+      `seed-synthea.sh` too**, which TASK-052 had already falsified. Both lines
+      were corrected in this change rather than left for whoever noticed next.
+    - **The closing message points at CLAUDE.md's "Start full local stack"
+      rather than naming the next command.** An earlier draft suggested
+      `docker compose up` and `seed-synthea.sh`, which implied a startup order
+      that contradicts the one CLAUDE.md documents. One statement of that order,
+      in the document that owns it.
 
 - [ ] **TASK-053:** SOAP note write-back (base.py)
   - Implement `write_clinical_note(encounter_id, note_text, icd10_codes)` in base.py
