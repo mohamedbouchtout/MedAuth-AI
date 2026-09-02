@@ -86,10 +86,19 @@ async def store_note(
     Returns:
         The new row's id, or None when the encounter already had a note.
     """
+    # Read before the statement runs, for the same reason
+    # :func:`record_ehr_document_ref` does it: the rollback below expires every
+    # instance in this session, and the consumer passes an encounter it loaded
+    # through this very session, so reading ``encounter.id`` afterwards would
+    # lazy-load and raise MissingGreenlet. The consumer catches everything and
+    # logs "storing the note failed", so the symptom was an ordinary redelivery
+    # reported as a failure — the one outcome this branch exists to avoid.
+    encounter_id = encounter.id
+
     statement = (
         pg_insert(ClinicalNote)
         .values(
-            encounter_id=encounter.id,
+            encounter_id=encounter_id,
             soap_subjective=note.sections.subjective,
             soap_objective=note.sections.objective,
             soap_assessment=note.sections.assessment,
@@ -111,7 +120,7 @@ async def store_note(
         await session.rollback()
         logger.info(
             "Encounter %s already has a note; this generation is a duplicate and was discarded",
-            encounter.id,
+            encounter_id,
         )
         return None
 
@@ -122,7 +131,7 @@ async def store_note(
         provider_id=encounter.provider_id,
     )
     await session.commit()
-    logger.info("Stored clinical note %s for encounter %s", note_id, encounter.id)
+    logger.info("Stored clinical note %s for encounter %s", note_id, encounter_id)
     return note_id
 
 
