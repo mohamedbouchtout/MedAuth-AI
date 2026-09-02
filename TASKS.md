@@ -5168,7 +5168,7 @@ logic do not change.
       that contradicts the one CLAUDE.md documents. One statement of that order,
       in the document that owns it.
 
-- [ ] **TASK-053:** SOAP note write-back (base.py)
+- [x] **TASK-053:** SOAP note write-back (base.py)
   - Services: `services/fhir-integration` **and** `services/track-a-clinical`.
     An earlier draft of this task listed one service and six lines; the eight
     decisions below were settled before any code was written, because most of
@@ -5344,6 +5344,71 @@ logic do not change.
     run, so a failure there should be read as an access question first. The HAPI
     test above is what closes this task; genuine Athenahealth validation is
     TASK-055.
+
+  - **Built** across `packages/hipaa-logger`, `services/track-a-clinical` and
+    `services/fhir-integration`. `POST /fhir/notes` files a session's note to
+    the chart as a `DocumentReference`, and the HAPI acceptance test passes
+    against the real server. Decisions worth knowing before touching this:
+    - **The acceptance test was run and passes.** Fifteen checks against the
+      `docker compose` HAPI server, three of them TASK-053's: the document is
+      filed and read back off the server — asserting what HAPI *stored* rather
+      than what was sent, so a resource it rejected or silently altered cannot
+      pass — a `comprehend-medical` code is absent from the server's own copy,
+      and an unreviewed note is stored `preliminary` while a reviewed one is
+      `final`.
+    - **The LOINC code in the task text was wrong, and checking it was cheap.**
+      `11488-4` is a consult note. The corrected `11506-3` and the required
+      `category` are both asserted, because both codes are in US Core's common
+      set and a server accepts either without complaint — the wrong one would
+      have shipped invisibly.
+    - **The two-service split held without relaxing either constraint.**
+      `fhir-integration` still opens no database connection, and
+      `PATCH /notes/{session_id}` still forbids `ehr_document_ref_id`. The
+      writer is `PATCH /notes/{session_id}/ehr-reference`, server-to-server,
+      alongside a `GET` on the same path that hands the write-back the two
+      identifiers it cannot know.
+    - **The write-once guard is the update's `WHERE` clause, not the route's
+      pre-check.** The 409 the route answers is the fast path; a check-then-write
+      leaves a window in which two callers both pass it, and what is on the other
+      side of that window is a second note on a patient's chart. The conditional
+      `UPDATE ... RETURNING` is asserted against a real database, against a
+      caller holding a row it loaded before the first write landed.
+    - **A refused record audits nothing.** An audit row claiming a note was filed
+      when this call filed nothing is the same lie in the trail that the
+      duplicate is on the chart.
+    - **A failure to record after a successful EHR write names the document and
+      says not to retry.** It is the one outcome where the chart already changed,
+      and reporting it as an ordinary 502 would invite the retry that files the
+      second copy. The disclosure is audited *before* the record is attempted,
+      so the trail exists in exactly the case someone later goes looking for.
+    - **`fhir-integration` gained a mirror of two payloads, and therefore a
+      contract test.** `tests/unit/test_note_contract.py` builds them from
+      `track-a-clinical`'s own response models rather than by hand, and
+      `detect-changed-members.sh` selects this service when that one's `src`
+      changes. Without the selection rule the test is decorative — the same
+      arrangement, and the same argument, as `packages/session-auth`'s issuer
+      contract test. `medauth-track-a-clinical` is a **dev** dependency only;
+      nothing in `src/` imports it, and nothing should.
+    - **The `source` filter is asserted at three levels**, deliberately rather
+      than redundantly: on the filter function, on the bytes the adapter puts on
+      the wire, and on the document HAPI stored. Testing only the function would
+      not catch a builder that stopped calling it, which is how this rule would
+      actually be lost.
+    - **The Athenahealth write test needs `ATHENA_TEST_ENCOUNTER_ID`, which is
+      unset.** It fails naming the variable rather than inventing an encounter
+      id — filing a note against a chart entry that does not exist is worse than
+      not running. The nightly job's token request now also asks for
+      `system/DocumentReference.write`, so a read-only registration fails at the
+      token endpoint rather than inside the write.
+    - **`_create` is the adapter's second HTTP call site, and it is a method of
+      its own rather than a generalised `_request`.** A create answers
+      differently from a read: the id arrives in a `Location` header, and
+      "accepted, but we cannot say what was created" is a real outcome. That one
+      is reported as malformed — never as success with an invented id, which
+      would be recorded against the note as though it named a real document.
+    - **A create timeout is genuinely ambiguous and is never auto-retried.** The
+      EHR may have filed the document. The route leaves the note unrecorded so a
+      person decides, rather than risking a second document.
 
 - [ ] **TASK-054:** Prior auth submission — base + Athena override
   - **This is the second outbound writer, and it inherits CLAUDE.md's "Writing
@@ -5553,7 +5618,16 @@ logic do not change.
     lists specifically must not be sent as `[]` when they were untouched.
   - "Mark reviewed" sends `reviewed_by_provider: true` explicitly; loading the
     screen does not set it.
-  - "Write to EHR" button calls fhir-integration's `POST /fhir/notes` (TASK-053)
+  - "Write to EHR" button calls fhir-integration's `POST /fhir/notes` (TASK-053).
+    The body is `{session_id}` and the launch goes in the `X-MedAuth-Launch-Id`
+    header — this screen holds both identifiers and must send each where that
+    route takes it. Do not send the note text: the server reads it back from
+    `track-a-clinical`, which is what keeps the `READ_NOTE` audit row on the only
+    path to a note's content. Handle **409** (already filed — show it as filed,
+    not as an error), **422** with `ENCOUNTER_NOT_LINKED_TO_EHR` (the visit was
+    started outside a SMART launch, so there is no chart entry), and
+    `EHR_NOTE_RECORD_FAILED`, which means the document *was* created and the
+    button must not be offered again.
   - Show ICD-10 and CPT codes extracted (from clinical_notes.icd10_codes /
     cpt_codes), editable as a tag-style list — allow add/remove, save via the
     same PATCH endpoint. Render `comprehend-medical` entries as machine
