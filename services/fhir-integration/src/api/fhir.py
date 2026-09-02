@@ -36,11 +36,12 @@ talking to.
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Annotated, Final
 
 import httpx
 from fastapi import APIRouter, Depends, Header, Path, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from redis.asyncio import Redis
 
 from api_envelope import ApiHTTPException, ApiResponse, error_responses
@@ -54,7 +55,12 @@ from src.adapters.errors import (
     FHIRResourceNotFound,
     FHIRUpstreamUnavailable,
 )
-from src.adapters.models import EncounterCoverageContext, PatientContext
+from src.adapters.models import (
+    ClinicalNoteContent,
+    EncounterCoverageContext,
+    NoteCode,
+    PatientContext,
+)
 from src.api.dependencies import (
     get_app_settings,
     get_http_client,
@@ -62,11 +68,14 @@ from src.api.dependencies import (
     require_credentials,
 )
 from src.audit import (
+    RESOURCE_TYPE_DOCUMENT_REFERENCE,
     RESOURCE_TYPE_ENCOUNTER,
     RESOURCE_TYPE_PATIENT,
     audit_ehr_read,
+    audit_ehr_write,
 )
 from src.config import Settings
+from src.notes_client import NoteNotFound, NotesClient, NoteServiceError
 from src.smart import store
 from src.smart.oauth import (
     TokenEndpointUnavailable,
@@ -90,6 +99,19 @@ ERROR_CODE_REFRESH_UNAVAILABLE: Final = "FHIR_TOKEN_REFRESH_UNAVAILABLE"
 ERROR_CODE_NOT_FOUND: Final = "FHIR_RESOURCE_NOT_FOUND"
 ERROR_CODE_UPSTREAM_UNAVAILABLE: Final = "FHIR_UPSTREAM_UNAVAILABLE"
 ERROR_CODE_MALFORMED: Final = "FHIR_MALFORMED_RESPONSE"
+
+#: TASK-053's own outcomes. They are separate from the ``FHIR_`` codes above
+#: because they are facts about *our* services and this repository's rules,
+#: not about an EHR: an operator reading one should not go looking at a
+#: vendor's server.
+ERROR_CODE_NOTE_NOT_FOUND: Final = "NOTE_NOT_FOUND"
+ERROR_CODE_NOTE_SERVICE_UNAVAILABLE: Final = "NOTE_SERVICE_UNAVAILABLE"
+ERROR_CODE_NOTE_ALREADY_WRITTEN: Final = "NOTE_ALREADY_WRITTEN_TO_EHR"
+ERROR_CODE_ENCOUNTER_NOT_LINKED: Final = "ENCOUNTER_NOT_LINKED_TO_EHR"
+#: The one outcome where the EHR *did* accept the document. Named distinctly
+#: so a client cannot treat it as an ordinary failure and retry into a second
+#: copy on the chart.
+ERROR_CODE_RECORD_FAILED: Final = "EHR_NOTE_RECORD_FAILED"
 
 
 class LaunchContextData(BaseModel):
@@ -640,3 +662,248 @@ async def read_launch_context(
             fhir_practitioner_ref=actor,
         )
     return ApiResponse[LaunchContextData](data=context)
+
+
+class WriteNoteRequest(BaseModel):
+    """Body of ``POST /fhir/notes``.
+
+    **One field, on purpose.** Everything else the write needs — the note's text,
+    its codes, the chart entry it belongs on and the patient it is about — is
+    read server-side from ``track-a-clinical``. A browser that posted the note
+    body would save a round trip and produce no ``READ_NOTE`` row anywhere, which
+    is the half that settles it. See CLAUDE.md, "Writing clinical data out to the
+    EHR".
+
+    ``session_id``, not ``launch_id`` and not ``ehr_encounter_id``: the launch is
+    already carried in the header where every route here takes it, and the chart
+    entry is a fact about the encounter that a client should not be asserting.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: uuid.UUID = Field(
+        description=(
+            "The encounter session whose note is being filed. Names one visit in "
+            "*our* namespace; the chart entry it corresponds to is resolved "
+            "server-side."
+        ),
+    )
+
+
+class WrittenNoteData(BaseModel):
+    """What a successful write-back reports.
+
+    The session is echoed so a caller with several in flight can match a response
+    to its request, and the document id is what the chart now holds.
+    """
+
+    session_id: uuid.UUID = Field(description="The session whose note was filed.")
+    ehr_document_ref_id: str = Field(
+        description="The id of the DocumentReference the EHR created.",
+    )
+
+
+async def get_notes_client(
+    http_client: Annotated[httpx.AsyncClient, Depends(get_http_client)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> NotesClient:
+    """Build the client this service reads notes through.
+
+    The HTTP client is the process-wide pooled one, exactly as it is for an
+    adapter and for the same reasons.
+    """
+    return NotesClient(
+        settings.track_a_clinical_url,
+        http_client,
+        settings.track_a_clinical_timeout_seconds,
+    )
+
+
+def _note_service_error(exc: NoteServiceError) -> ApiHTTPException:
+    """Map a failure of *our own* note service onto an envelope outcome.
+
+    Deliberately not folded into ``_as_api_error``. "The EHR could not be
+    reached" and "our note service could not be reached" are different facts
+    about different systems, and an operator reading a 502 has to be able to tell
+    which one to go and look at.
+    """
+    if isinstance(exc, NoteNotFound):
+        return ApiHTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code=ERROR_CODE_NOTE_NOT_FOUND,
+            message=(
+                "No such session, or no note has been generated for it yet. The "
+                "second is the ordinary state for a few seconds after a visit ends."
+            ),
+        )
+    return ApiHTTPException(
+        status_code=(
+            status.HTTP_504_GATEWAY_TIMEOUT if exc.timed_out else status.HTTP_502_BAD_GATEWAY
+        ),
+        code=ERROR_CODE_NOTE_SERVICE_UNAVAILABLE,
+        message=(
+            "The note service could not be reached. Nothing was written to the "
+            "EHR; this is transient and retrying is reasonable."
+        ),
+    )
+
+
+@router.post(
+    "/notes",
+    response_model=ApiResponse[WrittenNoteData],
+    status_code=status.HTTP_201_CREATED,
+    summary="File a session's SOAP note to the EHR",
+    response_description="The DocumentReference the EHR created for this note.",
+    responses=error_responses(
+        401,
+        404,
+        409,
+        422,
+        502,
+        504,
+        descriptions={
+            401: "This launch's EHR authorization is no longer valid; repeat the launch.",
+            404: (
+                "No such SMART launch, no such session, or no note has been "
+                "generated for that session yet."
+            ),
+            409: (
+                "This note has already been filed to the EHR "
+                "(`NOTE_ALREADY_WRITTEN_TO_EHR`). Refused before the EHR is "
+                "called: a second document would be a duplicate entry on a "
+                "patient's chart."
+            ),
+            422: (
+                "The body is invalid, or the encounter carries no EHR encounter "
+                "id (`ENCOUNTER_NOT_LINKED_TO_EHR`) — a visit started outside a "
+                "SMART launch has no chart entry to file against."
+            ),
+            502: (
+                "The EHR, its authorization server, or the note service was "
+                "unreachable or unusable. `EHR_NOTE_RECORD_FAILED` is the one "
+                "case where the document *was* created — see its message."
+            ),
+            504: "An upstream did not answer in time.",
+        },
+    ),
+)
+async def write_note_to_ehr(
+    body: WriteNoteRequest,
+    adapter: Annotated[EHRAdapter, Depends(get_ehr_adapter)],
+    actor: Annotated[str | None, Depends(get_audit_actor)],
+    notes: Annotated[NotesClient, Depends(get_notes_client)],
+) -> ApiResponse[WrittenNoteData]:
+    """File a generated SOAP note to the patient's chart as a ``DocumentReference``.
+
+    **The first write to an EHR in this repository.** The cross-cutting rules it
+    follows are in CLAUDE.md, "Writing clinical data out to the EHR"; what
+    matters at this route is the order and what each failure means.
+
+    The order is: refuse a repeat before anything happens, read the note, write
+    it to the EHR, audit, then record the document id locally. The external write
+    goes first deliberately. Both orders can fail in the middle, so the question
+    is only which wreckage is findable — an EHR document with nothing here
+    pointing at it can be found on the chart and reconciled, whereas a local row
+    claiming a document exists when the write never happened is a silent lie no
+    query can distinguish from success.
+
+    **A repeat write is refused, not deduplicated.** Two ``DocumentReference``
+    resources for one encounter is duplicate clinical documentation. The check
+    here is the fast path; the guarantee is the conditional update behind
+    ``PATCH /notes/{session_id}/ehr-reference``, which is what decides when two
+    requests race.
+
+    **Machine-suggested codes never reach the chart.** The filter is inside the
+    document builder rather than here, so a vendor subclass that reuses it
+    inherits the rule.
+
+    This is a PHI disclosure and writes one ``WRITE_NOTE_TO_EHR`` row, after the
+    EHR accepts the document and before the id is recorded — so the trail exists
+    even when the recording step is the thing that failed.
+    """
+    session_id = str(body.session_id)
+
+    try:
+        reference = await notes.get_ehr_reference(session_id)
+    except NoteServiceError as exc:
+        raise _note_service_error(exc) from exc
+
+    if reference.ehr_document_ref_id is not None:
+        raise ApiHTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            code=ERROR_CODE_NOTE_ALREADY_WRITTEN,
+            message=(
+                "This note has already been filed to the EHR. Filing it again "
+                "would put a second copy of one encounter's note on the chart."
+            ),
+        )
+
+    if reference.ehr_encounter_id is None:
+        raise ApiHTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code=ERROR_CODE_ENCOUNTER_NOT_LINKED,
+            message=(
+                "This encounter has no EHR encounter id, so there is no chart "
+                "entry to file the note against. It was started outside a SMART "
+                "launch."
+            ),
+        )
+
+    try:
+        note = await notes.get_note(session_id)
+    except NoteServiceError as exc:
+        raise _note_service_error(exc) from exc
+
+    content = ClinicalNoteContent(
+        patient_id=reference.patient_fhir_id,
+        encounter_id=reference.ehr_encounter_id,
+        subjective=note.soap_subjective,
+        objective=note.soap_objective,
+        assessment=note.soap_assessment,
+        plan=note.soap_plan,
+        # Unfiltered on purpose: the builder filters, so no call site can forget.
+        icd10_codes=[
+            NoteCode(code=code.code, display=code.display, source=code.source)
+            for code in note.icd10_codes or ()
+        ],
+        reviewed_by_provider=note.reviewed_by_provider,
+    )
+
+    try:
+        document_id = await adapter.write_clinical_note(content)
+    except Exception as exc:
+        raise _as_api_error(exc) from exc
+
+    await audit_ehr_write(
+        action=AuditAction.WRITE_NOTE_TO_EHR,
+        resource_type=RESOURCE_TYPE_DOCUMENT_REFERENCE,
+        resource_id=document_id,
+        session_id=session_id,
+        fhir_practitioner_ref=actor,
+    )
+
+    try:
+        await notes.record_ehr_document_ref(session_id, document_id)
+    except NoteServiceError as exc:
+        # The document exists on the chart. Reporting this as a plain failure
+        # would invite a retry that files a second one, so the id is named in the
+        # message and in the log: this needs reconciling, not repeating.
+        logger.error(
+            "Filed DocumentReference %s to the EHR but could not record it against "
+            "the note: %s. The document exists and needs reconciling by hand.",
+            document_id,
+            exc.detail,
+        )
+        raise ApiHTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            code=ERROR_CODE_RECORD_FAILED,
+            message=(
+                f"The note was filed to the EHR as DocumentReference/{document_id}, "
+                "but recording it here failed. The document exists — do not retry "
+                "this write, or a second copy will be filed."
+            ),
+        ) from exc
+
+    return ApiResponse[WrittenNoteData](
+        data=WrittenNoteData(session_id=body.session_id, ehr_document_ref_id=document_id)
+    )

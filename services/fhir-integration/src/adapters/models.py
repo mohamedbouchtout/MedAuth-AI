@@ -170,3 +170,68 @@ class PriorAuthSubmission(BaseModel):
 
     payer_reference_number: str | None = None
     submission_method: str
+
+
+class NoteCode(BaseModel):
+    """One extracted clinical code, as ``track-a-clinical`` stores and returns it.
+
+    A trimmed mirror of CLAUDE.md's "Extracted clinical codes" contract, holding
+    only what a chart write needs. ``source`` is required rather than optional
+    because it is the field that decides whether the code may be written at all —
+    an entry without one is malformed, not a code of unknown provenance to be
+    sent anyway. See :data:`~src.adapters.note_document.SENDABLE_CODE_SOURCES`.
+
+    Attributes:
+        code: The code itself, dotted as stored (``M17.11``, not ``M1711``).
+        display: The proposing source's own description, when it carried one.
+        source: ``llm-extraction``, ``comprehend-medical`` or
+            ``provider-accepted``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    code: str
+    display: str | None = None
+    source: str
+
+
+class ClinicalNoteContent(BaseModel):
+    """One note and the two identifiers that say which chart entry it belongs on.
+
+    What :meth:`~src.adapters.base.EHRAdapter.write_clinical_note` takes. It is
+    one argument rather than five so that a vendor subclass overriding the write
+    — Athenahealth is the likely first — changes one signature rather than
+    re-listing the parameters, the same reasoning that makes
+    ``get_patient_context()`` the override point rather than its primitives.
+
+    **The codes arrive unfiltered.** Filtering is the writer's obligation and it
+    happens inside the document builder, so a caller cannot forget it and a
+    subclass that reuses the builder inherits it. See CLAUDE.md, "Writing
+    clinical data out to the EHR".
+
+    Attributes:
+        patient_id: The patient as the EHR knows them — the document's subject.
+        encounter_id: The encounter as the EHR knows it. Not a ``session_id``,
+            which names the same visit in our namespace and would address
+            nothing on a chart.
+        subjective: The note's subjective section, when one was generated.
+        objective: The objective section.
+        assessment: The assessment section.
+        plan: The plan section.
+        icd10_codes: Every extracted diagnosis, whatever its source, or None
+            when the extraction pass never answered.
+        reviewed_by_provider: Whether a provider has attested to the note. It
+            decides the written document's ``docStatus`` and nothing else; no
+            write-back ever sets this flag.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    patient_id: str
+    encounter_id: str
+    subjective: str | None = None
+    objective: str | None = None
+    assessment: str | None = None
+    plan: str | None = None
+    icd10_codes: list[NoteCode] | None = None
+    reviewed_by_provider: bool = False

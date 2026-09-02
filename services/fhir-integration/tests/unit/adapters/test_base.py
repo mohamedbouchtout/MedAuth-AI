@@ -29,6 +29,8 @@ from src.adapters.modmed import ModMedAdapter
 
 PRIMITIVES = ("get_patient", "get_coverage", "get_conditions", "get_encounter")
 COMPOSED = ("get_patient_context",)
+#: Neither layer: a write and a submission. ``write_clinical_note`` is
+#: implemented (TASK-053); ``submit_prior_auth`` is still a stub (TASK-054).
 DEFERRED = ("write_clinical_note", "submit_prior_auth")
 
 TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.not-a-real-token"
@@ -63,11 +65,6 @@ def test_the_base_adapter_is_instantiable() -> None:
 def test_every_method_is_async(method_name: str) -> None:
     """Async-first: a route handler awaits these, and a sync one would block the loop."""
     assert inspect.iscoroutinefunction(getattr(EHRAdapter, method_name))
-
-
-async def test_the_note_write_back_is_a_stub() -> None:
-    with pytest.raises(NotImplementedError, match="TASK-053"):
-        await _adapter().write_clinical_note("encounter-1", "note text", ["M17.11"])
 
 
 async def test_the_prior_auth_submission_is_a_stub() -> None:

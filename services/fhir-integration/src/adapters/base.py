@@ -14,8 +14,10 @@ three fetches.
 TASK-052 implements the fetches. TASK-052b adds the ``Location`` and
 ``Organization`` primitives and ``get_encounter_coverage_context()``, which is
 the second composed method and the one that answers "which payer policy set,
-and where". TASK-053 still owns the note write-back and TASK-054 the prior
-authorization submission; those two remain stubs.
+and where". TASK-053 implements the note write-back, which is the first *write* to an EHR
+in this repository: see ``_create`` below, and ``note_document.py`` for what is
+composed and which codes are allowed to leave the system. TASK-054 still owns the
+prior authorization submission, which remains a stub.
 """
 
 from __future__ import annotations
@@ -36,12 +38,14 @@ from .errors import (
     FHIRUpstreamUnavailable,
 )
 from .models import (
+    ClinicalNoteContent,
     CoverageInfo,
     EncounterCoverageContext,
     PatientContext,
     PatientInfo,
     PriorAuthSubmission,
 )
+from .note_document import build_document_reference
 from .site_of_care import (
     location_state,
     log_state_disagreement,
@@ -196,6 +200,133 @@ class EHRAdapter:
 
         self._raise_if_not_found_outcome(body, resource_type, resource_id)
         return body
+
+    # -- The one place a resource is created on an EHR ------------------------
+
+    async def _create(
+        self, resource_type: str, resource: dict[str, Any], *, resource_id: str
+    ) -> str:
+        """POST one FHIR resource and return the id the EHR assigned it.
+
+        The counterpart to :meth:`_get`, and the second HTTP call site in this
+        class rather than a general-purpose one — a write earns its own method
+        because a create has answers a read does not: the id comes back in a
+        header, and "accepted but we cannot tell you what was created" is a real
+        outcome that must not be reported as success.
+
+        The four failures in ``errors.py`` mean the same things they do on a
+        read, with one addition worth stating: a 4xx that is not 401/403/404 is
+        **malformed**, not unavailable. The EHR refusing the resource we built is
+        our bug or a vendor quirk needing a subclass, and retrying an identical
+        request would only ask the same question again — or, worse, land a second
+        document if the first was in fact accepted.
+
+        Args:
+            resource_type: The type being created, e.g. ``DocumentReference``.
+            resource: The resource body, already dumped with FHIR's own element
+                names.
+            resource_id: What to name in an error. **Never the created id** —
+                there is none yet — so callers pass the thing the write was
+                about, such as the encounter.
+
+        Returns:
+            The id the EHR assigned the new resource.
+
+        Raises:
+            FHIRAuthorizationExpired: The EHR rejected the token (401/403).
+            FHIRResourceNotFound: The EHR answered 404 — the endpoint does not
+                accept this resource type.
+            FHIRUpstreamUnavailable: Transport failure or a 5xx.
+            FHIRMalformedResponse: The resource was refused, or accepted without
+                the EHR saying what it created.
+        """
+        try:
+            response = await self._http.post(
+                f"{self.fhir_base_url}/{resource_type}",
+                json=resource,
+                headers={
+                    "Authorization": f"Bearer {self._access_token}",
+                    "Accept": "application/fhir+json",
+                    "Content-Type": "application/fhir+json",
+                },
+                timeout=FHIR_TIMEOUT_SECONDS,
+            )
+        except httpx.TimeoutException as exc:
+            # A timeout on a create is genuinely ambiguous — the EHR may have
+            # filed the document anyway. It is reported as the transient failure
+            # it is, and the caller does not retry automatically: the route
+            # leaves the note unrecorded so a person decides, rather than risking
+            # a second document on a chart.
+            raise FHIRUpstreamUnavailable(
+                resource_type, resource_id, "the EHR did not answer in time", timed_out=True
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise FHIRUpstreamUnavailable(
+                resource_type, resource_id, "the EHR could not be reached"
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise FHIRAuthorizationExpired(
+                resource_type, resource_id, "the EHR rejected this launch's access token"
+            )
+        if response.status_code == 404:
+            raise FHIRResourceNotFound(
+                resource_type, resource_id, "the EHR does not accept this resource type"
+            )
+        if response.status_code >= 500:
+            raise FHIRUpstreamUnavailable(
+                resource_type, resource_id, f"the EHR answered {response.status_code}"
+            )
+        if response.status_code >= 400:
+            raise FHIRMalformedResponse(
+                resource_type, resource_id, f"the EHR refused the resource ({response.status_code})"
+            )
+
+        created_id = self._created_id(response, resource_type)
+        if created_id is None:
+            raise FHIRMalformedResponse(
+                resource_type,
+                resource_id,
+                "the EHR accepted the resource without saying what it created",
+            )
+        return created_id
+
+    @staticmethod
+    def _created_id(response: httpx.Response, resource_type: str) -> str | None:
+        """Read the new resource's id out of a create response.
+
+        Two shapes are accepted because both are conformant and vendors differ.
+        The ``Location`` header is the normal answer to a create and is checked
+        first — R4 gives it as ``[base]/[type]/[id]`` optionally followed by
+        ``/_history/[vid]``, so the id is the segment after the type. A server
+        configured to echo the resource answers with a body carrying ``id``
+        instead, which is checked second.
+
+        Neither is trusted to be well-formed: a header naming a different
+        resource type, or a body that is not JSON, yields ``None`` and the caller
+        reports a malformed response rather than inventing an id. An id we made
+        up would be written to ``clinical_notes`` as though it named a real
+        document.
+        """
+        location: str | None = response.headers.get("location") or response.headers.get(
+            "content-location"
+        )
+        if location:
+            segments = [segment for segment in location.split("/") if segment]
+            if resource_type in segments:
+                index = segments.index(resource_type)
+                if index + 1 < len(segments):
+                    return segments[index + 1]
+
+        try:
+            body = response.json()
+        except ValueError:
+            return None
+        if isinstance(body, dict) and body.get("resourceType") == resource_type:
+            created = body.get("id")
+            if isinstance(created, str) and created:
+                return created
+        return None
 
     @staticmethod
     def _raise_if_not_found_outcome(
@@ -647,21 +778,37 @@ class EHRAdapter:
 
     # -- Neither layer: a write and a submission ------------------------------
 
-    async def write_clinical_note(
-        self, encounter_id: str, note_text: str, icd10_codes: list[str]
-    ) -> str:
+    async def write_clinical_note(self, note: ClinicalNoteContent) -> str:
         """Write a SOAP note back to the EHR as a ``DocumentReference``.
 
+        The resource is composed by :func:`~src.adapters.note_document.build_document_reference`,
+        which is where the note type, the required US Core category, the
+        attestation status and — most importantly — the filter on which codes may
+        leave this system all live. A vendor subclass that needs to adjust the
+        write should call that builder and amend what it returns, exactly as
+        Cerner and Epic are expected to call ``super().get_patient_context()``:
+        rebuilding the resource by hand is how the filter gets lost.
+
         Args:
-            encounter_id: The encounter the note belongs to.
-            note_text: The generated SOAP note.
-            icd10_codes: The note's ICD-10-CM codes, dotted as stored.
+            note: The note, its two EHR identifiers, and whether a provider has
+                attested to it. Its codes arrive unfiltered.
 
         Returns:
-            The id of the created ``DocumentReference``, which TASK-053 stores
+            The id of the created ``DocumentReference``, which the route records
             on ``clinical_notes.ehr_document_ref_id``.
+
+        Raises:
+            FHIRAuthorizationExpired: The EHR rejected the token (401/403).
+            FHIRUpstreamUnavailable: Transport failure or a 5xx.
+            FHIRMalformedResponse: The EHR refused the resource, or accepted it
+                without saying what it created.
         """
-        raise NotImplementedError("write_clinical_note is implemented in TASK-053")
+        document = build_document_reference(note)
+        return await self._create(
+            "DocumentReference",
+            document.model_dump(by_alias=True, exclude_none=True),
+            resource_id=note.encounter_id,
+        )
 
     async def submit_prior_auth(self, bundle: Claim) -> PriorAuthSubmission:
         """Submit a prior authorization through FHIR Claim/$submit (Da Vinci PAS).
