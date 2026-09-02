@@ -68,6 +68,17 @@ class AuditAction(StrEnum):
     #: A SOAP note was generated and stored.
     WRITE_NOTE = "WRITE_NOTE"
 
+    #: A stored note was written out to an EHR as a ``DocumentReference``
+    #: (TASK-053). Deliberately distinct from WRITE_NOTE, which means the note
+    #: was generated and stored *here*: putting a note onto a patient's chart is
+    #: a different event with different consequences, and collapsing the two
+    #: would make "was this note ever sent to the EHR" unanswerable from the
+    #: audit trail. One write-back writes this action twice — once by
+    #: ``fhir-integration``, which sent the note, and once by
+    #: ``track-a-clinical``, whose row was mutated to carry the resulting
+    #: document id. Two services, two accesses, told apart by ``service_name``.
+    WRITE_NOTE_TO_EHR = "WRITE_NOTE_TO_EHR"
+
     #: A ``clinical_notes`` row was read.
     READ_NOTE = "READ_NOTE"
 
