@@ -668,6 +668,126 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse_NoneType_'
+  /fhir/notes:
+    post:
+      tags:
+      - fhir
+      summary: File a session's SOAP note to the EHR
+      description: 'File a generated SOAP note to the patient''s chart as a ``DocumentReference``.
+
+
+        **The first write to an EHR in this repository.** The cross-cutting rules it
+
+        follows are in CLAUDE.md, "Writing clinical data out to the EHR"; what
+
+        matters at this route is the order and what each failure means.
+
+
+        The order is: refuse a repeat before anything happens, read the note, write
+
+        it to the EHR, audit, then record the document id locally. The external write
+
+        goes first deliberately. Both orders can fail in the middle, so the question
+
+        is only which wreckage is findable — an EHR document with nothing here
+
+        pointing at it can be found on the chart and reconciled, whereas a local row
+
+        claiming a document exists when the write never happened is a silent lie no
+
+        query can distinguish from success.
+
+
+        **A repeat write is refused, not deduplicated.** Two ``DocumentReference``
+
+        resources for one encounter is duplicate clinical documentation. The check
+
+        here is the fast path; the guarantee is the conditional update behind
+
+        ``PATCH /notes/{session_id}/ehr-reference``, which is what decides when two
+
+        requests race.
+
+
+        **Machine-suggested codes never reach the chart.** The filter is inside the
+
+        document builder rather than here, so a vendor subclass that reuses it
+
+        inherits the rule.
+
+
+        This is a PHI disclosure and writes one ``WRITE_NOTE_TO_EHR`` row, after the
+
+        EHR accepts the document and before the id is recorded — so the trail exists
+
+        even when the recording step is the thing that failed.'
+      operationId: write_note_to_ehr_fhir_notes_post
+      parameters:
+      - name: X-MedAuth-Launch-Id
+        in: header
+        required: true
+        schema:
+          type: string
+          description: The launch_id returned by GET /fhir/callback. Names the SMART launch whose EHR access
+            token this read is made with. Not a session_id — the two are different identifiers with different
+            lifetimes.
+          title: X-Medauth-Launch-Id
+        description: The launch_id returned by GET /fhir/callback. Names the SMART launch whose EHR access
+          token this read is made with. Not a session_id — the two are different identifiers with different
+          lifetimes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WriteNoteRequest'
+      responses:
+        '201':
+          description: The DocumentReference the EHR created for this note.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_WrittenNoteData_'
+        '401':
+          description: This launch's EHR authorization is no longer valid; repeat the launch.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '404':
+          description: No such SMART launch, no such session, or no note has been generated for that session
+            yet.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '409':
+          description: 'This note has already been filed to the EHR (`NOTE_ALREADY_WRITTEN_TO_EHR`). Refused
+            before the EHR is called: a second document would be a duplicate entry on a patient''s chart.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '422':
+          description: The body is invalid, or the encounter carries no EHR encounter id (`ENCOUNTER_NOT_LINKED_TO_EHR`)
+            — a visit started outside a SMART launch has no chart entry to file against.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '502':
+          description: The EHR, its authorization server, or the note service was unreachable or unusable.
+            `EHR_NOTE_RECORD_FAILED` is the one case where the document *was* created — see its message.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '504':
+          description: An upstream did not answer in time.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
 components:
   schemas:
     Annotation:
@@ -1628,3 +1748,71 @@ components:
         \ Relative or absolute URL, e.g. ``Patient/1234``.\n    type: Resource type being\
         \ referred to, when ``reference`` is absent.\n    identifier: Business identifier\
         \ for the target, when it has no URL.\n    display: Human-readable label for the target."
+    ApiResponse_WrittenNoteData_:
+      properties:
+        data:
+          anyOf:
+          - $ref: '#/components/schemas/WrittenNoteData'
+          - type: 'null'
+        error:
+          anyOf:
+          - $ref: '#/components/schemas/ApiError'
+          - type: 'null'
+      type: object
+      title: ApiResponse[WrittenNoteData]
+    WriteNoteRequest:
+      properties:
+        session_id:
+          type: string
+          format: uuid
+          title: Session Id
+          description: The encounter session whose note is being filed. Names one visit in *our* namespace;
+            the chart entry it corresponds to is resolved server-side.
+      additionalProperties: false
+      type: object
+      required:
+      - session_id
+      title: WriteNoteRequest
+      description: 'Body of ``POST /fhir/notes``.
+
+
+        **One field, on purpose.** Everything else the write needs — the note''s text,
+
+        its codes, the chart entry it belongs on and the patient it is about — is
+
+        read server-side from ``track-a-clinical``. A browser that posted the note
+
+        body would save a round trip and produce no ``READ_NOTE`` row anywhere, which
+
+        is the half that settles it. See CLAUDE.md, "Writing clinical data out to the
+
+        EHR".
+
+
+        ``session_id``, not ``launch_id`` and not ``ehr_encounter_id``: the launch is
+
+        already carried in the header where every route here takes it, and the chart
+
+        entry is a fact about the encounter that a client should not be asserting.'
+    WrittenNoteData:
+      properties:
+        session_id:
+          type: string
+          format: uuid
+          title: Session Id
+          description: The session whose note was filed.
+        ehr_document_ref_id:
+          type: string
+          title: Ehr Document Ref Id
+          description: The id of the DocumentReference the EHR created.
+      type: object
+      required:
+      - session_id
+      - ehr_document_ref_id
+      title: WrittenNoteData
+      description: 'What a successful write-back reports.
+
+
+        The session is echoed so a caller with several in flight can match a response
+
+        to its request, and the document id is what the chart now holds.'

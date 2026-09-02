@@ -117,6 +117,23 @@ class Settings(BaseSettings):
     #: limit of proactive renewal rather than leaving it to be discovered.
     smart_token_refresh_skew_seconds: int = Field(default=120, ge=0)
 
+    #: Where ``track-a-clinical`` answers, for the note write-back (TASK-053).
+    #: ``POST /fhir/notes`` reads the note and its EHR linkage from there and
+    #: calls back to record the ``DocumentReference`` it filed.
+    #:
+    #: **Bound here rather than left in ``.env.example`` alone.** The variable
+    #: has existed since TASK-001 and nothing read it, which is a setting that
+    #: looks configured and is not — the same gap TASK-052b closed from the
+    #: other direction with ``FHIR_INTEGRATION_URL``. Empty means the write-back
+    #: is not configured, and the route says so plainly instead of failing
+    #: somewhere inside an HTTP call to an empty host.
+    track_a_clinical_url: str = ""
+
+    #: Timeout for those calls. Shorter than ``FHIR_TIMEOUT_SECONDS``: this is a
+    #: service on our own network rather than a vendor's FHIR server, and the
+    #: caller is a provider waiting on a button.
+    track_a_clinical_timeout_seconds: float = Field(default=5.0, gt=0)
+
     athena_client_id: str = ""
     athena_client_secret: SecretStr | None = None
     ecw_client_id: str = ""

@@ -14,6 +14,7 @@ not produce on demand, such as an ``OperationOutcome`` returned with a 200.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -201,6 +202,12 @@ class FakeFHIRServer:
         self.overrides: dict[str, httpx.Response | Exception] = {}
         self.authorization_headers: list[str | None] = []
         self.requested_paths: list[str] = []
+        #: Every resource POSTed to this server, so a test can assert on what was
+        #: written rather than only on what came back (TASK-053).
+        self.created: list[dict[str, Any]] = []
+        #: The id assigned to the next create, returned in a ``Location`` header
+        #: the way a real FHIR server answers one.
+        self.created_id = "docref-1"
 
     def fail(self, path_fragment: str, response: httpx.Response | Exception) -> None:
         """Make one resource type answer with a failure instead."""
@@ -217,6 +224,16 @@ class FakeFHIRServer:
                 if isinstance(outcome, Exception):
                     raise outcome
                 return outcome
+
+        if request.method == "POST":
+            self.created.append(json.loads(request.content))
+            # 201 with a Location and no body, which is what a conformant server
+            # answers a create with by default — ``Prefer: return=representation``
+            # is what asks for the resource back, and nothing here sends it.
+            return httpx.Response(
+                201,
+                headers={"Location": f"{FHIR_BASE_URL}{path}/{self.created_id}/_history/1"},
+            )
 
         if "/Patient/" in path:
             if self.patient is None:
