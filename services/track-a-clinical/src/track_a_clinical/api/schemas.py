@@ -8,7 +8,7 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from track_a_clinical.models import ClinicalNote, ExtractedCode, load_codes
+from track_a_clinical.models import ClinicalNote, Encounter, ExtractedCode, load_codes
 
 
 class StartSessionRequest(BaseModel):
@@ -177,3 +177,72 @@ class UpdateNoteRequest(BaseModel):
         how they are serialised for JSONB.
         """
         return {name: getattr(self, name) for name in self.model_fields_set}
+
+
+class NoteEhrReferenceData(BaseModel):
+    """The EHR linkage of one session's note — what a write-back needs and produces.
+
+    A sub-resource of the note rather than fields added to :class:`NoteData`,
+    because the two answer different questions for different callers.
+    :class:`NoteData` is what a provider's browser reads: clinical content and
+    review flags. This is the join between our record of a visit and the EHR's,
+    and its only consumer is ``fhir-integration``'s note write-back (TASK-053),
+    which needs the two identifiers below in order to address a chart at all.
+
+    Widening ``NoteData`` with them was the alternative. It was not taken because
+    it would put encounter identifiers into a note payload for every browser
+    read, to serve one server-to-server caller — and because the write-back
+    genuinely wants a *second* fact ``NoteData`` should never carry: whether this
+    note has already been filed, which is what makes a repeat write refusable.
+
+    Attributes:
+        session_id: The session this note belongs to, echoed so a caller holding
+            several in flight cannot mismatch a response to a request.
+        ehr_encounter_id: The encounter as the EHR knows it, from the
+            ``encounters`` row. **Null is an ordinary state**: a visit started
+            outside a SMART launch has no chart entry to file against, and the
+            write-back refuses rather than guessing one.
+        patient_fhir_id: The patient as the EHR knows them — the subject any
+            written ``DocumentReference`` is about.
+        ehr_document_ref_id: The document already filed for this note, or null
+            when none has been. Non-null is what makes a second write-back a 409.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: uuid.UUID
+    ehr_encounter_id: str | None
+    patient_fhir_id: str
+    ehr_document_ref_id: str | None
+
+    @classmethod
+    def from_rows(cls, *, encounter: Encounter, note: ClinicalNote) -> NoteEhrReferenceData:
+        """Render the linkage from the two rows that hold it."""
+        return cls(
+            session_id=encounter.session_id,
+            ehr_encounter_id=encounter.ehr_encounter_id,
+            patient_fhir_id=encounter.patient_fhir_id,
+            ehr_document_ref_id=note.ehr_document_ref_id,
+        )
+
+
+class RecordEhrReferenceRequest(BaseModel):
+    """Body of ``PATCH /notes/{session_id}/ehr-reference``.
+
+    **The transition is named explicitly rather than implied by an empty body.**
+    A state-changing PATCH says what it is recording, so a reader of the wire
+    format can tell what happened without knowing which route was called.
+
+    This is the one and only way ``clinical_notes.ehr_document_ref_id`` is ever
+    set. ``PATCH /notes/{session_id}`` still forbids the field, and that has not
+    been relaxed: a provider's browser must not be able to claim a note was filed
+    to a chart. This route is server-to-server, called by ``fhir-integration``
+    once it has actually created the document.
+
+    Attributes:
+        ehr_document_ref_id: The id of the ``DocumentReference`` the EHR created.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ehr_document_ref_id: str = Field(min_length=1, max_length=100)

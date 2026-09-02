@@ -18,11 +18,15 @@ def test_app_exposes_the_session_and_note_routes() -> None:
         "/sessions/{session_id}/end",
         "/sessions/{session_id}/token",
         "/notes/{session_id}",
+        "/notes/{session_id}/ehr-reference",
     }
     assert set(paths["/sessions/start"]) == {"post"}
     # Read and edit share one path, which is why this asserts on the methods:
     # a router registered with only one of them would still pass the set above.
     assert set(paths["/notes/{session_id}"]) == {"get", "patch"}
+    # Same again for the EHR-linkage sub-resource: a GET the write-back reads its
+    # identifiers from, and the PATCH that records what it filed (TASK-053).
+    assert set(paths["/notes/{session_id}/ehr-reference"]) == {"get", "patch"}
 
 
 def test_each_app_is_independent() -> None:
