@@ -43,8 +43,8 @@ medauth-ai/
 │   ├── terraform/        # AWS infrastructure as code
 │   └── kubernetes/       # K8s manifests + Helm chart
 ├── scripts/
-│   ├── seed-synthea.sh   # Load synthetic patients into local HAPI FHIR (stub until TASK-052)
-│   └── setup-dev.sh      # One-command dev environment setup (stub until TASK-052c)
+│   ├── seed-synthea.sh   # Load synthetic patients into local HAPI FHIR (TASK-052)
+│   └── setup-dev.sh      # One-command dev environment setup (TASK-052c)
 └── docker-compose.yml    # Full local stack — postgres, redis, qdrant, hapi-fhir, crd
 ```
 
