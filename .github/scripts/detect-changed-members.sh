@@ -109,6 +109,15 @@ main() {
       if changed_matches '^services/track-a-clinical/src/'; then
         selected+=("services/track-b-rag")
         selected+=("services/policy-scraper")
+        # fhir-integration declares it too, but for a different reason and only
+        # as a dev dependency: TASK-053's note write-back reads two of this
+        # service's payloads over HTTP and mirrors their shapes, and
+        # services/fhir-integration/tests/unit/test_note_contract.py proves the
+        # mirrors still match by building the payloads from the real response
+        # models. A field renamed here would otherwise leave the write-back
+        # reading a note it cannot parse, with a 502 from a service that is up
+        # as the only symptom.
+        selected+=("services/fhir-integration")
       fi
 
       # track-b-rag's end-to-end test (TASK-052b) hand-composes a

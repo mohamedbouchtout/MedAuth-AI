@@ -36,6 +36,7 @@ import pytest
 
 from src.adapters import EHRType, get_adapter
 from src.adapters.base import EHRAdapter
+from src.adapters.models import ClinicalNoteContent, NoteCode
 
 RUN_LIVE = os.environ.get("RUN_ATHENA_LIVE_TESTS") == "1"
 
@@ -48,6 +49,9 @@ TOKEN_URL = os.environ.get(
     "ATHENA_TOKEN_URL", "https://api.preview.platform.athenahealth.com/oauth2/v1/token"
 )
 TEST_PATIENT_ID = os.environ.get("ATHENA_TEST_PATIENT_ID", "")
+#: The encounter a written note is filed against (TASK-053). Separate from the
+#: patient because a DocumentReference names both, and neither may be invented.
+TEST_ENCOUNTER_ID = os.environ.get("ATHENA_TEST_ENCOUNTER_ID", "")
 
 pytestmark = [
     pytest.mark.integration,
@@ -89,7 +93,12 @@ def access_token() -> str:
         TOKEN_URL,
         data={
             "grant_type": "client_credentials",
-            "scope": "system/Patient.read system/Coverage.read system/Condition.read",
+            # DocumentReference.write is TASK-053's; a registration granted
+            # reads only fails here rather than inside the write test.
+            "scope": (
+                "system/Patient.read system/Coverage.read "
+                "system/Condition.read system/DocumentReference.write"
+            ),
         },
         auth=(CLIENT_ID, CLIENT_SECRET),
         timeout=30.0,
@@ -130,3 +139,44 @@ async def test_the_context_assembles_against_the_sandbox(adapter: EHRAdapter) ->
 
     assert context.patient.patient_id
     assert isinstance(context.conditions, list)
+
+
+async def test_a_note_writes_to_the_sandbox(adapter: EHRAdapter) -> None:
+    """TASK-053's write-back against a real vendor, and the one test here that writes.
+
+    **This cannot close TASK-053.** Nothing in this repository has yet produced a
+    passing run against Athenahealth — see the module docstring — so a failure
+    here should be read as an access question first. The HAPI check in
+    ``test_hapi_fhir.py`` is the acceptance gate; genuine Athenahealth validation
+    is TASK-055.
+
+    It needs an encounter as well as a patient, because a ``DocumentReference``
+    without a ``context.encounter`` would be filed against no visit. That is
+    configuration rather than something to invent: a fabricated encounter id
+    would file a note against a chart entry that does not exist, which is worse
+    than not running.
+
+    The scope is wider than the reads above — this asks for
+    ``system/DocumentReference.write`` — so a registration granted read access
+    only fails at the token endpoint rather than here.
+    """
+    if not TEST_ENCOUNTER_ID:
+        pytest.fail(
+            "ATHENA_TEST_ENCOUNTER_ID is not configured, so there is no chart "
+            "entry to file a note against. Same known blocker as the credentials "
+            "themselves — see the job comment in nightly-live-checks.yml."
+        )
+
+    note = ClinicalNoteContent(
+        patient_id=TEST_PATIENT_ID,
+        encounter_id=TEST_ENCOUNTER_ID,
+        subjective="Synthetic sandbox note written by MedAuth AI's TASK-053 check.",
+        assessment="No clinical content. This is an automated conformance check.",
+        icd10_codes=[
+            NoteCode(code="M17.11", display="Osteoarthritis, right knee", source="llm-extraction")
+        ],
+    )
+
+    document_id = await adapter.write_clinical_note(note)
+
+    assert document_id, "Athena accepted the document without naming what it created"

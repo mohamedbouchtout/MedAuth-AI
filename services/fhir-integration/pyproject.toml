@@ -20,6 +20,19 @@ dependencies = [
     "uvicorn[standard]>=0.52.4",
 ]
 
+[dependency-groups]
+dev = [
+    # Test-only, and only for tests/unit/test_note_contract.py: TASK-053's note
+    # write-back mirrors two of track-a-clinical's response payloads so it can
+    # read them over HTTP, and that file proves the mirrors match by building
+    # the payloads from that service's own models rather than by hand.
+    # Deliberately NOT a runtime dependency — nothing in src/ imports
+    # track_a_clinical, and nothing should: the two services are bound by a wire
+    # contract, and an import would make a deployment of one require a redeploy
+    # of the other. Same arrangement as packages/session-auth's issuer contract.
+    "medauth-track-a-clinical",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
