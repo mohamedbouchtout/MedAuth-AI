@@ -2650,6 +2650,20 @@ The insurance policy RAG is the technical core. Build and validate before other 
     consumer task is not running
   - Built (227 tests, 100% coverage; 608 in track-b-rag still pass unchanged).
     Decisions worth knowing before touching this:
+    - **A defect in the duplicate-delivery path was fixed later, during
+      TASK-053.** `store_note` logged `encounter.id` *after*
+      `session.rollback()`, and a rollback expires every instance in the session
+      — unconditionally, unlike a commit, which this service's
+      `expire_on_commit=False` opts out of. The consumer loads the encounter
+      through the same session it writes on, so the attribute lazy-loaded, lazy
+      IO raised `MissingGreenlet`, and the consumer's blanket handler logged
+      "storing the note failed". A redelivered `session:ended` signal — the
+      ordinary case this path exists to handle gracefully — therefore reported
+      itself as a failure. Every test here passed the fixture's detached
+      encounter, and a detached instance is not expired by a rollback, which is
+      why nothing caught it; the regression test loads it the way the consumer
+      does. **Read an id you will need after a rollback before the statement
+      runs**, wherever this shape recurs.
     - **`packages/bedrock-client` was extracted here**, because this service
       became the second Bedrock caller and the honest description of what it
       needed was track-b-rag's `bedrock.py`. Sharing without a package was not
