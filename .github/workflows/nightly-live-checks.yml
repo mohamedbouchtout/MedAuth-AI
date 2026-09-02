@@ -147,7 +147,7 @@ jobs:
         run: uv run pytest tests/integration/test_seed_policies.py -v -k Live --no-cov
 
   athenahealth-sandbox:
-    name: Athenahealth sandbox FHIR reads
+    name: Athenahealth sandbox FHIR reads and note write-back
     runs-on: ubuntu-latest
     env:
       # The gate the sandbox tests read. Off everywhere else, so pytest on a
@@ -157,6 +157,10 @@ jobs:
       ATHENA_CLIENT_SECRET: ${{ secrets.ATHENA_CLIENT_SECRET }}
       ATHENA_FHIR_BASE_URL: ${{ vars.ATHENA_FHIR_BASE_URL }}
       ATHENA_TEST_PATIENT_ID: ${{ vars.ATHENA_TEST_PATIENT_ID }}
+      # TASK-053 files a note against a real encounter. Unset until a sandbox
+      # encounter exists, and the write test fails naming it rather than
+      # inventing an encounter id and filing a note against nothing.
+      ATHENA_TEST_ENCOUNTER_ID: ${{ vars.ATHENA_TEST_ENCOUNTER_ID }}
 
     steps:
       - uses: actions/checkout@v7

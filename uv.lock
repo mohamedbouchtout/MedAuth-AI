@@ -1734,6 +1734,11 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "medauth-track-a-clinical" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
@@ -1749,6 +1754,9 @@ requires-dist = [
     { name = "redis", specifier = ">=8.1.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.4" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "medauth-track-a-clinical", editable = "services/track-a-clinical" }]
 
 [[package]]
 name = "medauth-fhir-types"

@@ -35,6 +35,7 @@ in CLAUDE.md.
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import uuid
@@ -44,6 +45,7 @@ import pytest
 
 from src.adapters.base import EHRAdapter
 from src.adapters.errors import FHIRResourceNotFound
+from src.adapters.models import ClinicalNoteContent, NoteCode
 from src.adapters.site_of_care import organization_state
 
 HAPI_BASE_URL = os.environ.get("HAPI_FHIR_BASE_URL", "http://localhost:8080/fhir")
@@ -368,3 +370,108 @@ async def test_a_billing_address_is_not_read_as_a_site_of_care(
     organization = await adapter.get_organization(seeded["organization_id"])
 
     assert organization_state(organization) == "MA"
+
+
+# -- TASK-053: the note write-back, against a real FHIR server ----------------
+#
+# This is TASK-053's acceptance gate. The unit tests assert the composition and
+# the failure mapping against fakes; only this one proves a real FHIR server
+# accepts the resource we build — which is the half a fake cannot answer, since
+# a fake accepts whatever it is sent.
+
+
+def write_back_note(**overrides: object) -> ClinicalNoteContent:
+    """A note as ``POST /fhir/notes`` would assemble it, with one code of each source."""
+    fields: dict[str, object] = {
+        "patient_id": "replaced-by-the-test",
+        "encounter_id": "replaced-by-the-test",
+        "subjective": "Right knee pain for three months, worse on stairs.",
+        "objective": "Tenderness over the medial joint line. No effusion.",
+        "assessment": "Likely primary osteoarthritis of the right knee.",
+        "plan": "Order MRI right knee. Six weeks of physical therapy.",
+        "icd10_codes": [
+            NoteCode(
+                code="M17.11",
+                display="Unilateral primary osteoarthritis, right knee",
+                source="llm-extraction",
+            ),
+            NoteCode(
+                code="E11.9",
+                display="Type 2 diabetes mellitus without complications",
+                source="comprehend-medical",
+            ),
+        ],
+        "reviewed_by_provider": False,
+    }
+    return ClinicalNoteContent(**(fields | overrides))  # type: ignore[arg-type]
+
+
+async def test_a_note_is_written_to_a_real_server_and_reads_back(
+    adapter: EHRAdapter, seeded: dict[str, str], hapi: str
+) -> None:
+    """The acceptance gate: file a note, then read the document back off the server.
+
+    Asserted on what the server stored rather than on what was sent, so a
+    resource HAPI silently rejected or altered cannot pass.
+    """
+    note = write_back_note(patient_id=seeded["patient_id"], encounter_id=seeded["encounter_id"])
+
+    document_id = await adapter.write_clinical_note(note)
+
+    async with httpx.AsyncClient(base_url=hapi, timeout=30.0) as client:
+        response = await client.get(f"/DocumentReference/{document_id}")
+        response.raise_for_status()
+        stored = response.json()
+
+    assert stored["resourceType"] == "DocumentReference"
+    assert stored["status"] == "current"
+    assert stored["subject"]["reference"] == f"Patient/{seeded['patient_id']}"
+    assert stored["context"]["encounter"][0]["reference"] == f"Encounter/{seeded['encounter_id']}"
+
+    coding = stored["type"]["coding"][0]
+    assert (coding["system"], coding["code"]) == ("http://loinc.org", "11506-3")
+    assert stored["category"][0]["coding"][0]["code"] == "clinical-note"
+
+    body = base64.b64decode(stored["content"][0]["attachment"]["data"]).decode("utf-8")
+    for section in ("Subjective", "Objective", "Assessment", "Plan"):
+        assert section in body
+    assert "worse on stairs" in body
+
+
+async def test_a_machine_suggestion_is_absent_from_the_stored_document(
+    adapter: EHRAdapter, seeded: dict[str, str], hapi: str
+) -> None:
+    """The filter, proved where it finally matters: the server's own copy.
+
+    A ``comprehend-medical`` code is one no provider stated. This asserts it is
+    not on the chart after a real round trip, not merely that a function
+    filtered it on the way past.
+    """
+    note = write_back_note(patient_id=seeded["patient_id"], encounter_id=seeded["encounter_id"])
+
+    document_id = await adapter.write_clinical_note(note)
+
+    async with httpx.AsyncClient(base_url=hapi, timeout=30.0) as client:
+        stored = (await client.get(f"/DocumentReference/{document_id}")).json()
+    body = base64.b64decode(stored["content"][0]["attachment"]["data"]).decode("utf-8")
+
+    assert "M17.11" in body
+    assert "E11.9" not in body
+    assert "diabetes" not in body.lower()
+
+
+async def test_an_unreviewed_note_is_stored_as_preliminary(
+    adapter: EHRAdapter, seeded: dict[str, str], hapi: str
+) -> None:
+    """And a reviewed one as final — the distinction a chart reader depends on."""
+    ids = {"patient_id": seeded["patient_id"], "encounter_id": seeded["encounter_id"]}
+
+    async with httpx.AsyncClient(base_url=hapi, timeout=30.0) as client:
+        for reviewed, expected in ((False, "preliminary"), (True, "final")):
+            document_id = await adapter.write_clinical_note(
+                write_back_note(reviewed_by_provider=reviewed, **ids)
+            )
+            stored = (await client.get(f"/DocumentReference/{document_id}")).json()
+
+            assert stored["docStatus"] == expected
+            assert "authenticator" not in stored
