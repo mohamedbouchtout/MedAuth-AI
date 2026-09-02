@@ -1998,7 +1998,14 @@ this list and the two later adapters depend on this exact shape.
 
 Also on base.py, and belonging to neither layer (they compose nothing and fetch
 nothing):
-- `write_clinical_note()` — DocumentReference write-back (TASK-053)
+- `write_clinical_note()` — DocumentReference write-back (TASK-053). Takes one
+  `ClinicalNoteContent` rather than a parameter list, so a vendor subclass
+  overriding the write changes one signature. **A subclass amends what
+  `note_document.build_document_reference()` returns rather than rebuilding the
+  resource**, for the same reason Cerner and Epic call `super()` on the composed
+  read: the builder is where the note type, the required US Core category and
+  the filter on which codes may leave this system live, and a hand-rolled
+  resource loses all three silently.
 - `submit_prior_auth()` — FHIR Claim/$submit, Da Vinci PAS (TASK-054)
 
 **Subclasses override the composed method, not the primitives, unless the
