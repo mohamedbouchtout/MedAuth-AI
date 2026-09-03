@@ -100,3 +100,55 @@ class TestLaunchScopes:
 
 def test_the_launch_ttl_default_matches_the_documented_ten_minutes() -> None:
     assert Settings().smart_launch_ttl_seconds == 600
+
+
+class TestCoverMyMedsIsBound:
+    """The variables are read, not merely present in ``.env.example`` (TASK-054).
+
+    Both have existed since TASK-001 with nothing reading them. That is the
+    failure this repository has now found three times — a setting that looks
+    configured and is not — so these assert the binding itself, which is the part
+    a later refactor can silently drop.
+    """
+
+    def test_the_base_url_is_read_from_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COVERMYMEDS_BASE_URL", "https://api.covermymeds.example")
+
+        assert Settings().covermymeds_base_url == "https://api.covermymeds.example"
+
+    def test_the_api_key_is_read_from_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COVERMYMEDS_API_KEY", "cmm-key-value")
+
+        api_key = Settings().covermymeds_api_key
+
+        assert api_key is not None
+        assert api_key.get_secret_value() == "cmm-key-value"
+
+    def test_unset_means_not_configured_rather_than_a_crash(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty base URL is how the override reports "no CoverMyMeds here".
+
+        The same arrangement as ``track_a_clinical_url``: better than failing
+        somewhere inside an HTTP call to an empty host.
+        """
+        monkeypatch.delenv("COVERMYMEDS_BASE_URL", raising=False)
+        monkeypatch.delenv("COVERMYMEDS_API_KEY", raising=False)
+
+        settings = Settings()
+
+        assert settings.covermymeds_base_url == ""
+        assert settings.covermymeds_api_key is None
+
+    def test_the_api_key_does_not_render(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """It is a credential, so it gets a client secret's treatment."""
+        monkeypatch.setenv("COVERMYMEDS_API_KEY", "cmm-key-value")
+
+        settings = Settings()
+
+        assert "cmm-key-value" not in repr(settings)
+        assert "cmm-key-value" not in str(settings)
