@@ -1,0 +1,90 @@
+"""``submission_method`` is a closed vocabulary, enforced on write (TASK-054).
+
+The column is ``VARCHAR(50)`` and constrains nothing on its own, so the guarantee
+that one method has one spelling lives in :class:`SubmissionMethod` and in the
+validator on the mapped class. Two services write this column and one of them
+gets its value over HTTP, where the type system has already stopped applying —
+which is the case these tests are about.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+import pytest
+
+from track_a_clinical.models import PriorAuthRequest, SubmissionMethod
+
+
+def make_request(**overrides: object) -> PriorAuthRequest:
+    """A row with only what the mapped class needs to be constructed."""
+    fields: dict[str, object] = {"encounter_id": uuid.uuid4()}
+    fields.update(overrides)
+    return PriorAuthRequest(**fields)
+
+
+def test_every_member_is_accepted() -> None:
+    """A member set on the column survives unchanged.
+
+    Guards the round trip the enum exists for: what goes into the column is the
+    member's own text, so nothing has to decode it on the way back out.
+    """
+    for method in SubmissionMethod:
+        request = make_request(submission_method=method)
+        assert request.submission_method == method.value
+        assert isinstance(request.submission_method, str)
+
+
+def test_the_plain_string_form_is_accepted() -> None:
+    """The value as it arrives over HTTP, or back out of the database.
+
+    ``fhir-integration`` records its submission through a route rather than a
+    shared object, so what reaches this column is a string that happens to spell
+    a member. Refusing it would make the enum unusable at the only boundary that
+    matters.
+    """
+    request = make_request(submission_method="fhir-pas")
+    assert request.submission_method == SubmissionMethod.FHIR_PAS
+
+
+def test_null_means_not_yet_submitted() -> None:
+    """NULL is a real state — a bundle assembled by TASK-060 and not yet sent."""
+    assert make_request(submission_method=None).submission_method is None
+    assert make_request().submission_method is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "FHIR_PAS",  # the member's Python name, not its value
+        "fhir_pas",  # underscore where the vocabulary has a hyphen
+        "FHIR-PAS",  # right spelling, wrong case
+        "CoverMyMeds",  # the vendor's own capitalisation
+        "carrier-pigeon",  # a method that does not exist
+        "",  # the empty string, which a form post makes easy to send
+    ],
+)
+def test_a_value_outside_the_vocabulary_is_refused(value: str) -> None:
+    """Every near-miss raises rather than being stored or coerced.
+
+    The first four are the failure this vocabulary exists to prevent: two
+    spellings of one method, sitting in one column, matching neither each other
+    nor anything a query asks for. Coercing them would hide exactly that.
+    """
+    with pytest.raises(ValueError, match="submission_method must be one of"):
+        make_request(submission_method=value)
+
+
+def test_the_refusal_names_what_is_permitted() -> None:
+    """A rejected write says what would have been accepted.
+
+    The reader of this error is someone wiring up TASK-061's router, and a bare
+    "invalid value" would send them to the source to find out what is allowed.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        make_request(submission_method="carrier-pigeon")
+
+    message = str(excinfo.value)
+    assert "carrier-pigeon" in message
+    for method in SubmissionMethod:
+        assert method.value in message
