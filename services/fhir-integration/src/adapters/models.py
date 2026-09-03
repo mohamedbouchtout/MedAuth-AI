@@ -11,11 +11,13 @@ service reading any of it records the access through hipaa-logger's
 ``audit_log()``.
 
 The fields are the ones TASK-050 needs in order to type the stubs, drawn from
-what TASK-052 and TASK-054 say they return. TASK-052 fills them in and may add
-to them; nothing here is populated yet.
+what TASK-052 and TASK-054 say they return. A later task fills them in and may
+add to them — TASK-052 did exactly that, and TASK-054's builder is expected to.
 """
 
 from __future__ import annotations
+
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
@@ -151,25 +153,89 @@ class EncounterCoverageContext(BaseModel):
     requires_manual_confirmation: bool = False
 
 
+class SubmissionMethod(StrEnum):
+    """Which path a prior authorization went out by.
+
+    **A mirror of ``track_a_clinical.models.SubmissionMethod``, which owns it.**
+    That service owns the ``prior_auth_requests`` table this value is stored in,
+    and this service holds ``medauth-track-a-clinical`` as a *dev* dependency
+    only — nothing in ``src/`` imports it, and nothing should, for the reason
+    ``tests/unit/test_note_contract.py`` gives about the two payload mirrors: a
+    wire contract binds two services, and importing across the boundary would
+    make a deployment of one require a redeploy of the other. The mirror is the
+    deliberate choice and ``tests/unit/test_prior_auth_contract.py`` is the price
+    of it — the two definitions are proven equal rather than assumed so.
+    """
+
+    #: Da Vinci PAS — ``POST [base]/Claim/$submit``. The base adapter's path.
+    FHIR_PAS = "fhir-pas"
+
+    #: CoverMyMeds, for an EHR or payer with no FHIR PAS support.
+    COVERMYMEDS = "covermymeds"
+
+    #: Fax. Routed by TASK-061 in ``prior-auth``, never by this service.
+    FAX = "fax"
+
+
+class SubmissionOutcome(StrEnum):
+    """What the payer said, normalized across both submission paths.
+
+    **Not a FHIR code, despite sharing PAS's spellings.** The members are taken
+    from ``ClaimResponse.outcome``'s required binding in the PAS IG, because that
+    is a real four-way distinction someone already thought through rather than
+    one invented here. But CoverMyMeds is not FHIR and answers in its own terms,
+    so this is a normalized shape the two paths both map onto — the same
+    relationship :class:`CoverageInfo` has to a FHIR ``Coverage``. TASK-004b's
+    ``ClaimResponseOutcome`` literal is what the PAS *parser* reads before
+    mapping onto this.
+
+    **The CoverMyMeds side of that mapping is unverified** — see
+    ``adapters/athena.py``. The PAS side is read straight off the IG.
+
+    Carrying this at all is the point. A submission is not a decision, and a
+    result carrying only a reference number would let a caller record
+    ``status='submitted'`` for a request the payer rejected outright or has not
+    looked at — the same failure as reading a payer's silence as "no
+    authorization required", one layer down.
+    """
+
+    #: The payer adjudicated the request. Says nothing about *which way* — an
+    #: approval and a denial are both complete, and the denial detail is on the
+    #: response, not here.
+    COMPLETE = "complete"
+
+    #: The payer accepted the request and has not decided. Ordinary and
+    #: conformant, not an error, and the state in which ``preAuthRef`` is most
+    #: often absent.
+    QUEUED = "queued"
+
+    #: Some items were adjudicated and others were not.
+    PARTIAL = "partial"
+
+    #: The payer refused to process the request — malformed, or missing
+    #: something it required. Nothing was authorized and nothing is pending.
+    ERROR = "error"
+
+
 class PriorAuthSubmission(BaseModel):
     """What came back from submitting a prior authorization, whichever path took it.
 
-    Athenahealth does not support FHIR PAS and submits through CoverMyMeds
-    instead (TASK-054), so the two things worth recording are the payer's own
-    reference and which path was used.
-
     Attributes:
-        payer_reference_number: The payer's reference for the submission, when
-            it returned one.
-        submission_method: Which path submitted it. TASK-054 fixes the
-            vocabulary when it implements the second path; it is a plain string
-            until there is more than one value for it to be wrong about.
+        outcome: What the payer said. Required, because every path has an answer
+            and dropping it would let a caller record a rejection as a
+            submission.
+        payer_reference_number: The payer's reference for the submission, when it
+            returned one — ``ClaimResponse.preAuthRef``, which is 0..1 at the
+            root and "only present on preauthorization adjudications". Its
+            absence on a queued answer is normal and is not a failure.
+        submission_method: Which path submitted it.
     """
 
     model_config = ConfigDict(frozen=True)
 
+    outcome: SubmissionOutcome
     payer_reference_number: str | None = None
-    submission_method: str
+    submission_method: SubmissionMethod
 
 
 class NoteCode(BaseModel):
@@ -235,3 +301,116 @@ class ClinicalNoteContent(BaseModel):
     plan: str | None = None
     icd10_codes: list[NoteCode] | None = None
     reviewed_by_provider: bool = False
+
+
+class PriorAuthProcedure(BaseModel):
+    """One procedure a prior authorization is being requested for.
+
+    Taken from ``prior_auth_requests.procedures``, which TASK-060 fills from the
+    nudges fired during the encounter — so ``description`` is the procedure as
+    the clinician said it, and ``cpt_code`` is what it resolved to.
+
+    Attributes:
+        cpt_code: The five-character CPT code, uppercased and stripped as the
+            code contract requires.
+        description: The procedure in the clinician's own words, when one was
+            recorded. Not a canonical descriptor.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    cpt_code: str
+    description: str | None = None
+
+
+class PriorAuthEvidence(BaseModel):
+    """One excerpt of clinical documentation supporting the request.
+
+    Becomes a ``Claim.supportingInfo`` entry, which is where a payer's criteria
+    are actually evaluated — "a missing one is the usual cause of a denial", per
+    ``fhir_types.claim``.
+
+    **These are transcript excerpts and they are PHI.** They are excerpts rather
+    than the whole transcript by a HIPAA minimum-necessary decision made in
+    TASK-060, not to keep the payload small; nothing downstream may widen them
+    back out.
+
+    Attributes:
+        text: The excerpt itself.
+        criterion: The payer criterion this excerpt is offered against, when the
+            gap analysis tied it to one.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    text: str
+    criterion: str | None = None
+
+
+class PriorAuthContent(BaseModel):
+    """One prior authorization request, in this system's own terms.
+
+    What :meth:`~src.adapters.base.submit_prior_auth` takes. **Not a FHIR
+    resource, and deliberately so** — this is the same decision TASK-053 made for
+    :class:`ClinicalNoteContent`, and TASK-054 records why it applies here too:
+    the caller has never held a ``Claim`` (``prior_auth_requests`` stores
+    procedures, diagnoses and evidence as JSONB), and the CoverMyMeds override
+    needs these fields rather than a PAS ``Bundle`` it would have to take apart
+    again. The FHIR composition happens inside the base adapter's builder, which
+    is what keeps the profile's required elements and the ``source`` filter
+    somewhere a call site cannot skip and a subclass inherits by reuse.
+
+    **The codes arrive unfiltered**, exactly as they do on
+    :class:`ClinicalNoteContent`: filtering is the writer's obligation and it
+    happens in the builder. See CLAUDE.md, "Writing clinical data out to the
+    EHR" — a ``comprehend-medical`` code is a machine's suggestion, and a bundle
+    asserts to a payer what the provider documented.
+
+    **The fields are what ``prior_auth_requests`` holds plus the two EHR
+    identifiers**, which is what can be grounded today. TASK-054's builder is
+    expected to extend this — the module docstring above says as much, and
+    TASK-052 already did it once. One gap is known and named rather than guessed
+    at: the PAS request profile requires ``Claim.insurance``, which references a
+    ``Coverage`` **resource**, and nothing in this repository carries a coverage
+    resource id — :class:`CoverageInfo` flattens a payer name, plan type and
+    member id out of one and discards its identity. Closing that is TASK-054's,
+    and it must not be closed by inventing a reference.
+
+    Attributes:
+        request_id: The ``prior_auth_requests`` row this came from. Carried so
+            the result can be recorded against it without the route holding a
+            second copy of the identifier.
+        patient_id: The patient as the EHR knows them — the Claim's subject.
+        encounter_id: The encounter as the EHR knows it. Not a ``session_id``,
+            which names the same visit in our namespace and would address
+            nothing a payer or a chart can resolve.
+        provider_reference: The requesting provider, as the EHR asserted them at
+            launch — the same verified ``Practitioner`` reference that goes in
+            ``audit_log.fhir_practitioner_ref``. Never ``encounters.provider_id``,
+            which is a UUID this system minted and which identifies nobody to a
+            payer. None when the launch never yielded a verified one, which the
+            builder has to answer for rather than fabricate.
+        payer_name: The payer's own display name, as the coverage spelled it.
+            Never a ``payer_vocab`` slug: a slug is for matching our own indexed
+            policies, and this value is going to the payer.
+        coverage: The payer half of the patient's context, for the member id a
+            payer matches the request on.
+        procedures: What is being requested. Empty is not a valid request.
+        icd10_codes: The diagnoses justifying it, whatever their source, or None
+            when the extraction pass never answered. ``None`` and ``[]`` mean
+            different things here exactly as they do on the note.
+        clinical_evidence: The documentation offered against the payer's
+            criteria.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    request_id: str
+    patient_id: str
+    encounter_id: str
+    provider_reference: str | None = None
+    payer_name: str | None = None
+    coverage: CoverageInfo | None = None
+    procedures: list[PriorAuthProcedure] = []
+    icd10_codes: list[NoteCode] | None = None
+    clinical_evidence: list[PriorAuthEvidence] = []

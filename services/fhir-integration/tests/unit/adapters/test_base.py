@@ -25,6 +25,7 @@ from src.adapters.base import EHRAdapter
 from src.adapters.cerner import CernerAdapter
 from src.adapters.ecw import ECWAdapter
 from src.adapters.epic import EpicAdapter
+from src.adapters.models import PriorAuthContent
 from src.adapters.modmed import ModMedAdapter
 
 PRIMITIVES = ("get_patient", "get_coverage", "get_conditions", "get_encounter")
@@ -68,8 +69,21 @@ def test_every_method_is_async(method_name: str) -> None:
 
 
 async def test_the_prior_auth_submission_is_a_stub() -> None:
+    """Still a stub, and now with the signature the PAS IG actually specifies.
+
+    The parameter is ``content``, not ``bundle``, and it is normalized content
+    rather than a FHIR ``Claim``. Both halves of that were corrected against
+    ``OperationDefinition/Claim-submit`` — see the method's own docstring. This
+    test is updated with the signature deliberately rather than being left to
+    pass by accident on a keyword nothing checks.
+    """
+    content = PriorAuthContent(
+        request_id="request-1",
+        patient_id="patient-7",
+        encounter_id="encounter-4",
+    )
     with pytest.raises(NotImplementedError, match="TASK-054"):
-        await _adapter().submit_prior_auth(bundle=None)  # type: ignore[arg-type]
+        await _adapter().submit_prior_auth(content)
 
 
 @pytest.mark.parametrize("adapter_class", VENDOR_ADAPTERS)
