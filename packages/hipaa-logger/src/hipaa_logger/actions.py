@@ -104,7 +104,16 @@ class AuditAction(StrEnum):
     #: A prior-auth bundle was assembled and stored. Not written yet (TASK-060).
     WRITE_PRIOR_AUTH = "WRITE_PRIOR_AUTH"
 
-    #: A bundle was transmitted to a payer. Not written yet (TASK-061).
+    #: A ``prior_auth_requests`` row was read — its procedures, diagnoses and
+    #: clinical evidence, which are transcript excerpts and are PHI. Written by
+    #: ``track-a-clinical`` when ``fhir-integration`` reads a row in order to
+    #: submit it (TASK-054).
+    READ_PRIOR_AUTH = "READ_PRIOR_AUTH"
+
+    #: A request was transmitted to a payer. Written by ``fhir-integration``,
+    #: which sends it, and by ``track-a-clinical``, which records what came back
+    #: on the row it owns — one outbound write, one row per service that acted,
+    #: told apart by ``service_name`` (TASK-054).
     SUBMIT_PRIOR_AUTH = "SUBMIT_PRIOR_AUTH"
 
     #: Patient context was read from an EHR. Not written yet (Phase 5).
