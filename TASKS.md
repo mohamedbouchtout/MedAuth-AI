@@ -127,11 +127,11 @@ Claude Code should read this before starting any task to understand current stat
       this package on purpose — the matrix keeps packages under uniform rules, the
       dedicated job stays meaningful on its own.
 
-- [ ] **TASK-004b:** `Bundle` and `ClaimResponse` in `packages/fhir-types`
-  - Prerequisite for **TASK-054**, and blocking it. Split out of that task rather
-    than done inside it because this is TASK-004-shaped work in two languages,
-    and improvising FHIR models inline in a service is exactly what having this
-    package prevents.
+- [x] **TASK-004b:** `Bundle` and `ClaimResponse` in `packages/fhir-types`
+  - Prerequisite for **TASK-054**, which it blocked until this landed. Split out
+    of that task rather than done inside it because this is TASK-004-shaped work
+    in two languages, and improvising FHIR models inline in a service is exactly
+    what having this package prevents.
   - **Why they are needed, specifically.** Da Vinci PAS's `Claim/$submit` takes a
     `Bundle` on `profile-pas-request-bundle` (a Claim plus every resource it
     references) and returns a `Bundle` on `profile-pas-response-bundle` (a
@@ -169,13 +169,51 @@ Claude Code should read this before starting any task to understand current stat
     prohibits them, for the same reason `extra="allow"` exists here: this package
     models R4, and a profile's constraints are the caller's business. TASK-054's
     builder is what satisfies the profile.
-  - CLAUDE.md's "FHIR resources used" line names seven resources. Add these two
+  - CLAUDE.md's "FHIR resources used" line named seven resources; both were added
     there in the same change — the list is what a reader checks before assuming a
-    resource is unmodelled.
+    resource is unmodelled. It also now says why `Location` and `Organization` are
+    modelled without being on it.
   - **Test:** round-trip a PAS request bundle and a PAS response bundle through
     the models with `by_alias=True, exclude_none=True` and assert nothing is lost
   - **Test:** the parity suite passes with no changes to its own assertions —
     if it needed loosening, the mirror is wrong rather than the test
+  - Built (133 tests, 100% coverage). Decisions worth knowing before touching this:
+    - **The fallback is an explicit `UnknownResource`, not a permissive validator.**
+      `Bundle.entry.resource` and `BundleEntryResponse.outcome` are
+      `AnyResourceOrUnknown`, a callable-discriminator union that routes on the
+      declared `resourceType`: a value in `AnyResource` narrows as before, anything
+      else becomes an `UnknownResource`. Routing on the declared type rather than on
+      what happens to validate is what keeps a *malformed* modelled resource an
+      error — a `Claim` missing its required `status` raises rather than being
+      quietly accepted as a shape this package never understood. A payload with no
+      `resourceType` at all raises either way.
+    - **`UnknownResource` declares no elements.** Everything arrives through
+      `extra="allow"` and dumps back unchanged, which is the honest representation
+      of a shape this package does not know; read the type off the `resource_type`
+      property and anything else through `model_extra`. Having no fields is also
+      what keeps it out of the parity suite — there are no elements to mirror — so
+      `typescript/src/bundle.ts` carries the equivalent open type by hand rather
+      than as a generated-looking interface.
+    - **`_MODELLED_RESOURCE_TYPES` is derived from `AnyResource`, not written out.**
+      A resource added to the union cannot be left out of the narrowing and start
+      silently parsing as unknown.
+    - The parity suite needed no loosening. The one edit inside it is the hardcoded
+      resource inventory in `test_resource_type_is_a_property_on_every_resource`,
+      which its own docstring asks for as a deliberate edit; `UnknownResource` is
+      deliberately absent from that list, being the fallback rather than a resource.
+    - **`Bundle.model_json_schema()` emits a `PydanticJsonSchemaWarning` naming a
+      skipped discriminator.** That is JSON Schema being unable to describe a
+      *recursive* tagged union — a bundle entry can hold a bundle — and not the
+      discriminator being skipped at validation time. Do not "fix" it by dropping
+      the discriminator; the round-trip tests assert the narrowing directly.
+    - Five closed value sets came with them: `BundleType`, `SearchEntryMode`,
+      `HTTPVerb`, `RemittanceOutcome` and `NoteType`. `RemittanceOutcome` says
+      whether the payer *processed* the request, never whether it approved it — a
+      denied authorization that was fully considered is `complete`, and the decision
+      itself is in `item.adjudication`.
+    - `ClaimResponse` models the authorization half only. `payment`, `addItem`,
+      `fundsReserve`, `form` and the `detail`/`subDetail` levels under an item are
+      billing concerns and are left to `extra="allow"`.
 
 
 - [x] **TASK-005:** Initialize database schema + migrations
