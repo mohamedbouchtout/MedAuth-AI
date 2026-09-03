@@ -497,8 +497,310 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /prior-auth/{request_id}:
+    get:
+      tags: [prior-auth]
+      operationId: readPriorAuthRequest
+      summary: Read a prior-authorization request for submission
+      description: >-
+        Returns what a payer submission is built from — the procedures being
+        requested, the diagnoses justifying them, the clinical evidence offered
+        against the payer's criteria, the payer's own name and the member id, and
+        the two EHR identifiers that say who and which visit — plus whether this
+        request has already been submitted.
+
+
+        **Server-to-server.** Its caller is `fhir-integration`'s prior-auth
+        submission (TASK-054), which holds the EHR credential and the adapter
+        that speaks Da Vinci PAS but does not open this service's database. The
+        read happening over HTTP is what produces the `READ_PRIOR_AUTH` audit
+        row; a direct connection from that service would produce none.
+
+
+        **Keyed on the request's own primary key** rather than on a session: one
+        encounter can carry several prior-authorization requests, so a
+        `session_id` would not name one.
+
+
+        A null `ehr_encounter_id` is an ordinary answer rather than an error: the
+        visit was started outside a SMART launch. The caller decides what to do
+        about it.
+
+
+        Unauthenticated in v1, as the note routes are. It returns transcript
+        excerpts and a patient identifier, so it is PHI and is recorded as
+        `READ_PRIOR_AUTH` against the request.
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          description: The prior-authorization request being read.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: What a payer submission is built from, and whether one has happened.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriorAuthRequestResponse'
+        '404':
+          description: >-
+            No such prior-authorization request, or its encounter has been
+            soft-deleted (`prior_auth_request_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: The path parameter is not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /prior-auth/{request_id}/submission:
+    patch:
+      tags: [prior-auth]
+      operationId: recordPriorAuthSubmission
+      summary: Record a submission and what the payer said
+      description: >-
+        Records that this request was transmitted to a payer and what came back.
+        The only writer of `submission_method`, `payer_outcome` and
+        `payer_reference_number`. Called by `fhir-integration` once a payer has
+        actually answered, which is what makes the values trustworthy.
+
+
+        **The payer's answer is recorded even when it is a refusal.** An `error`
+        outcome leaves `status` at `error` rather than `submitted`: nothing is
+        pending with the payer, and recording it as submitted would leave someone
+        waiting for a decision on a request that was never taken in. A `queued`
+        answer usually carries no `payer_reference_number` at all — that field is
+        0..1 in the PAS response and its absence is not a failure.
+
+
+        **Write-once.** A request already submitted answers 409 rather than
+        recording a second: a payer that receives one request twice may open two
+        reviews, and only one reference number can be kept here. The guard is the
+        update's own `WHERE` clause rather than a read before it, so two
+        concurrent submissions cannot both be recorded.
+
+
+        The body names the transition explicitly rather than relying on an empty
+        PATCH. Unauthenticated in v1; the actor is the provider on the
+        `encounters` row, never the calling service. Recorded as
+        `SUBMIT_PRIOR_AUTH` — the same action the submitting service writes, with
+        `service_name` telling the two rows apart.
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          description: The prior-authorization request that was submitted.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordSubmissionRequest'
+      responses:
+        '200':
+          description: The request, now carrying the payer's answer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriorAuthRequestResponse'
+        '404':
+          description: >-
+            No such prior-authorization request, or its encounter has been
+            soft-deleted (`prior_auth_request_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: >-
+            This request has already been submitted
+            (`prior_auth_already_submitted`). Refused rather than recorded twice.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: >-
+            The body is invalid — an unknown field, a missing `outcome`, or a
+            `submission_method` or `outcome` outside its vocabulary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   schemas:
+    SubmissionMethod:
+      type: string
+      description: >-
+        Which path a prior authorization left this system by. Closed, unlike
+        `status`: a status is where a request has got to and may need a
+        payer-specific value, while a method is our own word for which code path
+        sent it.
+      enum: [fhir-pas, covermymeds, fax]
+
+    SubmissionOutcome:
+      type: string
+      description: >-
+        What the payer said, normalized across both submission paths. The members
+        are `ClaimResponse.outcome`'s required binding in the Da Vinci PAS IG,
+        because that is a real four-way distinction; CoverMyMeds is not FHIR and
+        maps onto the same shape. `complete` means the payer adjudicated the
+        request and says nothing about which way.
+      enum: [complete, queued, partial, error]
+
+    PriorAuthRequestData:
+      type: object
+      description: >-
+        One prior-authorization request as its submitter needs it, joined to the
+        encounter that holds the EHR identifiers and payer columns.
+      required:
+        - request_id
+        - session_id
+        - status
+        - payer_outcome
+        - patient_fhir_id
+        - ehr_encounter_id
+        - payer_name
+        - insurance_plan_type
+        - insurance_member_id
+        - procedures
+        - diagnoses
+        - clinical_evidence
+        - submission_method
+        - payer_reference_number
+        - submitted_at
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          description: Echoed so a caller with several submissions in flight cannot mismatch one.
+        session_id:
+          type: string
+          format: uuid
+          description: The encounter session this request came out of.
+        status:
+          type: string
+          description: >-
+            Where the request has got to in our own process — `pending`,
+            `submitted`, `error`, `approved` or `denied`. Free text rather than a
+            closed set so a payer-specific state needs no migration.
+        payer_outcome:
+          $ref: '#/components/schemas/SubmissionOutcome'
+          nullable: true
+          description: >-
+            What the payer said, once it has been asked. Null before submission,
+            and a different fact from `status`.
+        patient_fhir_id:
+          type: string
+          description: The patient as the EHR knows them.
+        ehr_encounter_id:
+          type: string
+          nullable: true
+          description: >-
+            The encounter as the EHR knows it. Null when the visit was started
+            outside a SMART launch, which is an ordinary state rather than an error.
+        payer_name:
+          type: string
+          nullable: true
+          description: >-
+            The payer's own display name, from the request row or else the
+            encounter's coverage columns. Never a `payer_vocab` slug — a slug
+            matches our indexed policies, and this value goes to the payer.
+        insurance_plan_type:
+          type: string
+          nullable: true
+          description: The plan type as the coverage spelled it.
+        insurance_member_id:
+          type: string
+          nullable: true
+          description: The member id the payer matches the request on.
+        procedures:
+          type: array
+          nullable: true
+          items:
+            type: object
+          description: >-
+            What is being requested, as stored by the assembly (TASK-060). Passed
+            through rather than reshaped here: the submitter's builder is where a
+            shape is actually required.
+        diagnoses:
+          type: array
+          nullable: true
+          items:
+            type: object
+          description: >-
+            The diagnoses justifying the request, as stored. Each carries a
+            `source`, which decides whether it may leave this system — the filter
+            is applied in the submitter's builder.
+        clinical_evidence:
+          type: array
+          nullable: true
+          items:
+            type: object
+          description: >-
+            The documentation offered against the payer's criteria. Transcript
+            excerpts, and the most sensitive thing this payload carries.
+        submission_method:
+          $ref: '#/components/schemas/SubmissionMethod'
+          nullable: true
+          description: How it went out, or null before it has.
+        payer_reference_number:
+          type: string
+          nullable: true
+          description: The payer's reference for the submission, when it gave one.
+        submitted_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When it was transmitted, or null. Non-null is what makes a repeat
+            submission refusable before a payer is ever called.
+
+    PriorAuthRequestResponse:
+      type: object
+      description: The standard envelope, carrying one prior-authorization request.
+      required: [data, error]
+      properties:
+        data:
+          $ref: '#/components/schemas/PriorAuthRequestData'
+          nullable: true
+        error:
+          $ref: '#/components/schemas/Error'
+          nullable: true
+
+    RecordSubmissionRequest:
+      type: object
+      description: >-
+        Names the transition being recorded. The only way `submission_method`,
+        `payer_outcome` and `payer_reference_number` are ever set.
+      additionalProperties: false
+      required: [submission_method, outcome]
+      properties:
+        submission_method:
+          $ref: '#/components/schemas/SubmissionMethod'
+        outcome:
+          $ref: '#/components/schemas/SubmissionOutcome'
+        payer_reference_number:
+          type: string
+          nullable: true
+          minLength: 1
+          maxLength: 200
+          description: >-
+            The payer's reference, when it gave one. Optional because
+            `ClaimResponse.preAuthRef` is 0..1 and is legitimately absent on a
+            queued answer.
+
     ComponentStatus:
       type: string
       enum: [ok, error]
@@ -896,6 +1198,8 @@ components:
           enum:
             - session_not_found
             - note_not_generated
+            - prior_auth_request_not_found
+            - prior_auth_already_submitted
             - signal_not_published
             - auth_rejected
             - session_completed

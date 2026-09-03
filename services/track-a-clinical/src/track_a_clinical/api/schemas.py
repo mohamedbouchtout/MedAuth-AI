@@ -1,4 +1,4 @@
-"""Request and response bodies for the session lifecycle and note review endpoints."""
+"""Request and response bodies for the session, note and prior-authorization routes."""
 
 from __future__ import annotations
 
@@ -8,7 +8,15 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from track_a_clinical.models import ClinicalNote, Encounter, ExtractedCode, load_codes
+from track_a_clinical.models import (
+    ClinicalNote,
+    Encounter,
+    ExtractedCode,
+    PriorAuthRequest,
+    SubmissionMethod,
+    SubmissionOutcome,
+    load_codes,
+)
 
 
 class StartSessionRequest(BaseModel):
@@ -246,3 +254,136 @@ class RecordEhrReferenceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ehr_document_ref_id: str = Field(min_length=1, max_length=100)
+
+
+class PriorAuthRequestData(BaseModel):
+    """``data`` payload of ``GET /prior-auth/{request_id}`` (TASK-054).
+
+    Everything ``fhir-integration`` needs in order to submit a request it did not
+    assemble, and nothing else. It is deliberately not the whole row: ``status``,
+    the submission fields and the two EHR identifiers are here because the
+    submitter branches on them, while ``decided_at`` and ``denial_reason`` belong
+    to work that follows a decision up and would be a wider disclosure for no
+    caller.
+
+    **Keyed on the request's own primary key**, unlike every note route, and the
+    difference is not an inconsistency. ``nudge_id`` set the precedent: a route
+    is keyed on the identifier its caller was actually handed, and one encounter
+    can carry several prior-authorization requests, so a ``session_id`` would not
+    name one. See CLAUDE.md, "A route keyed on a resource rather than a session".
+
+    The three JSONB columns are passed through as they are stored rather than
+    reshaped here. They are written by TASK-060, which does not exist, so a shape
+    asserted at this boundary today would be one this service invented — and the
+    submitter's builder is where a shape is actually required and can be
+    enforced.
+
+    Attributes:
+        request_id: The row's primary key, echoed so a caller with several in
+            flight can match a response to its request.
+        session_id: The encounter session this request came out of.
+        status: Where the request has got to in *our* process.
+        payer_outcome: What the payer said, once it has been asked. Null before
+            submission, and a different fact from ``status``.
+        patient_fhir_id: The patient as the EHR knows them.
+        ehr_encounter_id: The encounter as the EHR knows it, or null when the
+            visit was started outside a SMART launch. Null is an ordinary state
+            and the submitter decides what to do about it.
+        payer_name: The payer's own display name — from the request row when
+            TASK-060 recorded one, else the encounter's. **Never a payer_vocab
+            slug**: a slug matches our indexed policies, and this value is going
+            to the payer.
+        insurance_plan_type: The plan type as the coverage spelled it.
+        insurance_member_id: The member id the payer matches the request on.
+        procedures: What is being requested, as stored.
+        diagnoses: The diagnoses justifying it, as stored. Their ``source`` is
+            what decides whether each may leave the system, and the filtering
+            happens in the submitter's builder rather than here.
+        clinical_evidence: The documentation offered against the payer's
+            criteria. Transcript excerpts, and the most sensitive thing this
+            payload carries.
+        submission_method: How it went out, or null before it has.
+        payer_reference_number: The payer's reference, when it gave one.
+        submitted_at: When it was transmitted, or null. **Non-null is what makes
+            a repeat submission refusable** before a payer is ever called.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    request_id: uuid.UUID
+    session_id: uuid.UUID
+    status: str
+    payer_outcome: str | None
+    patient_fhir_id: str
+    ehr_encounter_id: str | None
+    payer_name: str | None
+    insurance_plan_type: str | None
+    insurance_member_id: str | None
+    procedures: list[dict[str, Any]] | None
+    diagnoses: list[dict[str, Any]] | None
+    clinical_evidence: list[dict[str, Any]] | None
+    submission_method: str | None
+    payer_reference_number: str | None
+    submitted_at: datetime.datetime | None
+
+    @classmethod
+    def from_rows(cls, *, request: PriorAuthRequest, encounter: Encounter) -> PriorAuthRequestData:
+        """Render the two rows that together describe one submittable request.
+
+        ``payer_name`` falls back to the encounter's ``insurance_payer`` when the
+        request row carries none. Both hold the payer's own display name — the
+        encounter's is copied from the ``Coverage`` at launch — so the fallback
+        joins two spellings of one fact rather than substituting a different one.
+        """
+        return cls(
+            request_id=request.id,
+            session_id=encounter.session_id,
+            status=request.status,
+            payer_outcome=request.payer_outcome,
+            patient_fhir_id=encounter.patient_fhir_id,
+            ehr_encounter_id=encounter.ehr_encounter_id,
+            payer_name=request.payer_name or encounter.insurance_payer,
+            insurance_plan_type=encounter.insurance_plan_type,
+            insurance_member_id=encounter.insurance_member_id,
+            procedures=request.procedures,
+            diagnoses=request.diagnoses,
+            clinical_evidence=request.clinical_evidence,
+            submission_method=request.submission_method,
+            payer_reference_number=request.payer_reference_number,
+            submitted_at=request.submitted_at,
+        )
+
+
+class RecordSubmissionRequest(BaseModel):
+    """Body of ``PATCH /prior-auth/{request_id}/submission`` (TASK-054).
+
+    **The transition is named explicitly rather than implied by an empty body**,
+    the same rule ``RecordEhrReferenceRequest`` follows: a state-changing PATCH
+    says what it is recording.
+
+    This is the only way ``submission_method``, ``payer_outcome`` and
+    ``payer_reference_number`` are ever set. The route is server-to-server,
+    called by ``fhir-integration`` once a payer has actually answered, which is
+    what makes the values it carries trustworthy.
+
+    **The vocabularies are validated here as well as at the column.** Both are
+    ``StrEnum`` fields, so a value outside them is a 422 with a field location
+    rather than a 500 from the mapped class's validator — which is the backstop
+    for the callers static typing does not reach, not the first line of defence.
+
+    Attributes:
+        submission_method: Which path transmitted the request.
+        outcome: What the payer said. Required, because every path has an answer
+            and a submission recorded without one would let a caller read a
+            rejection as a pending request.
+        payer_reference_number: The payer's reference, when it gave one.
+            **Optional on purpose**: ``ClaimResponse.preAuthRef`` is 0..1 and is
+            legitimately absent on a queued answer, so requiring it would refuse
+            to record exactly the submissions most in need of following up.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    submission_method: SubmissionMethod
+    outcome: SubmissionOutcome
+    payer_reference_number: str | None = Field(default=None, min_length=1, max_length=200)

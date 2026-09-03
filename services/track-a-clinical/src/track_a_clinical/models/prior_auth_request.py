@@ -32,6 +32,12 @@ PRIOR_AUTH_STATUS_PENDING = "pending"
 PRIOR_AUTH_STATUS_SUBMITTED = "submitted"
 PRIOR_AUTH_STATUS_APPROVED = "approved"
 PRIOR_AUTH_STATUS_DENIED = "denied"
+#: The payer refused to process the request at all — it is not with them, and
+#: nothing is pending. Added by TASK-054, which is the first code that submits
+#: anything and so the first that can be told this. ``submitted`` would be the
+#: comfortable value and it would be false: a caller reading it would wait for a
+#: decision on a request the payer never took in.
+PRIOR_AUTH_STATUS_ERROR = "error"
 
 
 class SubmissionMethod(StrEnum):
@@ -75,6 +81,51 @@ class SubmissionMethod(StrEnum):
     #: is expected here for the same reason ``AuditAction`` carries one, and an
     #: unused member is inert in a way a documented-but-absent value is not.
     FAX = "fax"
+
+
+class SubmissionOutcome(StrEnum):
+    """What the payer said about a submitted request, normalized across paths.
+
+    Owned here for the same reason :class:`SubmissionMethod` is: the value is
+    stored in a column of this table, so the service that owns the table owns the
+    vocabulary, and ``fhir-integration`` mirrors it with
+    ``tests/unit/test_prior_auth_contract.py`` proving the two equal rather than
+    assuming it.
+
+    **The members are PAS's, but this is not a FHIR code.** They are taken from
+    ``ClaimResponse.outcome``'s required binding in the Da Vinci PAS IG because
+    that is a real four-way distinction someone already thought through. But
+    CoverMyMeds is not FHIR and answers in its own terms, so both submission
+    paths map onto this normalized shape.
+
+    **It is not the same fact as ``status``, which is why it is a second
+    column.** ``status`` is our word for where a request has got to in *our*
+    process; this is the payer's own answer to the submission. A request the
+    payer queued and one it adjudicated are both ``submitted`` here and are not
+    the same thing to whoever follows one up, and collapsing them would leave the
+    difference unrecoverable — the point TASK-054 makes about a result that
+    carries only a reference number.
+    """
+
+    #: The payer adjudicated the request. Says nothing about *which way*: an
+    #: approval and a denial are both complete, and this column does not carry
+    #: the decision. ``status`` moves to ``approved``/``denied`` when something
+    #: reads the adjudication, which no task does yet.
+    COMPLETE = "complete"
+
+    #: The payer accepted the request and has not decided. Ordinary and
+    #: conformant rather than an error, and the state in which a payer reference
+    #: number is most often absent.
+    QUEUED = "queued"
+
+    #: Some items were adjudicated and others were not.
+    PARTIAL = "partial"
+
+    #: The payer refused to process the request — malformed, or missing
+    #: something it required. Nothing was authorized and nothing is pending,
+    #: which is why it is the one outcome that does not leave ``status`` at
+    #: ``submitted``.
+    ERROR = "error"
 
 
 class PriorAuthRequest(Base):
@@ -125,6 +176,12 @@ class PriorAuthRequest(Base):
     submission_method: Mapped[str | None] = mapped_column(sa.String(50), nullable=True)
     payer_reference_number: Mapped[str | None] = mapped_column(sa.String(200), nullable=True)
 
+    #: What the payer said, as one of :class:`SubmissionOutcome`, or NULL before
+    #: the request has been submitted. Separate from ``status`` because the two
+    #: are different facts — see that enum's docstring — and text with a
+    #: validator for the same reason ``submission_method`` is.
+    payer_outcome: Mapped[str | None] = mapped_column(sa.String(20), nullable=True)
+
     submitted_at: Mapped[datetime.datetime | None] = timestamp_column(nullable=True)
     decided_at: Mapped[datetime.datetime | None] = timestamp_column(nullable=True)
     denial_reason: Mapped[str | None] = mapped_column(sa.Text(), nullable=True)
@@ -133,6 +190,24 @@ class PriorAuthRequest(Base):
         "Encounter",
         back_populates="prior_auth_requests",
     )
+
+    @validates("payer_outcome")
+    def _validate_payer_outcome(self, _key: str, value: str | None) -> str | None:
+        """Refuse a payer outcome outside :class:`SubmissionOutcome`.
+
+        The same backstop, for the same reason, as the submission method below:
+        this value arrives over HTTP from ``fhir-integration``, where the type
+        system stopped applying, and it is compared by string equality by
+        whoever follows a queued request up. Raising beats coercing — an answer
+        we cannot name is not an answer we can honestly record.
+        """
+        if value is None:
+            return None
+        try:
+            return SubmissionOutcome(value).value
+        except ValueError:
+            permitted = ", ".join(sorted(outcome.value for outcome in SubmissionOutcome))
+            raise ValueError(f"payer_outcome must be one of {permitted}; got {value!r}") from None
 
     @validates("submission_method")
     def _validate_submission_method(self, _key: str, value: str | None) -> str | None:

@@ -22,12 +22,14 @@ from track_a_clinical.db import raw_asyncpg_connection
 
 #: The actions this service records are ``AuditAction`` members, imported from
 #: hipaa-logger rather than re-declared here: START_SESSION, END_SESSION,
-#: READ_ENCOUNTER, REMINT_SESSION_TOKEN, WRITE_NOTE, READ_NOTE, UPDATE_NOTE.
+#: READ_ENCOUNTER, REMINT_SESSION_TOKEN, WRITE_NOTE, READ_NOTE, UPDATE_NOTE,
+#: READ_PRIOR_AUTH and SUBMIT_PRIOR_AUTH.
 #: A local constant per service is what let the vocabulary drift from its own
 #: definition three times — see ``hipaa_logger.actions``.
 SERVICE_NAME = "track-a-clinical"
 RESOURCE_TYPE_ENCOUNTER = "Encounter"
 RESOURCE_TYPE_CLINICAL_NOTE = "ClinicalNote"
+RESOURCE_TYPE_PRIOR_AUTH_REQUEST = "PriorAuthRequest"
 
 
 async def audit_encounter_access(
@@ -141,6 +143,58 @@ async def audit_note_access(
         action=action,
         resource_type=RESOURCE_TYPE_CLINICAL_NOTE,
         resource_id=str(note_id),
+        session_id=str(session_id),
+        service_name=SERVICE_NAME,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        conn=await raw_asyncpg_connection(session),
+    )
+
+
+async def audit_prior_auth_access(
+    session: AsyncSession,
+    *,
+    action: AuditAction,
+    request_id: uuid.UUID,
+    session_id: uuid.UUID,
+    provider_id: uuid.UUID | None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> None:
+    """Record one access to a ``prior_auth_requests`` row (TASK-054).
+
+    The row holds ``clinical_evidence`` — transcript excerpts — so reading one is
+    a PHI access as surely as reading a note is, and it audits for the same
+    reason. Both callers today are ``fhir-integration`` submitting a request it
+    did not assemble: it reads the row to build what it sends, and comes back to
+    record what the payer said.
+
+    **Two services write a ``SUBMIT_PRIOR_AUTH`` row for one submission, and that
+    is not double counting.** That service records that a request was transmitted
+    to a payer; this one records that the row it owns was changed to carry the
+    answer. Two distinct accesses, told apart by ``service_name`` — the same
+    arrangement the note write-back already uses, and the one CLAUDE.md's
+    "Writing clinical data out to the EHR" describes.
+
+    ``provider_id`` comes from the ``encounters`` row the request hangs off,
+    never from the calling service: a service-to-service hop does not change
+    whose visit this is.
+
+    Args:
+        session: The active session whose transaction the audit row joins.
+        action: ``AuditAction.READ_PRIOR_AUTH`` or
+            ``AuditAction.SUBMIT_PRIOR_AUTH``.
+        request_id: Primary key of the ``prior_auth_requests`` row touched.
+        session_id: The encounter's session identifier, for trace correlation.
+        provider_id: The provider from the encounter row.
+        ip_address: Client IP, from the request.
+        user_agent: Client user agent, from the request.
+    """
+    await audit_log(
+        actor_id=str(provider_id) if provider_id else None,
+        action=action,
+        resource_type=RESOURCE_TYPE_PRIOR_AUTH_REQUEST,
+        resource_id=str(request_id),
         session_id=str(session_id),
         service_name=SERVICE_NAME,
         ip_address=ip_address,
