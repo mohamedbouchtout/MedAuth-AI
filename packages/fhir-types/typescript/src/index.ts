@@ -26,9 +26,18 @@
 
 export type { DomainResource, Meta } from './base.js';
 export type {
+  Bundle,
+  BundleEntry,
+  BundleEntryRequest,
+  BundleEntryResponse,
+  BundleEntrySearch,
+  BundleLink,
+} from './bundle.js';
+export type {
   AddressType,
   AddressUse,
   AdministrativeGender,
+  BundleType,
   ClaimUse,
   CompositionStatus,
   ContactPointSystem,
@@ -37,14 +46,18 @@ export type {
   EncounterLocationStatus,
   EncounterStatus,
   FinancialResourceStatus,
+  HTTPVerb,
   IdentifierUse,
   LocationMode,
   LocationStatus,
   MedicationRequestIntent,
   MedicationRequestStatus,
   NameUse,
+  NoteType,
   QuantityComparator,
+  RemittanceOutcome,
   RequestPriority,
+  SearchEntryMode,
 } from './codes.js';
 export type {
   Address,
@@ -69,6 +82,15 @@ export type {
   ClaimProcedure,
   ClaimSupportingInfo,
 } from './claim.js';
+export type {
+  ClaimResponse,
+  ClaimResponseAdjudication,
+  ClaimResponseError,
+  ClaimResponseInsurance,
+  ClaimResponseItem,
+  ClaimResponseProcessNote,
+  ClaimResponseTotal,
+} from './claimResponse.js';
 export type { Condition } from './condition.js';
 export type { Coverage, CoverageClass } from './coverage.js';
 export type {
@@ -87,7 +109,9 @@ export type { Organization } from './organization.js';
 export type { Dosage, DosageDoseAndRate, MedicationRequest } from './medicationRequest.js';
 export type { Patient, PatientCommunication } from './patient.js';
 
+import type { Bundle } from './bundle.js';
 import type { Claim } from './claim.js';
+import type { ClaimResponse } from './claimResponse.js';
 import type { Condition } from './condition.js';
 import type { Coverage } from './coverage.js';
 import type { DocumentReference } from './documentReference.js';
@@ -112,7 +136,9 @@ export const FHIR_VERSION = '4.0.1';
  * ```
  */
 export type AnyResource =
+  | Bundle
   | Claim
+  | ClaimResponse
   | Condition
   | Coverage
   | DocumentReference
@@ -121,3 +147,34 @@ export type AnyResource =
   | MedicationRequest
   | Organization
   | Patient;
+
+/**
+ * A resource of a type this package does not model, kept open rather than narrowed.
+ *
+ * Mirrors `UnknownResource` in `src/fhir_types/__init__.py`. It is a type alias
+ * rather than an interface for the same reason the Python model declares no
+ * fields: there are no elements to mirror, only the promise that `resourceType`
+ * is there and everything else came through untouched.
+ */
+export type UnknownResource = {
+  readonly resourceType: string;
+} & Readonly<Record<string, unknown>>;
+
+/**
+ * `AnyResource`, widened to tolerate a resource type this package does not model.
+ *
+ * This is what `Bundle.entry.resource` is, and it is the right type for anything
+ * reading a bundle that came from outside — a payer's PAS response above all. A
+ * PAS response carries referenced resources conformantly including `Practitioner`,
+ * `PractitionerRole` and `Task`, none of which are modelled here, so narrowing to
+ * `AnyResource` would reject valid payer responses.
+ *
+ * Narrow with a `resourceType` check before reading a modelled element:
+ *
+ * ```ts
+ * const claimResponse = bundle.entry
+ *   ?.map((entry) => entry.resource)
+ *   .find((resource) => resource?.resourceType === 'ClaimResponse') as ClaimResponse | undefined;
+ * ```
+ */
+export type AnyResourceOrUnknown = AnyResource | UnknownResource;
