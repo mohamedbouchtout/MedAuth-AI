@@ -16,6 +16,7 @@ import httpx
 from .athena import AthenaAdapter
 from .base import EHRAdapter
 from .cerner import CernerAdapter
+from .covermymeds import CoverMyMedsClient
 from .ecw import ECWAdapter
 from .epic import EpicAdapter
 from .modmed import ModMedAdapter
@@ -145,6 +146,7 @@ def get_adapter(
     fhir_base_url: str,
     access_token: str,
     http_client: httpx.AsyncClient,
+    covermymeds: CoverMyMedsClient | None = None,
 ) -> EHRAdapter:
     """Build the adapter for one EHR and one session.
 
@@ -161,6 +163,14 @@ def get_adapter(
         http_client: The process-wide HTTP client the adapter makes its FHIR
             calls on. Injected rather than built per adapter — see
             ``EHRAdapter``'s class docstring for why.
+        covermymeds: The CoverMyMeds submission path, for the one adapter that
+            needs it. **Vendor-specific configuration is passed here rather than
+            added to the base adapter's constructor**: this function is the only
+            place that knows which class it is building, so it is the only place
+            that can hand one vendor something the others have no use for.
+            Ignored by every adapter but Athenahealth's, and ``None`` is a real
+            state — nothing configured the path — which that adapter reports
+            plainly rather than discovering inside an HTTP call.
 
     Returns:
         The adapter for that vendor, or a plain ``EHRAdapter`` for
@@ -176,6 +186,14 @@ def get_adapter(
             f"Unknown EHR type {ehr_type!r} — add it to EHRType in "
             "src/adapters/factory.py, with an adapter class behind it."
         ) from exc
+
+    if key is EHRType.ATHENA:
+        return AthenaAdapter(
+            fhir_base_url=fhir_base_url,
+            access_token=access_token,
+            http_client=http_client,
+            covermymeds=covermymeds,
+        )
 
     return _ADAPTERS[key](
         fhir_base_url=fhir_base_url,

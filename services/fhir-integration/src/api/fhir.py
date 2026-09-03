@@ -49,6 +49,10 @@ from fhir_types import Encounter
 from hipaa_logger import AuditAction
 from src.adapters import get_adapter
 from src.adapters.base import EHRAdapter
+from src.adapters.covermymeds import (
+    CoverMyMedsClient,
+    CoverMyMedsNotConfigured,
+)
 from src.adapters.errors import (
     FHIRAuthorizationExpired,
     FHIRMalformedResponse,
@@ -57,10 +61,17 @@ from src.adapters.errors import (
 )
 from src.adapters.models import (
     ClinicalNoteContent,
+    CoverageInfo,
     EncounterCoverageContext,
     NoteCode,
     PatientContext,
+    PriorAuthContent,
+    PriorAuthEvidence,
+    PriorAuthProcedure,
+    SubmissionMethod,
+    SubmissionOutcome,
 )
+from src.adapters.pas_bundle import PriorAuthNotSubmittable
 from src.api.dependencies import (
     get_app_settings,
     get_http_client,
@@ -71,11 +82,18 @@ from src.audit import (
     RESOURCE_TYPE_DOCUMENT_REFERENCE,
     RESOURCE_TYPE_ENCOUNTER,
     RESOURCE_TYPE_PATIENT,
+    RESOURCE_TYPE_PRIOR_AUTH_REQUEST,
     audit_ehr_read,
     audit_ehr_write,
 )
 from src.config import Settings
 from src.notes_client import NoteNotFound, NotesClient, NoteServiceError
+from src.prior_auth_client import (
+    PriorAuthAlreadySubmitted,
+    PriorAuthClient,
+    PriorAuthRequestNotFound,
+    PriorAuthServiceError,
+)
 from src.smart import store
 from src.smart.oauth import (
     TokenEndpointUnavailable,
@@ -112,6 +130,17 @@ ERROR_CODE_ENCOUNTER_NOT_LINKED: Final = "ENCOUNTER_NOT_LINKED_TO_EHR"
 #: so a client cannot treat it as an ordinary failure and retry into a second
 #: copy on the chart.
 ERROR_CODE_RECORD_FAILED: Final = "EHR_NOTE_RECORD_FAILED"
+
+#: TASK-054's outcomes, on the same terms as TASK-053's above: facts about our
+#: own services and rules rather than about an EHR.
+ERROR_CODE_PRIOR_AUTH_NOT_FOUND: Final = "PRIOR_AUTH_NOT_FOUND"
+ERROR_CODE_PRIOR_AUTH_SERVICE_UNAVAILABLE: Final = "PRIOR_AUTH_SERVICE_UNAVAILABLE"
+ERROR_CODE_PRIOR_AUTH_ALREADY_SUBMITTED: Final = "PRIOR_AUTH_ALREADY_SUBMITTED"
+ERROR_CODE_PRIOR_AUTH_NOT_SUBMITTABLE: Final = "PRIOR_AUTH_NOT_SUBMITTABLE"
+ERROR_CODE_PRIOR_AUTH_PATH_NOT_CONFIGURED: Final = "PRIOR_AUTH_PATH_NOT_CONFIGURED"
+#: The one outcome where the payer *did* take the request. Named distinctly so a
+#: client cannot treat it as an ordinary failure and retry into a second review.
+ERROR_CODE_PRIOR_AUTH_RECORD_FAILED: Final = "PRIOR_AUTH_RECORD_FAILED"
 
 
 class LaunchContextData(BaseModel):
@@ -228,6 +257,7 @@ async def get_audit_actor(
 async def get_ehr_adapter(
     token: Annotated[store.LaunchToken, Depends(get_launch_record)],
     http_client: Annotated[httpx.AsyncClient, Depends(get_http_client)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
 ) -> EHRAdapter:
     """Resolve the launch's stored token into an adapter for that EHR.
 
@@ -238,12 +268,25 @@ async def get_ehr_adapter(
     The vendor comes out of the record and is never a request parameter, so
     nothing in this module imports a concrete adapter or branches on which EHR
     answered.
+
+    **The CoverMyMeds client is built here and handed to the factory**, which
+    gives it to the one adapter that submits through it (TASK-054). This function
+    is where a request's configuration is already in scope, and the factory is
+    where knowledge of which vendor needs it belongs — so no route learns that
+    Athenahealth is different, which is the property the adapter layer exists
+    for.
     """
+    key = settings.covermymeds_api_key
     return get_adapter(
         token.ehr_type,
         token.fhir_base_url,
         token.access_token,
         http_client,
+        covermymeds=CoverMyMedsClient(
+            settings.covermymeds_base_url,
+            key.get_secret_value() if key else "",
+            http_client,
+        ),
     )
 
 
@@ -906,4 +949,306 @@ async def write_note_to_ehr(
 
     return ApiResponse[WrittenNoteData](
         data=WrittenNoteData(session_id=body.session_id, ehr_document_ref_id=document_id)
+    )
+
+
+class SubmitPriorAuthRequest(BaseModel):
+    """Body of ``POST /fhir/prior-auth``.
+
+    **One field, on purpose**, exactly as ``POST /fhir/notes`` carries only a
+    session. Everything the submission needs — the procedures, the diagnoses, the
+    clinical evidence, the payer and the two EHR identifiers — is read
+    server-side from ``track-a-clinical``. A client that posted the bundle back
+    would produce no ``READ_PRIOR_AUTH`` row anywhere, which is the half that
+    settles it, and it would put a payer submission's payload under the control
+    of the least trusted participant in it. See CLAUDE.md, "Writing clinical data
+    out to the EHR".
+
+    ``request_id``, not ``session_id``: one encounter can carry several
+    prior-authorization requests, so a session would not name one.
+
+    **This route submits a request; it does not choose one and does not assemble
+    one.** Assembly is TASK-060 and the routing that decides whether a payer
+    takes FHIR PAS at all is TASK-061. By the time this is called, that choice
+    has been made.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: uuid.UUID = Field(
+        description=(
+            "The prior-authorization request to submit. Names one row of "
+            "`prior_auth_requests`; what is in it is resolved server-side."
+        ),
+    )
+
+
+class PriorAuthSubmissionData(BaseModel):
+    """What a successful submission reports.
+
+    ``outcome`` is here rather than only in the database because a caller has to
+    be able to tell a queued request from an adjudicated one without a second
+    round trip — and because a response carrying only a reference number would
+    let a client show "submitted" for a request the payer refused.
+    """
+
+    request_id: uuid.UUID = Field(description="The request that was submitted.")
+    outcome: SubmissionOutcome = Field(
+        description=(
+            "What the payer said. `complete` means it adjudicated the request "
+            "and says nothing about which way; `queued` means it accepted and "
+            "has not decided; `error` means it refused to process at all."
+        ),
+    )
+    payer_reference_number: str | None = Field(
+        default=None,
+        description=(
+            "The payer's reference for the submission, when it gave one. "
+            "Legitimately absent on a queued answer."
+        ),
+    )
+    submission_method: SubmissionMethod = Field(
+        description="Which path transmitted it — FHIR PAS, or CoverMyMeds."
+    )
+
+
+async def get_prior_auth_client(
+    http_client: Annotated[httpx.AsyncClient, Depends(get_http_client)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> PriorAuthClient:
+    """Build the client this service reads prior-authorization requests through.
+
+    The HTTP client is the process-wide pooled one, exactly as it is for an
+    adapter and for the same reasons.
+    """
+    return PriorAuthClient(
+        settings.track_a_clinical_url,
+        http_client,
+        settings.track_a_clinical_timeout_seconds,
+    )
+
+
+def _prior_auth_service_error(exc: PriorAuthServiceError) -> ApiHTTPException:
+    """Map a failure of *our own* service onto an envelope outcome.
+
+    Deliberately not folded into ``_as_api_error``, on the same terms as the note
+    write-back's mapping: "the payer could not be reached" and "our own service
+    could not be reached" are different facts about different systems, and an
+    operator reading a 502 has to know which one to go and look at.
+    """
+    if isinstance(exc, PriorAuthRequestNotFound):
+        return ApiHTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code=ERROR_CODE_PRIOR_AUTH_NOT_FOUND,
+            message="No such prior authorization request.",
+        )
+    if isinstance(exc, PriorAuthAlreadySubmitted):
+        return ApiHTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            code=ERROR_CODE_PRIOR_AUTH_ALREADY_SUBMITTED,
+            message=(
+                "This prior authorization has already been submitted. Submitting "
+                "it again would ask the payer to open a second review of one "
+                "request."
+            ),
+        )
+    return ApiHTTPException(
+        status_code=(
+            status.HTTP_504_GATEWAY_TIMEOUT if exc.timed_out else status.HTTP_502_BAD_GATEWAY
+        ),
+        code=ERROR_CODE_PRIOR_AUTH_SERVICE_UNAVAILABLE,
+        message=(
+            "The clinical service could not be reached. Nothing was submitted to "
+            "a payer; this is transient and retrying is reasonable."
+        ),
+    )
+
+
+@router.post(
+    "/prior-auth",
+    response_model=ApiResponse[PriorAuthSubmissionData],
+    status_code=status.HTTP_201_CREATED,
+    summary="Submit a prior authorization to the payer",
+    response_description="What the payer said, and which path submitted it.",
+    responses=error_responses(
+        401,
+        404,
+        409,
+        422,
+        502,
+        504,
+        descriptions={
+            401: "This launch's EHR authorization is no longer valid; repeat the launch.",
+            404: (
+                "No such SMART launch, no such prior authorization request, or "
+                "the endpoint does not implement `Claim/$submit`."
+            ),
+            409: (
+                "This request has already been submitted "
+                "(`PRIOR_AUTH_ALREADY_SUBMITTED`). Refused before the payer is "
+                "called: a payer receiving one request twice may open two reviews."
+            ),
+            422: (
+                "The body is invalid, or the request cannot be made into a "
+                "conformant submission (`PRIOR_AUTH_NOT_SUBMITTABLE`) — no "
+                "procedure to request, or no verified provider to ask on behalf "
+                "of. `PRIOR_AUTH_PATH_NOT_CONFIGURED` means this EHR submits "
+                "through CoverMyMeds and nothing configured it."
+            ),
+            502: (
+                "The payer, its endpoint, or the clinical service was "
+                "unreachable or unusable. `PRIOR_AUTH_RECORD_FAILED` is the one "
+                "case where the payer *did* accept the request — see its message."
+            ),
+            504: "An upstream did not answer in time.",
+        },
+    ),
+)
+async def submit_prior_auth(
+    body: SubmitPriorAuthRequest,
+    adapter: Annotated[EHRAdapter, Depends(get_ehr_adapter)],
+    actor: Annotated[str | None, Depends(get_audit_actor)],
+    requests: Annotated[PriorAuthClient, Depends(get_prior_auth_client)],
+) -> ApiResponse[PriorAuthSubmissionData]:
+    """Submit an assembled prior-authorization request to the payer.
+
+    **The second outbound writer**, and it inherits CLAUDE.md's "Writing clinical
+    data out to the EHR" rules rather than re-deciding them: the ``source``
+    filter on any codes leaving this system, its own audit action, a row in each
+    service that acted, the external write first and the local record second, and
+    the refusal to submit twice.
+
+    The order is: refuse a repeat before anything happens, read the request,
+    submit it, audit, then record the result locally. The external write goes
+    first deliberately — an authorization the payer holds with nothing here
+    pointing at it can be reconciled by its reference number, whereas a local row
+    claiming a submission that never happened is a silent lie no query can
+    distinguish from success.
+
+    **Which path submits is the adapter's business, not this route's.** A payer
+    on an EHR with no FHIR PAS support goes through CoverMyMeds, and nothing here
+    knows or asks which EHR answered.
+
+    This is a PHI disclosure to a third party and writes one
+    ``SUBMIT_PRIOR_AUTH`` row, after the payer answers and before the result is
+    recorded — so the trail exists even when the recording step is what failed.
+    """
+    request_id = str(body.request_id)
+
+    try:
+        stored = await requests.get_request(request_id)
+    except PriorAuthServiceError as exc:
+        raise _prior_auth_service_error(exc) from exc
+
+    if stored.submitted_at is not None:
+        raise ApiHTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            code=ERROR_CODE_PRIOR_AUTH_ALREADY_SUBMITTED,
+            message=(
+                "This prior authorization has already been submitted. Submitting "
+                "it again would ask the payer to open a second review of one "
+                "request."
+            ),
+        )
+
+    content = PriorAuthContent(
+        request_id=request_id,
+        patient_id=stored.patient_fhir_id,
+        encounter_id=stored.ehr_encounter_id or "",
+        # The provider the EHR asserted at launch and this service verified.
+        # Never encounters.provider_id, a UUID that identifies nobody to a payer.
+        provider_reference=actor,
+        payer_name=stored.payer_name,
+        coverage=CoverageInfo(
+            payer=stored.payer_name,
+            plan_type=stored.insurance_plan_type,
+            member_id=stored.insurance_member_id,
+        ),
+        procedures=[
+            PriorAuthProcedure(cpt_code=procedure.cpt_code, description=procedure.description)
+            for procedure in stored.procedures or ()
+        ],
+        # Unfiltered on purpose: the builder filters, so no call site can forget.
+        icd10_codes=[
+            NoteCode(code=code.code, display=code.display, source=code.source)
+            for code in stored.diagnoses or ()
+        ],
+        clinical_evidence=[
+            PriorAuthEvidence(text=evidence.text, criterion=evidence.criterion)
+            for evidence in stored.clinical_evidence or ()
+        ],
+    )
+
+    try:
+        submission = await adapter.submit_prior_auth(content)
+    except PriorAuthNotSubmittable as exc:
+        # Refused before anything left this system: a required fact is missing,
+        # and the alternative is asserting one nobody stated.
+        raise ApiHTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code=ERROR_CODE_PRIOR_AUTH_NOT_SUBMITTABLE,
+            message=f"This request cannot be submitted: {exc.reason}.",
+        ) from exc
+    except CoverMyMedsNotConfigured as exc:
+        raise ApiHTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code=ERROR_CODE_PRIOR_AUTH_PATH_NOT_CONFIGURED,
+            message=(
+                "This EHR submits prior authorizations through CoverMyMeds, and "
+                "that path is not configured. Nothing was submitted."
+            ),
+        ) from exc
+    except Exception as exc:
+        raise _as_api_error(exc) from exc
+
+    await audit_ehr_write(
+        action=AuditAction.SUBMIT_PRIOR_AUTH,
+        resource_type=RESOURCE_TYPE_PRIOR_AUTH_REQUEST,
+        resource_id=request_id,
+        session_id=stored.session_id,
+        fhir_practitioner_ref=actor,
+    )
+
+    try:
+        await requests.record_submission(
+            request_id,
+            submission_method=submission.submission_method,
+            outcome=submission.outcome,
+            payer_reference_number=submission.payer_reference_number,
+        )
+    except PriorAuthServiceError as exc:
+        # The payer has the request. Reporting this as a plain failure would
+        # invite a retry that submits a second one, so the reference number is
+        # named in the message and in the log: this needs reconciling, not
+        # repeating.
+        logger.error(
+            "Submitted prior auth request %s to the payer (%s, reference %s) but could "
+            "not record it: %s. The submission exists and needs reconciling by hand.",
+            request_id,
+            submission.submission_method.value,
+            submission.payer_reference_number or "none given",
+            exc.detail,
+        )
+        raise ApiHTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            code=ERROR_CODE_PRIOR_AUTH_RECORD_FAILED,
+            message=(
+                "The prior authorization was submitted to the payer"
+                + (
+                    f" (reference {submission.payer_reference_number})"
+                    if submission.payer_reference_number
+                    else ""
+                )
+                + ", but recording it here failed. The submission exists — do not "
+                "retry, or the payer will receive it twice."
+            ),
+        ) from exc
+
+    return ApiResponse[PriorAuthSubmissionData](
+        data=PriorAuthSubmissionData(
+            request_id=body.request_id,
+            outcome=submission.outcome,
+            payer_reference_number=submission.payer_reference_number,
+            submission_method=submission.submission_method,
+        )
     )

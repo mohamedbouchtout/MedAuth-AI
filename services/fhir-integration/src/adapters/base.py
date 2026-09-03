@@ -29,7 +29,7 @@ from typing import Any, Final
 import httpx
 from pydantic import ValidationError
 
-from fhir_types import Condition, Coverage, Encounter, Location, Organization, Patient
+from fhir_types import Bundle, Condition, Coverage, Encounter, Location, Organization, Patient
 
 from .errors import (
     FHIRAuthorizationExpired,
@@ -45,8 +45,16 @@ from .models import (
     PatientInfo,
     PriorAuthContent,
     PriorAuthSubmission,
+    SubmissionMethod,
 )
 from .note_document import build_document_reference
+from .pas_bundle import (
+    build_request_bundle,
+    payer_reference_number,
+    read_response_bundle,
+    submission_outcome,
+    unknown_entry_types,
+)
 from .site_of_care import (
     location_state,
     log_state_disagreement,
@@ -408,6 +416,112 @@ class EHRAdapter:
             for entry in entries
             if isinstance(entry, dict) and isinstance(entry.get("resource"), dict)
         ]
+
+    # -- The one place a FHIR operation is invoked ----------------------------
+
+    async def _invoke(
+        self, operation_path: str, resource: dict[str, Any], *, resource_id: str
+    ) -> dict[str, Any]:
+        """POST to a FHIR operation and return the resource it answered with.
+
+        The third HTTP call site in this class, and its own method for the same
+        reason :meth:`_create` is one rather than a general ``_request``: an
+        operation answers differently from both a read and a create. It is a POST
+        like a create, but there is no ``Location`` header and no created id —
+        the answer *is* the body, and for ``Claim/$submit`` that body is a whole
+        response bundle.
+
+        The four failures in ``errors.py`` mean the same things they do
+        elsewhere, with the same reasoning about which is which: a 4xx that is
+        not 401/403/404 is **malformed** rather than unavailable, because the
+        payer refusing what we built is our bug or a vendor quirk and asking the
+        same question again would only be refused again.
+
+        **A server that does not implement the operation answers 400, not 404** —
+        checked against a real HAPI server, which returns an ``OperationOutcome``
+        with issue code ``not-supported``. So an endpoint that does not speak PAS
+        arrives here as malformed rather than as not-found, and that reading is
+        right: the fix is to submit through another path for that payer, never to
+        retry. See ``tests/integration/test_hapi_fhir.py``, which asserts it
+        against the real server rather than against an assumption.
+
+        **A timeout here is genuinely ambiguous and is never retried
+        automatically.** The payer may have accepted the submission. The route
+        leaves it unrecorded so a person decides, rather than risking a second
+        prior authorization — same rule, and same reasoning, as a create.
+
+        Args:
+            operation_path: The operation below the FHIR base URL, e.g.
+                ``Claim/$submit``.
+            resource: The parameter resource, already dumped with FHIR's own
+                element names.
+            resource_id: What to name in an error. Never anything from the
+                payload — for a submission it is the request's own id.
+
+        Returns:
+            The decoded response body.
+
+        Raises:
+            FHIRAuthorizationExpired: The endpoint rejected the token (401/403).
+            FHIRResourceNotFound: The endpoint answered 404 — it does not
+                implement this operation.
+            FHIRUpstreamUnavailable: Transport failure or a 5xx.
+            FHIRMalformedResponse: The operation was refused, or answered with
+                something that is not a FHIR resource.
+        """
+        try:
+            response = await self._http.post(
+                f"{self.fhir_base_url}/{operation_path}",
+                json=resource,
+                headers={
+                    "Authorization": f"Bearer {self._access_token}",
+                    "Accept": "application/fhir+json",
+                    "Content-Type": "application/fhir+json",
+                },
+                timeout=FHIR_TIMEOUT_SECONDS,
+            )
+        except httpx.TimeoutException as exc:
+            raise FHIRUpstreamUnavailable(
+                operation_path, resource_id, "the payer did not answer in time", timed_out=True
+            ) from exc
+        except httpx.HTTPError as exc:
+            # Deliberately not ``str(exc)``: httpx puts the request URL in its
+            # message, and this one is a payer's endpoint plus our operation.
+            raise FHIRUpstreamUnavailable(
+                operation_path, resource_id, "the payer's endpoint could not be reached"
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise FHIRAuthorizationExpired(
+                operation_path, resource_id, "the endpoint rejected this launch's access token"
+            )
+        if response.status_code == 404:
+            raise FHIRResourceNotFound(
+                operation_path, resource_id, "the endpoint does not implement this operation"
+            )
+        if response.status_code >= 500:
+            raise FHIRUpstreamUnavailable(
+                operation_path, resource_id, f"the endpoint answered {response.status_code}"
+            )
+        if response.status_code >= 400:
+            raise FHIRMalformedResponse(
+                operation_path,
+                resource_id,
+                f"the endpoint refused the request ({response.status_code})",
+            )
+
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise FHIRMalformedResponse(
+                operation_path, resource_id, "the endpoint's response was not JSON"
+            ) from exc
+
+        if not isinstance(body, dict):
+            raise FHIRMalformedResponse(
+                operation_path, resource_id, "the endpoint's response was not a FHIR resource"
+            )
+        return body
 
     # -- Primitives: one resource type each, no composition -------------------
 
@@ -850,8 +964,47 @@ class EHRAdapter:
         Returns:
             What the payer said, its reference for the submission when it gave
             one, and which path submitted it.
+
+        Raises:
+            PriorAuthNotSubmittable: The request cannot be made into a conformant
+                bundle, or the payer's answer carried no ``ClaimResponse``.
+            FHIRAuthorizationExpired: The payer's endpoint rejected the token.
+            FHIRUpstreamUnavailable: Transport failure or a 5xx.
+            FHIRMalformedResponse: The submission was refused, or answered with
+                something that is not a PAS response bundle.
         """
-        raise NotImplementedError("submit_prior_auth is implemented in TASK-054")
+        request_bundle = build_request_bundle(content)
+        body = await self._invoke(
+            "Claim/$submit",
+            request_bundle.model_dump(by_alias=True, exclude_none=True),
+            resource_id=content.request_id,
+        )
+
+        try:
+            response_bundle = Bundle.model_validate(body)
+        except ValidationError as exc:
+            # Deliberately not ``str(exc)``: Pydantic echoes the offending value,
+            # and a payer's response bundle is full of patient data.
+            raise FHIRMalformedResponse(
+                "Bundle",
+                content.request_id,
+                "the payer's answer was not a PAS response bundle",
+            ) from exc
+
+        unknown = unknown_entry_types(response_bundle)
+        if unknown:
+            # Types this package does not model are conformant in a PAS response
+            # — Practitioner, Task, OperationOutcome. Logged so an unexpected one
+            # is visible, never acted on. Resource type names only: the entries
+            # themselves are PHI.
+            logger.info("PAS response carried unmodelled entry types: %s", ", ".join(unknown))
+
+        claim_response = read_response_bundle(response_bundle)
+        return PriorAuthSubmission(
+            outcome=submission_outcome(claim_response),
+            payer_reference_number=payer_reference_number(claim_response),
+            submission_method=SubmissionMethod.FHIR_PAS,
+        )
 
 
 def needs_manual_confirmation(coverage: CoverageInfo | None) -> bool:

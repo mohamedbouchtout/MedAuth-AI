@@ -20,8 +20,8 @@ from src.adapters.note_document import (
     NOTE_TYPE_CODE,
     build_document_reference,
     render_note_text,
-    sendable_codes,
 )
+from src.adapters.outbound_codes import sendable_codes
 
 LLM_CODE = NoteCode(
     code="M17.11", display="Unilateral primary osteoarthritis, right knee", source="llm-extraction"
