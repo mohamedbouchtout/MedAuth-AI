@@ -5513,7 +5513,7 @@ logic do not change.
       EHR may have filed the document. The route leaves the note unrecorded so a
       person decides, rather than risking a second document.
 
-- [ ] **TASK-054:** Prior auth submission — base + Athena override
+- [x] **TASK-054:** Prior auth submission — base + Athena override
   - Service: `services/fhir-integration`
   - Prerequisite: **TASK-004b** (`Bundle` and `ClaimResponse` in
     `packages/fhir-types`), TASK-050 (the adapter layer this fills a stub in),
@@ -5627,7 +5627,13 @@ logic do not change.
     `prior_auth_requests` table, through a server-to-server route on the service
     that owns it, never by opening a database connection this service has
     deliberately never had
-  - **Test (base):** submit to local HAPI FHIR as mock payer
+  - **Test (base):** against a real HAPI FHIR server — **not as a mock payer,
+    which it cannot be.** HAPI does not implement `Claim/$submit` and answers 400
+    `not-supported`, so the two things a live server can actually settle are
+    checked instead: the request bundle passes `Bundle/$validate` with no error or
+    fatal issue, and an endpoint without the operation raises rather than looking
+    like a submission that quietly did nothing. Submitting against a real PAS
+    implementation is TASK-054b's gate.
   - **Test (base):** the request bundle satisfies the profile — `type` is
     `collection`, `identifier` and `timestamp` are present, and the Claim is the
     first entry. Asserted on the bytes that go on the wire, not only on the
@@ -5635,6 +5641,79 @@ logic do not change.
   - **Test (base):** a `queued` response with no `preAuthRef` is recorded as
     queued and not as a completed submission
   - **Test (Athena override):** mock CoverMyMeds API, verify it's called instead of FHIR PAS
+  - Built (437 tests in `fhir-integration`, 345 in `track-a-clinical`, 96% and 97%
+    coverage). Decisions worth knowing before touching this:
+    - **`payer_outcome` is a new column, not more values on `status`.** The two
+      answer different questions — `status` is where the request has got to in our
+      process, `payer_outcome` is the payer's own answer — and a queued request and
+      an adjudicated one are both `submitted` by our lifecycle while being nothing
+      alike to whoever follows one up. `error` is the one outcome that also moves
+      `status`, because nothing is pending with a payer that refused to take the
+      request in. Migration `0007_prior_auth_payer_outcome`.
+    - **The Coverage gap is closed by carrying the resource, never by inventing an
+      id.** `Claim.insurance` references a `Coverage` and nothing here holds one's
+      resource id, so the Coverage travels *in* the bundle under a `urn:uuid` full
+      URL naming it within that submission only, built from coverage data actually
+      read from the EHR.
+    - **The request bundle is valid FHIR R4 by a real validator.** The integration
+      suite posts it to HAPI's `Bundle/$validate` and requires no error or fatal
+      issue — which is what a live server can tell us that a fixture cannot.
+      Warnings are allowed through: HAPI warns about unresolvable references, and
+      every reference in a PAS request bundle is either relative to the payer's
+      server or a `urn:uuid` naming a bundle entry.
+    - **A server without the operation answers 400, not 404.** Found by running the
+      integration test against HAPI, which returns an `OperationOutcome` with issue
+      code `not-supported`. It maps to `FHIRMalformedResponse` by `_invoke`'s rule
+      that a non-401/403/404 4xx is our request being refused — and that reading is
+      right here: the fix is another submission path for that payer, never a retry.
+      The test asserts what the server actually does rather than what it assumed.
+    - **`_invoke` is a third HTTP call site rather than a general `_request`.** An
+      operation answers with a resource body, not an id in a header, and its
+      timeout is ambiguous in the same way a create's is — never auto-retried,
+      because the payer may have taken the request.
+    - **The CoverMyMeds mapping is unverified and its unknown case refuses rather
+      than defaults.** A status outside the map is a malformed response, not a
+      guess: an outcome recorded wrongly is indistinguishable afterwards from one
+      the payer actually gave. `covermymeds.py` names each piece that has never
+      been checked — the request shape, the path, the auth scheme, the response
+      shape, and the status vocabulary.
+    - **`sendable_codes` moved to `adapters/outbound_codes.py`** now that two
+      writers apply it, on the same trigger as `packages/api-envelope`'s
+      extraction. It stays a module rather than a package because both callers are
+      in this service.
+    - The two vocabularies are owned by `track-a-clinical`, which owns the table,
+      and mirrored here with `tests/unit/test_prior_auth_contract.py` proving them
+      equal — extended in this task to cover `SubmissionOutcome` as well.
+
+- [ ] **TASK-054b:** Carry the referenced resources in the PAS request bundle
+  - Service: `services/fhir-integration`
+  - Split out of TASK-054 rather than left undone quietly. The request bundle
+    that ships carries the Claim and the Coverage; the profile's own words are
+    "a Bundle containing a single Claim **plus referenced resources**", and the
+    Patient, Practitioner and Organization the Claim references are referenced
+    relatively rather than embedded.
+  - **Why it was scoped out rather than guessed at.** This service holds those
+    resources' *identifiers*, not the resources: embedding them means fetching
+    three US Core resources per submission, which is real work and three more
+    PHI reads per request. Building them from the fields we happen to hold would
+    produce a Patient with no name and no birth date, which is worse than a
+    relative reference — it asserts a shape rather than admitting we did not
+    fetch one.
+  - **What would make it verifiable, which TASK-054 did not have.** A payer PAS
+    endpoint, or the Da Vinci PAS reference implementation, to submit against.
+    HAPI FHIR does not implement `Claim/$submit` at all — verified, it answers
+    400 `not-supported` — so a general FHIR server cannot tell us whether a
+    payer would accept a bundle without the referenced resources. Widening the
+    bundle against no such endpoint would be the same fiction the CoverMyMeds
+    mapping is careful not to be.
+  - `Bundle/$validate` against HAPI already passes for the bundle as it stands,
+    so this is about profile conformance rather than about well-formedness.
+  - **Test:** the referenced Patient, Practitioner and Organization appear as
+    entries, each under the `fullUrl` its reference resolves to
+  - **Test:** the extra fetches happen once per submission, not once per
+    reference to the same resource
+  - **Test:** a reference that cannot be fetched fails the submission rather
+    than being sent as a dangling reference
 
 - [ ] **TASK-055:** Athenahealth adapter completion
   - All TASK-052 through TASK-054 work against Athenahealth sandbox
