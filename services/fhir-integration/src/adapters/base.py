@@ -29,7 +29,7 @@ from typing import Any, Final
 import httpx
 from pydantic import ValidationError
 
-from fhir_types import Claim, Condition, Coverage, Encounter, Location, Organization, Patient
+from fhir_types import Condition, Coverage, Encounter, Location, Organization, Patient
 
 from .errors import (
     FHIRAuthorizationExpired,
@@ -43,6 +43,7 @@ from .models import (
     EncounterCoverageContext,
     PatientContext,
     PatientInfo,
+    PriorAuthContent,
     PriorAuthSubmission,
 )
 from .note_document import build_document_reference
@@ -810,17 +811,45 @@ class EHRAdapter:
             resource_id=note.encounter_id,
         )
 
-    async def submit_prior_auth(self, bundle: Claim) -> PriorAuthSubmission:
-        """Submit a prior authorization through FHIR Claim/$submit (Da Vinci PAS).
+    async def submit_prior_auth(self, content: PriorAuthContent) -> PriorAuthSubmission:
+        """Submit a prior authorization through FHIR ``Claim/$submit`` (Da Vinci PAS).
 
         Overridden in ``AthenaAdapter``, which has no FHIR PAS support and
         submits through CoverMyMeds instead (TASK-054).
 
+        **This signature was corrected against the IG; the original encoded two
+        mistakes.** TASK-050 typed it ``submit_prior_auth(bundle: Claim)`` from
+        TASK-054's own wording, which was written before anyone opened the
+        Implementation Guide — the same way the CRD "skip the RAG path entirely"
+        claim was. What ``OperationDefinition/Claim-submit`` (PAS v2.2.1)
+        actually specifies, at the type level on ``[base]/Claim/$submit``:
+
+        * **in** — ``resource``, 1..1, a **Bundle** on
+          ``profile-pas-request-bundle``: "A Bundle containing a single Claim
+          plus referenced resources". ``Bundle.type`` is fixed to ``collection``,
+          ``identifier`` and ``timestamp`` are both 1..1, and the ClaimFirst
+          invariant puts the Claim in the first entry.
+        * **out** — ``return``, 1..1, a **Bundle** on
+          ``profile-pas-response-bundle`` holding a ``ClaimResponse``, or an
+          ``OperationOutcome``. Never a bare ``ClaimResponse``.
+
+        The second mistake was the larger one: a FHIR resource does not belong at
+        this boundary at all. The parameter is normalized content and the builder
+        composes the Bundle, exactly as :meth:`write_clinical_note` takes a
+        :class:`~src.adapters.models.ClinicalNoteContent` and
+        ``note_document.build_document_reference()`` composes the resource. No
+        caller has ever held a ``Claim`` — ``prior_auth_requests`` stores
+        procedures, diagnoses and evidence as JSONB — and the CoverMyMeds
+        override needs those fields rather than a Bundle to take apart.
+
         Args:
-            bundle: The assembled prior authorization ``Claim``.
+            content: The request in this system's own terms. Codes arrive
+                unfiltered; the builder applies the ``source`` filter, so no call
+                site can forget it.
 
         Returns:
-            The payer's reference and which path submitted it.
+            What the payer said, its reference for the submission when it gave
+            one, and which path submitted it.
         """
         raise NotImplementedError("submit_prior_auth is implemented in TASK-054")
 
