@@ -1,10 +1,10 @@
-"""The submission-method vocabulary has one definition, proven not assumed (TASK-054).
+"""The prior-auth vocabularies have one definition, proven not assumed (TASK-054).
 
-``track-a-clinical`` owns ``prior_auth_requests`` and therefore owns
-``SubmissionMethod``; ``src/adapters/models.py`` mirrors it so this service can
-type what it submitted without importing across a service boundary. The reasoning
-for mirroring rather than importing is in ``test_note_contract.py`` and is the
-same here.
+``track-a-clinical`` owns ``prior_auth_requests`` and therefore owns both
+``SubmissionMethod`` and ``SubmissionOutcome``; ``src/adapters/models.py``
+mirrors them so this service can type what it submitted and what came back
+without importing across a service boundary. The reasoning for mirroring rather
+than importing is in ``test_note_contract.py`` and is the same here.
 
 What makes the mirror safe is this file. A member added, renamed or respelled on
 the owning side and not here would not fail anywhere else: this service would
@@ -24,8 +24,10 @@ import uuid
 import pytest
 
 from src.adapters.models import SubmissionMethod as Mirror
+from src.adapters.models import SubmissionOutcome as OutcomeMirror
 from track_a_clinical.models import PriorAuthRequest
 from track_a_clinical.models import SubmissionMethod as Owner
+from track_a_clinical.models import SubmissionOutcome as OutcomeOwner
 
 
 def test_the_two_definitions_have_the_same_members() -> None:
@@ -53,3 +55,29 @@ def test_every_mirrored_method_is_accepted_by_the_owning_validator(method: Mirro
     request = PriorAuthRequest(encounter_id=uuid.uuid4(), submission_method=method.value)
 
     assert request.submission_method == method.value
+
+
+def test_the_two_outcome_definitions_have_the_same_members() -> None:
+    """Same names, so neither side can name an answer the other cannot spell."""
+    assert {outcome.name for outcome in OutcomeMirror} == {outcome.name for outcome in OutcomeOwner}
+
+
+def test_the_two_outcome_definitions_have_the_same_values() -> None:
+    """Same wire values, which is what the ``VARCHAR(20)`` actually stores."""
+    assert {outcome.value for outcome in OutcomeMirror} == {
+        outcome.value for outcome in OutcomeOwner
+    }
+
+
+@pytest.mark.parametrize("outcome", list(OutcomeMirror))
+def test_every_mirrored_outcome_is_accepted_by_the_owning_validator(
+    outcome: OutcomeMirror,
+) -> None:
+    """The owning side's write validator accepts every answer this side can report.
+
+    The failure this prevents is the worse half of the ordering: a payer has
+    already answered, and the record of what it said is refused.
+    """
+    request = PriorAuthRequest(encounter_id=uuid.uuid4(), payer_outcome=outcome.value)
+
+    assert request.payer_outcome == outcome.value

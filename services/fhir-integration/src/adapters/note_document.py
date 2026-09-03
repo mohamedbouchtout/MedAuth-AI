@@ -4,8 +4,14 @@ TASK-053. Kept out of ``base.py`` because two things here are rules rather than
 resource plumbing, and both are easier to find — and harder to quietly drop —
 under their own names:
 
-* **Which codes may leave this system at all** (:func:`sendable_codes`).
 * **What kind of document this is**, in a vocabulary US Core binds as required.
+* **How the note is rendered** for a chart viewer, and why its codes are in the
+  body text at all.
+
+Which codes may leave this system is the other such rule, and it moved to
+:mod:`src.adapters.outbound_codes` when the prior-auth submission became its
+second caller (TASK-054). It is applied here, in :func:`render_note_text`, so no
+call site can forget it.
 
 Everything in this module is PHI. Nothing here logs.
 """
@@ -13,7 +19,6 @@ Everything in this module is PHI. Nothing here logs.
 from __future__ import annotations
 
 import base64
-from collections.abc import Sequence
 from typing import Final
 
 from fhir_types import (
@@ -26,21 +31,8 @@ from fhir_types import (
     Reference,
 )
 
-from .models import ClinicalNoteContent, NoteCode
-
-#: The two ``source`` values a code may carry and still be written to a chart.
-#:
-#: A ``comprehend-medical`` entry is deliberately absent, and this is the rule
-#: rather than a conservative default: that source means the validating pass
-#: surfaced a code **no provider ever stated**. CLAUDE.md already forbids putting
-#: one in a prior-auth bundle, and a patient's permanent chart is the more
-#: consequential artifact of the two, so the rule applies here with more force.
-#: The way such a code becomes sendable is unchanged — a provider accepts it
-#: through ``PATCH /notes/{session_id}``, which rewrites its ``source`` to
-#: ``provider-accepted``.
-#:
-#: Do not widen this set to "everything we extracted". The filter is the point.
-SENDABLE_CODE_SOURCES: Final = frozenset({"llm-extraction", "provider-accepted"})
+from .models import ClinicalNoteContent
+from .outbound_codes import sendable_codes
 
 #: LOINC ``11506-3``, Progress note. **Not ``11488-4``, Consult note**, which an
 #: earlier draft of TASK-053 named: a consult note is the response to another
@@ -76,22 +68,6 @@ _SECTION_HEADINGS: Final = (
     ("Assessment", "assessment"),
     ("Plan", "plan"),
 )
-
-
-def sendable_codes(codes: Sequence[NoteCode] | None) -> list[NoteCode]:
-    """Return only the codes that may be written to an EHR.
-
-    Args:
-        codes: The note's extracted codes, or ``None`` when the extraction pass
-            never answered. ``None`` and ``[]`` mean different things upstream —
-            "not determined" against "none found" — but they produce the same
-            answer here, because neither yields a code a provider documented.
-
-    Returns:
-        The entries whose ``source`` is in :data:`SENDABLE_CODE_SOURCES`, in the
-        order given.
-    """
-    return [code for code in codes or () if code.source in SENDABLE_CODE_SOURCES]
 
 
 def render_note_text(note: ClinicalNoteContent) -> str:

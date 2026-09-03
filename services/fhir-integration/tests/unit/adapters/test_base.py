@@ -5,12 +5,12 @@ holds in place is the shape TASK-056 and TASK-057 override against, the fact tha
 the class can be instantiated at all, and the fact that an access token does not
 render.
 
-**The "these are stubs" tests were deliberately removed here, not left to pass by
-coincidence.** TASK-050 asserted every fetch raised ``NotImplementedError``
-naming TASK-052; TASK-052 is this change, so those assertions had to go rather
-than be loosened. The two remaining stub tests are real: ``write_clinical_note``
-and ``submit_prior_auth`` genuinely are not implemented until TASK-053 and
-TASK-054.
+**The "these are stubs" tests were deliberately removed here as each stub was
+filled, not left to pass by coincidence.** TASK-050 asserted every fetch raised
+``NotImplementedError`` naming TASK-052, and TASK-052 removed those; TASK-053 and
+TASK-054 did the same for ``write_clinical_note`` and ``submit_prior_auth`` in
+turn. Nothing on this class is a stub any more, and a test asserting otherwise
+would now be asserting the opposite of the truth.
 """
 
 from __future__ import annotations
@@ -27,12 +27,14 @@ from src.adapters.ecw import ECWAdapter
 from src.adapters.epic import EpicAdapter
 from src.adapters.models import PriorAuthContent
 from src.adapters.modmed import ModMedAdapter
+from src.adapters.pas_bundle import PriorAuthNotSubmittable
 
 PRIMITIVES = ("get_patient", "get_coverage", "get_conditions", "get_encounter")
 COMPOSED = ("get_patient_context",)
-#: Neither layer: a write and a submission. ``write_clinical_note`` is
-#: implemented (TASK-053); ``submit_prior_auth`` is still a stub (TASK-054).
-DEFERRED = ("write_clinical_note", "submit_prior_auth")
+#: Neither layer: a write to a chart (TASK-053) and a submission to a payer
+#: (TASK-054). Both implemented; they are grouped because neither composes a
+#: primitive nor fetches one, which is what the two layers above describe.
+OUTBOUND = ("write_clinical_note", "submit_prior_auth")
 
 TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.not-a-real-token"
 
@@ -62,27 +64,30 @@ def test_the_base_adapter_is_instantiable() -> None:
     assert isinstance(_adapter(), EHRAdapter)
 
 
-@pytest.mark.parametrize("method_name", [*PRIMITIVES, *COMPOSED, *DEFERRED])
+@pytest.mark.parametrize("method_name", [*PRIMITIVES, *COMPOSED, *OUTBOUND])
 def test_every_method_is_async(method_name: str) -> None:
     """Async-first: a route handler awaits these, and a sync one would block the loop."""
     assert inspect.iscoroutinefunction(getattr(EHRAdapter, method_name))
 
 
-async def test_the_prior_auth_submission_is_a_stub() -> None:
-    """Still a stub, and now with the signature the PAS IG actually specifies.
+async def test_the_prior_auth_submission_refuses_a_request_with_no_procedure() -> None:
+    """No longer a stub (TASK-054), and it refuses before any payer is called.
 
     The parameter is ``content``, not ``bundle``, and it is normalized content
     rather than a FHIR ``Claim``. Both halves of that were corrected against
-    ``OperationDefinition/Claim-submit`` — see the method's own docstring. This
-    test is updated with the signature deliberately rather than being left to
-    pass by accident on a keyword nothing checks.
+    ``OperationDefinition/Claim-submit`` — see the method's own docstring.
+
+    A request naming no procedure has nothing to seek authorization for. The
+    refusal comes out of the builder, so it happens before the submission rather
+    than as a rejection from the payer — and the transport here is one that
+    would fail loudly if it were reached at all.
     """
     content = PriorAuthContent(
         request_id="request-1",
         patient_id="patient-7",
         encounter_id="encounter-4",
     )
-    with pytest.raises(NotImplementedError, match="TASK-054"):
+    with pytest.raises(PriorAuthNotSubmittable, match="no procedure"):
         await _adapter().submit_prior_auth(content)
 
 

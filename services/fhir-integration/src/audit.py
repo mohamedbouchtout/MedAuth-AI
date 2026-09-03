@@ -45,14 +45,19 @@ from __future__ import annotations
 from hipaa_logger import AuditAction, audit_log
 
 #: The actions this service records are ``AuditAction`` members, imported from
-#: hipaa-logger rather than re-declared here: READ_PATIENT, READ_ENCOUNTER and
-#: WRITE_NOTE_TO_EHR.
+#: hipaa-logger rather than re-declared here: READ_PATIENT, READ_ENCOUNTER,
+#: WRITE_NOTE_TO_EHR and SUBMIT_PRIOR_AUTH.
 #: A local constant per service is what let the vocabulary drift from its own
 #: definition three times — see ``hipaa_logger.actions``.
 SERVICE_NAME = "fhir-integration"
 RESOURCE_TYPE_PATIENT = "Patient"
 RESOURCE_TYPE_ENCOUNTER = "Encounter"
 RESOURCE_TYPE_DOCUMENT_REFERENCE = "DocumentReference"
+#: The row a submission is recorded against, named as this repository names
+#: it rather than as FHIR does — a PAS submission is a Claim on the wire, but
+#: what was disclosed is one ``prior_auth_requests`` row, and the audit trail
+#: is asked about our records rather than about the payer's.
+RESOURCE_TYPE_PRIOR_AUTH_REQUEST = "PriorAuthRequest"
 
 
 async def audit_ehr_read(
@@ -115,29 +120,33 @@ async def audit_ehr_write(
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> None:
-    """Record one write of a patient's data *to* an EHR (TASK-053).
+    """Record one write of a patient's data out of this system.
 
-    The counterpart to :func:`audit_ehr_read`, and deliberately its own function
-    rather than an action passed to that one. Two things genuinely differ:
+    Both outbound writers use it: the note write-back to an EHR (TASK-053) and
+    the prior-authorization submission to a payer (TASK-054). It is deliberately
+    its own function rather than an action passed to :func:`audit_ehr_read`,
+    because two things genuinely differ:
 
-    * **It can name a session.** The write-back is asked for by ``session_id``,
-      so unlike a launch-time read there is a visit to record it against — which
-      is what makes "was this encounter's note ever filed?" answerable.
+    * **It can name a session.** Both are asked for on behalf of one visit, so
+      unlike a launch-time read there is a session to record against — which is
+      what makes "was this encounter's note ever filed?" and "was this
+      authorization ever sent?" answerable at all.
     * **It records a disclosure rather than an access.** The row is written after
-      the EHR has accepted the document and before this service records the id
-      locally, so a failure to record still leaves a trail that the note reached
-      the chart. An audit row that appeared only on the fully successful path
-      would be missing from exactly the cases someone later goes looking for.
+      the far side has accepted and before this service records the result
+      locally, so a failure to record still leaves a trail that the data left. An
+      audit row that appeared only on the fully successful path would be missing
+      from exactly the cases someone later goes looking for.
 
     ``actor_id`` stays ``None`` for the same structural reason it does on a read:
     this service has no ``encounters`` row to take a provider UUID from, and the
     identity the EHR asserted goes in its own column.
 
     Args:
-        action: ``WRITE_NOTE_TO_EHR`` today.
-        resource_type: The FHIR resource type created, e.g. ``DocumentReference``.
-        resource_id: The id the EHR assigned it. An identifier, never content.
-        session_id: The encounter session the written note belongs to.
+        action: ``WRITE_NOTE_TO_EHR`` or ``SUBMIT_PRIOR_AUTH``.
+        resource_type: What was written — ``DocumentReference`` for a note,
+            ``PriorAuthRequest`` for a submission.
+        resource_id: The id it is known by. An identifier, never content.
+        session_id: The encounter session the write belongs to.
         fhir_practitioner_ref: The provider who authorized the launch this write
             was made under, or ``None`` when the EHR did not say.
         ip_address: Client IP, when the request context carried one.

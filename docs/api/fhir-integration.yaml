@@ -788,8 +788,204 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse_NoneType_'
+  /fhir/prior-auth:
+    post:
+      tags:
+      - fhir
+      summary: Submit a prior authorization to the payer
+      description: >-
+        Submits an assembled prior-authorization request to the payer, through
+        Da Vinci PAS (`POST [base]/Claim/$submit`) or, for an EHR with no PAS
+        support, through CoverMyMeds. **Which path is taken is the adapter's
+        business, not the caller's** — nothing in the request says which EHR
+        answered, and nothing in the response but `submission_method` reveals it.
+
+
+        **The body carries a `request_id` and nothing else.** The procedures, the
+        diagnoses, the clinical evidence, the payer and the two EHR identifiers
+        are read server-side from `track-a-clinical`. A client that posted the
+        bundle would produce no `READ_PRIOR_AUTH` row anywhere, and would put a
+        payer submission's payload under the control of the least trusted
+        participant in it. See CLAUDE.md, "Writing clinical data out to the EHR".
+
+
+        The order is: refuse a repeat before anything happens, read the request,
+        submit it, audit, then record the result locally. The external write goes
+        first deliberately — an authorization the payer holds with nothing here
+        pointing at it can be reconciled by its reference number, whereas a local
+        row claiming a submission that never happened is a silent lie no query
+        can distinguish from success.
+
+
+        **`outcome` is carried, never dropped.** A payer that queued the request
+        and one that refused to process it are both ordinary, conformant answers,
+        and a response carrying only a reference number would let a caller record
+        a rejection as a pending request.
+
+
+        **Machine-suggested codes never reach a payer.** The filter is inside the
+        bundle builder rather than at this route, so the CoverMyMeds path
+        inherits it too.
+
+
+        This is a PHI disclosure to a third party and writes one
+        `SUBMIT_PRIOR_AUTH` row, after the payer answers and before the result is
+        recorded — so the trail exists even when the recording step is the thing
+        that failed.
+      operationId: submit_prior_auth_fhir_prior_auth_post
+      parameters:
+      - name: X-MedAuth-Launch-Id
+        in: header
+        required: true
+        schema:
+          type: string
+          description: The launch_id returned by GET /fhir/callback. Names the SMART launch whose EHR access
+            token this submission is made with. Not a session_id — the two are different identifiers with
+            different lifetimes.
+          title: X-Medauth-Launch-Id
+        description: The launch_id returned by GET /fhir/callback. Names the SMART launch whose EHR access
+          token this submission is made with. Not a session_id — the two are different identifiers with
+          different lifetimes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitPriorAuthRequest'
+      responses:
+        '201':
+          description: What the payer said, and which path submitted it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_PriorAuthSubmissionData_'
+        '401':
+          description: This launch's EHR authorization is no longer valid; repeat the launch.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '404':
+          description: No such SMART launch, no such prior authorization request, or the endpoint does not
+            implement `Claim/$submit`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '409':
+          description: 'This request has already been submitted (`PRIOR_AUTH_ALREADY_SUBMITTED`). Refused
+            before the payer is called: a payer receiving one request twice may open two reviews.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '422':
+          description: The body is invalid, or the request cannot be made into a conformant submission
+            (`PRIOR_AUTH_NOT_SUBMITTABLE`) — no procedure to request, or no verified provider to ask on
+            behalf of. `PRIOR_AUTH_PATH_NOT_CONFIGURED` means this EHR submits through CoverMyMeds and
+            nothing configured it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '502':
+          description: The payer, its endpoint, or the clinical service was unreachable or unusable.
+            `PRIOR_AUTH_RECORD_FAILED` is the one case where the payer *did* accept the request — see
+            its message.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '504':
+          description: An upstream did not answer in time.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+
 components:
   schemas:
+    SubmissionMethod:
+      type: string
+      enum:
+        - fhir-pas
+        - covermymeds
+        - fax
+      title: SubmissionMethod
+      description: >-
+        Which path a prior authorization left this system by. Closed rather than
+        free text: the value is compared by string equality and round-trips
+        through a VARCHAR(50) that constrains nothing on its own.
+    SubmissionOutcome:
+      type: string
+      enum:
+        - complete
+        - queued
+        - partial
+        - error
+      title: SubmissionOutcome
+      description: >-
+        What the payer said, normalized across both submission paths. Taken from
+        ClaimResponse.outcome's required binding in the Da Vinci PAS IG;
+        CoverMyMeds is not FHIR and maps onto the same shape. `complete` means
+        the payer adjudicated the request and says nothing about which way.
+    SubmitPriorAuthRequest:
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          title: Request Id
+          description: The prior-authorization request to submit. Names one row of `prior_auth_requests`;
+            what is in it is resolved server-side.
+      additionalProperties: false
+      type: object
+      required:
+        - request_id
+      title: SubmitPriorAuthRequest
+      description: >-
+        One field, on purpose. Everything the submission needs is read
+        server-side, so that the read is audited and the payload never passes
+        through a browser.
+    PriorAuthSubmissionData:
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          title: Request Id
+          description: The request that was submitted.
+        outcome:
+          $ref: '#/components/schemas/SubmissionOutcome'
+          description: What the payer said.
+        payer_reference_number:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Payer Reference Number
+          description: The payer's reference for the submission, when it gave one. Legitimately absent
+            on a queued answer.
+        submission_method:
+          $ref: '#/components/schemas/SubmissionMethod'
+          description: Which path transmitted it — FHIR PAS, or CoverMyMeds.
+      type: object
+      required:
+        - request_id
+        - outcome
+        - submission_method
+      title: PriorAuthSubmissionData
+      description: What a successful submission reports.
+    ApiResponse_PriorAuthSubmissionData_:
+      properties:
+        data:
+          anyOf:
+            - $ref: '#/components/schemas/PriorAuthSubmissionData'
+            - type: 'null'
+        error:
+          anyOf:
+            - $ref: '#/components/schemas/ApiError'
+            - type: 'null'
+      type: object
+      title: ApiResponse[PriorAuthSubmissionData]
+      description: The standard envelope, carrying a prior-authorization submission result.
     Annotation:
       properties:
         authorReference:

@@ -31,6 +31,7 @@ def test_every_router_is_mounted() -> None:
         "/fhir/encounter/{encounter_id}/coverage-context",
         "/fhir/launch-context",
         "/fhir/notes",
+        "/fhir/prior-auth",
     } == paths
 
 

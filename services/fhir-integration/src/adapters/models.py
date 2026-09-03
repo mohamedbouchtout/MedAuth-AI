@@ -245,7 +245,7 @@ class NoteCode(BaseModel):
     only what a chart write needs. ``source`` is required rather than optional
     because it is the field that decides whether the code may be written at all —
     an entry without one is malformed, not a code of unknown provenance to be
-    sent anyway. See :data:`~src.adapters.note_document.SENDABLE_CODE_SOURCES`.
+    sent anyway. See :data:`~src.adapters.outbound_codes.SENDABLE_CODE_SOURCES`.
 
     Attributes:
         code: The code itself, dotted as stored (``M17.11``, not ``M1711``).

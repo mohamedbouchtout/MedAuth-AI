@@ -1,4 +1,4 @@
-"""The adapter against a real HAPI FHIR R4 server. TASK-052, TASK-052b.
+"""The adapter against a real HAPI FHIR R4 server. TASK-052, TASK-052b, TASK-053, TASK-054.
 
 **Why this exists alongside the unit tests.** Those drive every branch against a
 hand-written transport, which is the only way to produce a 200
@@ -44,8 +44,16 @@ import httpx
 import pytest
 
 from src.adapters.base import EHRAdapter
-from src.adapters.errors import FHIRResourceNotFound
-from src.adapters.models import ClinicalNoteContent, NoteCode
+from src.adapters.errors import FHIRMalformedResponse, FHIRResourceNotFound
+from src.adapters.models import (
+    ClinicalNoteContent,
+    CoverageInfo,
+    NoteCode,
+    PriorAuthContent,
+    PriorAuthEvidence,
+    PriorAuthProcedure,
+)
+from src.adapters.pas_bundle import build_request_bundle
 from src.adapters.site_of_care import organization_state
 
 HAPI_BASE_URL = os.environ.get("HAPI_FHIR_BASE_URL", "http://localhost:8080/fhir")
@@ -475,3 +483,98 @@ async def test_an_unreviewed_note_is_stored_as_preliminary(
 
             assert stored["docStatus"] == expected
             assert "authenticator" not in stored
+
+
+# -- The prior-authorization submission (TASK-054) ----------------------------
+#
+# **HAPI is not a payer and does not implement ``Claim/$submit``.** TASK-054 asks
+# for a check against "local HAPI FHIR as mock payer", and the honest version of
+# that is these two tests rather than a round trip that cannot happen: the
+# operation is a Da Vinci PAS profile that no general-purpose FHIR server
+# provides, and standing up a PAS reference implementation is TASK-054b's
+# neighbourhood, not this task's.
+#
+# What a real server *can* answer is worth more than a fixture in both cases —
+# whether the bundle we build is valid FHIR R4 at all, judged by a real
+# validator, and what a real 404 on an unimplemented operation maps to.
+
+
+def submittable_content(patient_id: str, encounter_id: str) -> PriorAuthContent:
+    """A request with everything a conformant PAS bundle requires."""
+    return PriorAuthContent(
+        request_id=str(uuid.uuid4()),
+        patient_id=patient_id,
+        encounter_id=encounter_id,
+        provider_reference=f"{HAPI_BASE_URL}/Practitioner/example",
+        payer_name="Aetna",
+        coverage=CoverageInfo(payer="Aetna", plan_type="PPO", member_id="W123456789"),
+        procedures=[PriorAuthProcedure(cpt_code="27447", description="total knee replacement")],
+        icd10_codes=[
+            NoteCode(
+                code="M17.11",
+                display="Unilateral primary osteoarthritis, right knee",
+                source="llm-extraction",
+            )
+        ],
+        clinical_evidence=[
+            PriorAuthEvidence(text="12 weeks of physical therapy with no improvement")
+        ],
+    )
+
+
+async def test_the_request_bundle_is_valid_fhir_by_a_real_validator(
+    seeded: dict[str, str], hapi: str
+) -> None:
+    """Post the bundle to ``Bundle/$validate`` and require no error or fatal issue.
+
+    This is what a real server can tell us that a fixture cannot: whether the
+    resource we compose is well-formed R4 at all. A cardinality mistake or a
+    misspelled element that every unit test here would happily round-trip is
+    caught by a validator that has the actual StructureDefinitions.
+
+    ``warning`` and ``information`` issues are allowed through: HAPI warns about
+    unresolvable references, and every reference in a PAS request bundle is
+    either relative to the payer's server or a ``urn:uuid`` naming a bundle
+    entry — so treating a warning as a failure would fail on the shape the
+    profile asks for.
+    """
+    bundle = build_request_bundle(submittable_content(seeded["patient_id"], seeded["encounter_id"]))
+
+    async with httpx.AsyncClient(base_url=hapi, timeout=30.0) as client:
+        response = await client.post(
+            "/Bundle/$validate",
+            json=bundle.model_dump(by_alias=True, exclude_none=True),
+            headers={"Content-Type": "application/fhir+json"},
+        )
+
+    outcome = response.json()
+    assert outcome["resourceType"] == "OperationOutcome"
+    blocking = [
+        issue for issue in outcome.get("issue", []) if issue.get("severity") in {"error", "fatal"}
+    ]
+    assert blocking == [], blocking
+
+
+async def test_a_server_without_the_pas_operation_fails_loudly(
+    adapter: EHRAdapter, seeded: dict[str, str]
+) -> None:
+    """A server that does not implement ``Claim/$submit`` must not look like a success.
+
+    **HAPI answers 400, not 404**, with an ``OperationOutcome`` whose issue code
+    is ``not-supported`` — "The FHIR endpoint on this server does not know how to
+    handle POST operation[Claim/$submit]". This test was written expecting a 404
+    and the real server said otherwise, which is the whole reason it runs against
+    one.
+
+    The 400 maps to ``FHIRMalformedResponse`` by ``_invoke``'s rule that a 4xx
+    which is not 401/403/404 is our request being refused rather than an outage —
+    and that reading is right here: the fix is to submit through another path for
+    this payer, never to retry the same request. What matters for a foreseeable
+    production state — a payer endpoint that does not speak PAS, which is the
+    whole reason ``AthenaAdapter`` overrides the submission — is that it raises
+    rather than quietly recording a submission that never happened.
+    """
+    content = submittable_content(seeded["patient_id"], seeded["encounter_id"])
+
+    with pytest.raises(FHIRMalformedResponse):
+        await adapter.submit_prior_auth(content)
