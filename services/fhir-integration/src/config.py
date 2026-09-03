@@ -134,6 +134,30 @@ class Settings(BaseSettings):
     #: caller is a provider waiting on a button.
     track_a_clinical_timeout_seconds: float = Field(default=5.0, gt=0)
 
+    #: CoverMyMeds, the prior-authorization path for a payer or EHR with no FHIR
+    #: PAS support. Athenahealth is the first, which is why ``AthenaAdapter``
+    #: overrides the submission (TASK-054).
+    #:
+    #: **Bound here now, ahead of the code that uses them.** Both variables have
+    #: sat in ``.env.example`` since TASK-001 read by nothing, which is a setting
+    #: that looks configured and is not — the same gap already found with
+    #: ``TRACK_A_CLINICAL_URL`` and, from the other direction, with
+    #: ``FHIR_INTEGRATION_URL`` in TASK-052b. An env var that is present and
+    #: unread is a worse trap than an absent one: it makes a deployment look
+    #: complete and fails somewhere else entirely.
+    #:
+    #: Empty means the CoverMyMeds path is not configured, and the override says
+    #: so plainly rather than failing inside an HTTP call to an empty host — the
+    #: same arrangement as ``track_a_clinical_url``.
+    covermymeds_base_url: str = ""
+
+    #: The CoverMyMeds credential. ``SecretStr`` for the reason the module
+    #: docstring gives about client secrets: it renders as asterisks wherever a
+    #: settings object is formatted, so a stray log line is harmless instead of a
+    #: disclosure. It is not a SMART registration, so it is not in
+    #: ``_CREDENTIAL_PREFIXES`` and ``credentials_for()`` never returns it.
+    covermymeds_api_key: SecretStr | None = None
+
     athena_client_id: str = ""
     athena_client_secret: SecretStr | None = None
     ecw_client_id: str = ""
