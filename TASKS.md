@@ -127,6 +127,57 @@ Claude Code should read this before starting any task to understand current stat
       this package on purpose — the matrix keeps packages under uniform rules, the
       dedicated job stays meaningful on its own.
 
+- [ ] **TASK-004b:** `Bundle` and `ClaimResponse` in `packages/fhir-types`
+  - Prerequisite for **TASK-054**, and blocking it. Split out of that task rather
+    than done inside it because this is TASK-004-shaped work in two languages,
+    and improvising FHIR models inline in a service is exactly what having this
+    package prevents.
+  - **Why they are needed, specifically.** Da Vinci PAS's `Claim/$submit` takes a
+    `Bundle` on `profile-pas-request-bundle` (a Claim plus every resource it
+    references) and returns a `Bundle` on `profile-pas-response-bundle` (a
+    `ClaimResponse` plus referenced resources). This package models `Claim` and
+    neither of the other two, so TASK-054 can currently neither build what it must
+    send nor read what comes back. See TASK-054 for the IG detail.
+  - `Bundle` with `BundleEntry` and `BundleLink`. `Bundle.entry.resource` is the
+    element that matters and it is polymorphic — reuse the existing `AnyResource`
+    discriminated union rather than inventing a second way to narrow on
+    `resourceType`. Add `Bundle` and `ClaimResponse` to that union as well.
+  - **`AnyResource` alone is the wrong type for `Bundle.entry.resource`, and this
+    is the trap to settle before writing the model.** It "raises rather than
+    validating as the wrong shape" for a resource type this package does not
+    model — correct where a caller knows what it asked for, and wrong here. A PAS
+    response bundle carries "referenced resources", which conformantly includes
+    types modelled nowhere in this package: `Practitioner`, `PractitionerRole`,
+    `Task`, `Organization`'s neighbours. Typed as a bare `AnyResource`, a
+    perfectly valid payer response would fail to parse and the failure would look
+    like a malformed response from the payer. An entry must therefore tolerate an
+    unmodelled resource type — but never by coercing it into a modelled shape,
+    and never by discarding it, since `extra="allow"` exists in this package
+    precisely so a round trip keeps what it did not understand.
+  - `ClaimResponse` with the backbone elements PAS actually reads: `item` and its
+    `adjudication`, plus `total`, `insurance`, `error` and `processNote`.
+    `outcome` is a **required** binding — `complete | error | partial | queued` —
+    so it is a `Literal` in `codes.py` by this package's own rule that only
+    required bindings are closed. `preAuthRef` is 0..1 at the root.
+  - **The TypeScript mirrors are not optional and not follow-up.**
+    `tests/unit/test_typescript_parity.py::test_every_model_has_an_interface`
+    iterates `fhir_types.__all__`, so a Python model added without its interface
+    fails CI — which is the test working, not a gate to route around. Mind the
+    parser's constraints on `typescript/src/`: one property per line, no inline
+    object literal types, closing brace on its own line.
+  - `Bundle.entry.search`/`request`/`response` are modelled even though PAS
+    prohibits them, for the same reason `extra="allow"` exists here: this package
+    models R4, and a profile's constraints are the caller's business. TASK-054's
+    builder is what satisfies the profile.
+  - CLAUDE.md's "FHIR resources used" line names seven resources. Add these two
+    there in the same change — the list is what a reader checks before assuming a
+    resource is unmodelled.
+  - **Test:** round-trip a PAS request bundle and a PAS response bundle through
+    the models with `by_alias=True, exclude_none=True` and assert nothing is lost
+  - **Test:** the parity suite passes with no changes to its own assertions —
+    if it needed loosening, the mirror is wrong rather than the test
+
+
 - [x] **TASK-005:** Initialize database schema + migrations
   - Create Alembic setup in `services/track-a-clinical` (owns migration authorship —
     see CLAUDE.md "Migration Ownership vs. Table Write Access" for what this does
@@ -5425,19 +5476,126 @@ logic do not change.
       person decides, rather than risking a second document.
 
 - [ ] **TASK-054:** Prior auth submission — base + Athena override
+  - Service: `services/fhir-integration`
+  - Prerequisite: **TASK-004b** (`Bundle` and `ClaimResponse` in
+    `packages/fhir-types`), TASK-050 (the adapter layer this fills a stub in),
+    TASK-051 (the launch that holds the credential), TASK-053 (the outbound-write
+    shape this follows).
   - **This is the second outbound writer, and it inherits CLAUDE.md's "Writing
     clinical data out to the EHR" rules rather than re-deciding them** — the
     `source` filter on any codes leaving this system, its own distinct audit
     action, an audit row in each service that acts, the EHR/payer-write-first
     ordering, and the refusal to submit twice what was already submitted. Cite
     that section; do not restate it.
-  - Implement `submit_prior_auth(bundle)` in base.py using FHIR Claim/$submit (Da Vinci PAS)
-  - Override in `adapters/athena.py`: Athenahealth does not support FHIR PAS — override
-    to submit via CoverMyMeds API instead
-  - Route: `POST /fhir/prior-auth`
+
+  - **The PAS operation's real shape, read off the IG rather than assumed.**
+    An earlier draft of this task said "implement `submit_prior_auth(bundle)`
+    using FHIR Claim/$submit", and TASK-050 typed the stub from that wording as
+    `submit_prior_auth(bundle: Claim) -> PriorAuthSubmission`. That was written
+    before anyone opened the Implementation Guide, the same way the CRD "skip the
+    RAG path entirely" claim was, and it is wrong in both directions.
+    `OperationDefinition/Claim-submit` (PAS v2.2.1) is a **type-level** operation
+    at `[base]/Claim/$submit` — `type: true`, `instance: false` — and:
+    - **In:** `resource`, 1..1, a **`Bundle`** on `profile-pas-request-bundle`,
+      documented as "A Bundle containing a single Claim plus referenced
+      resources". The profile fixes `Bundle.type` to `collection`, requires
+      `identifier` **1..1** and `timestamp` **1..1**, requires at least one entry,
+      prohibits `search`/`request`/`response` on an entry, and carries the
+      **ClaimFirst** invariant — the Claim must be the *first* entry.
+    - **Out:** `return`, 1..1, a **`Bundle`** on `profile-pas-response-bundle` —
+      "A Bundle containing a single ClaimResponse plus referenced resources" — or
+      an `OperationOutcome`. Never a bare `ClaimResponse`.
+    Correct the stub's signature and docstring in the same change that corrects
+    this text; a stub whose type encodes the mistake is how the mistake gets
+    built.
+
+  - **The adapter takes normalized content and composes the FHIR itself.** This
+    is the second correction and the larger one. The old signature assumed the
+    *caller* hands the adapter a finished FHIR resource, and TASK-053 settled the
+    opposite one task earlier: `write_clinical_note()` takes a
+    `ClinicalNoteContent` and `note_document.build_document_reference()` composes
+    the resource inside, which is what keeps the `source` filter and the required
+    elements somewhere a call site cannot skip and a subclass inherits by reuse.
+    Two further facts make it the only workable shape here:
+    - **No caller has ever held a `Claim`.** TASK-060 assembles `procedures`,
+      `diagnoses` and `clinical_evidence` as JSONB on `prior_auth_requests`.
+      Requiring a FHIR `Claim` at this boundary would push PAS resource
+      composition up into `services/prior-auth`, which is the layering the
+      adapter exists to prevent.
+    - **The Athena override needs the content, not the Bundle.** CoverMyMeds is
+      not FHIR. Handing that override a PAS Bundle would make it take a resource
+      apart again to recover the fields it needs.
+    So: `submit_prior_auth(content: PriorAuthContent) -> PriorAuthSubmission`,
+    with a `pas_bundle.py` builder beside `note_document.py`, on the same terms —
+    the builder is where the `source` filter and the profile's required elements
+    live, and a vendor subclass amends what it returns rather than rebuilding.
+
+  - **`outcome` is carried, never dropped.** `ClaimResponse.outcome` is 1..1 with
+    a **required** binding to `complete | error | partial | queued`, so a payer
+    pending the request and a payer rejecting the submission are both ordinary,
+    conformant answers. A `PriorAuthSubmission` carrying only a reference number
+    and a method would let TASK-061 record `status='submitted'` for a request the
+    payer errored on or has not decided — the same failure as reading a payer's
+    silence as "no authorization required", one layer down. `preAuthRef` is the
+    payer's reference and is **0..1 at the ClaimResponse root**; it is
+    legitimately absent on a `queued` answer, and its absence is not an error.
+    **Following up a queued answer is out of scope here** — this task submits.
+
+  - **`submission_method` becomes a closed vocabulary in this task.** It is a
+    plain `str` on `PriorAuthSubmission` because TASK-050 had one value and
+    deliberately declined to be wrong about a vocabulary it could not yet see.
+    This task creates the second, so it converts — the fourth instance of the
+    pattern `payer_vocab`, `hipaa_logger.AuditAction` and `EHRType` already
+    established, each converted at the moment a second real value appeared. A
+    `StrEnum`, validated on write, because the value round-trips through a
+    `VARCHAR(50)` column that constrains nothing on its own.
+
+  - **Scope boundary: this task submits a bundle it is given; it does not
+    assemble one and does not decide where to send it.** TASK-060 (assembly) and
+    TASK-061 (the router that calls this route) do not exist —
+    `services/prior-auth/src/` is an empty `__init__.py` — so the seam is drawn
+    here and named rather than discovered later:
+    - **The route body is `{request_id}` and nothing else**, resolved
+      server-side against `prior_auth_requests`, exactly as TASK-053's body is
+      `{session_id}` and for the same reason: a client posting the bundle back
+      produces no read anywhere and puts a payer submission's payload under the
+      control of the least trusted participant in it.
+    - **Tests construct `prior_auth_requests` rows directly**, since nothing
+      writes them yet. That is the scope boundary, not a testing shortcut: when
+      TASK-060 lands, what changes is who writes the row, not what this route
+      does with it.
+    - The payer-capability routing that decides *whether* a payer takes FHIR PAS
+      at all stays in TASK-061. This route is reached having already been chosen.
+
+  - Implement `submit_prior_auth()` in `adapters/base.py` against `Claim/$submit`
+  - Override in `adapters/athena.py`: Athenahealth does not support FHIR PAS —
+    override to submit via CoverMyMeds instead. **The seam is in scope; the
+    field-level translation is not.** `COVERMYMEDS_API_KEY` and
+    `COVERMYMEDS_BASE_URL` are bound into `Settings` in this task regardless — an
+    env var that is present but read by nothing is the trap CLAUDE.md names, and
+    one already found three times in this repository. The mapping from
+    `PriorAuthContent` onto CoverMyMeds' request is written against no sandbox and
+    no published schema, so it is **marked unverified in the module that holds
+    it**, naming what has never been checked against the real API — the same
+    treatment as TASK-031's dot-normalization gap. There is no cheap "go and read
+    the real source" path here, unlike TASK-013's CMS export or TASK-053's LOINC
+    lookup, so a full guessed translation presented as working would be a fiction
+    with no way to falsify it. Widening it is its own task, gated on sandbox
+    credentials.
+  - Route: `POST /fhir/prior-auth`, taking `launch_id` in `X-MedAuth-Launch-Id`
+    like every other `/fhir/*` route
   - The route handler calls `adapter.submit_prior_auth()` — it gets the right path automatically
-  - Records payer reference number + submission_method in prior_auth_requests table
+  - Records payer reference number + `submission_method` + the outcome in the
+    `prior_auth_requests` table, through a server-to-server route on the service
+    that owns it, never by opening a database connection this service has
+    deliberately never had
   - **Test (base):** submit to local HAPI FHIR as mock payer
+  - **Test (base):** the request bundle satisfies the profile — `type` is
+    `collection`, `identifier` and `timestamp` are present, and the Claim is the
+    first entry. Asserted on the bytes that go on the wire, not only on the
+    builder's return value, so a builder that stops being called is still caught
+  - **Test (base):** a `queued` response with no `preAuthRef` is recorded as
+    queued and not as a completed submission
   - **Test (Athena override):** mock CoverMyMeds API, verify it's called instead of FHIR PAS
 
 - [ ] **TASK-055:** Athenahealth adapter completion
