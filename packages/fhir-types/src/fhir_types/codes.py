@@ -129,3 +129,39 @@ service took place.
 
 QuantityComparator = Literal["<", "<=", ">=", ">"]
 """Quantity.comparator — present only when the value is a bound, not a measurement."""
+
+BundleType = Literal[
+    "document",
+    "message",
+    "transaction",
+    "transaction-response",
+    "batch",
+    "batch-response",
+    "history",
+    "searchset",
+    "collection",
+]
+"""Bundle.type — https://hl7.org/fhir/R4/valueset-bundle-type.html
+
+Da Vinci PAS uses ``collection`` for both the request and the response bundle. The
+other members are legal R4 and this package models R4, so they stay — a profile's
+constraints are the caller's business, not this package's.
+"""
+
+SearchEntryMode = Literal["match", "include", "outcome"]
+"""Bundle.entry.search.mode — https://hl7.org/fhir/R4/valueset-search-entry-mode.html"""
+
+HTTPVerb = Literal["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"]
+"""Bundle.entry.request.method — https://hl7.org/fhir/R4/valueset-http-verb.html"""
+
+RemittanceOutcome = Literal["queued", "complete", "error", "partial"]
+"""ClaimResponse.outcome — https://hl7.org/fhir/R4/valueset-remittance-outcome.html
+
+Whether the payer *processed* the request, not whether it approved it. A prior
+authorization that was fully considered and denied is ``complete``; the decision
+itself is in ``ClaimResponse.item.adjudication``. Reading ``complete`` as approval
+is the mistake this docstring exists to prevent.
+"""
+
+NoteType = Literal["display", "print", "printoper"]
+"""ClaimResponse.processNote.type — https://hl7.org/fhir/R4/valueset-note-type.html"""

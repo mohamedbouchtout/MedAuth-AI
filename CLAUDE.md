@@ -1943,7 +1943,15 @@ need to know which driver style another package expects.
 - FHIR version: R4 (4.0.1)
 - SMART on FHIR version: 2.0
 - Local dev FHIR server: HAPI FHIR at localhost:8080 (Docker)
-- FHIR resources used: Patient, Encounter, Condition, Coverage, MedicationRequest, DocumentReference, Claim
+- FHIR resources used: Patient, Encounter, Condition, Coverage, MedicationRequest,
+  DocumentReference, Claim, Bundle, ClaimResponse. `Bundle` and `ClaimResponse` are
+  what Da Vinci PAS actually exchanges — `Claim/$submit` takes a bundle carrying a
+  Claim plus every resource it references and answers with one carrying a
+  ClaimResponse (TASK-004b). This list is what a reader checks before assuming a
+  resource is unmodelled, so add to it in the change that models the resource.
+  `packages/fhir-types` also models `Location` and `Organization`, which are not on
+  this list because nothing reads or writes them as a FHIR resource in their own
+  right — TASK-052b reads an encounter's site of care through them.
 
 ### EHR Priority Order (do not deviate from this)
 1. **Athenahealth** — build and certify first. Most accessible developer program,

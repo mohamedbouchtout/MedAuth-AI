@@ -1,6 +1,6 @@
 """The TypeScript mirrors must not drift from the Pydantic models.
 
-Two hand-written definitions of the same seven resources will diverge — someone
+Two hand-written definitions of the same resources will diverge — someone
 adds an element on the Python side for the prior-auth bundle and no one touches
 ``typescript/src/``, and the drift only surfaces months later as a screen that
 silently renders nothing. This module is what makes that a CI failure instead.
@@ -186,12 +186,20 @@ def test_resource_type_is_a_property_on_every_resource() -> None:
     The list is written out rather than derived, so adding a resource is a
     deliberate edit here instead of something a new module changes silently.
     ``Location`` and ``Organization`` joined it in TASK-052b, which reads an
-    encounter's site of care from them.
+    encounter's site of care from them; ``Bundle`` and ``ClaimResponse`` in
+    TASK-004b, which are what Da Vinci PAS exchanges.
+
+    ``UnknownResource`` is deliberately absent. It is the fallback for a resource
+    type this package does *not* model, and it declares no elements at all — so it
+    has no ``resourceType`` field, never reaches ``MODELS``, and is not a resource
+    in the sense this test means.
     """
     resources = [name for name in MODELS if "resourceType" in _serialized_names(MODELS[name])]
 
     assert sorted(resources) == [
+        "Bundle",
         "Claim",
+        "ClaimResponse",
         "Condition",
         "Coverage",
         "DocumentReference",

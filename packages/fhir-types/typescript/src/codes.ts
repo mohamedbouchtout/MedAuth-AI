@@ -116,3 +116,40 @@ export type EncounterLocationStatus = 'planned' | 'active' | 'reserved' | 'compl
 
 /** Quantity.comparator — present only when the value is a bound, not a measurement. */
 export type QuantityComparator = '<' | '<=' | '>=' | '>';
+
+/**
+ * Bundle.type — https://hl7.org/fhir/R4/valueset-bundle-type.html
+ *
+ * Da Vinci PAS uses `collection` for both the request and the response bundle.
+ * The other members are legal R4 and this package mirrors R4, so they stay — a
+ * profile's constraints are the caller's business, not this package's.
+ */
+export type BundleType =
+  | 'document'
+  | 'message'
+  | 'transaction'
+  | 'transaction-response'
+  | 'batch'
+  | 'batch-response'
+  | 'history'
+  | 'searchset'
+  | 'collection';
+
+/** Bundle.entry.search.mode — https://hl7.org/fhir/R4/valueset-search-entry-mode.html */
+export type SearchEntryMode = 'match' | 'include' | 'outcome';
+
+/** Bundle.entry.request.method — https://hl7.org/fhir/R4/valueset-http-verb.html */
+export type HTTPVerb = 'GET' | 'HEAD' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
+
+/**
+ * ClaimResponse.outcome — https://hl7.org/fhir/R4/valueset-remittance-outcome.html
+ *
+ * Whether the payer *processed* the request, not whether it approved it. A prior
+ * authorization that was fully considered and denied is `complete`; the decision
+ * itself is in `ClaimResponse.item.adjudication`. Reading `complete` as approval
+ * is the mistake this comment exists to prevent.
+ */
+export type RemittanceOutcome = 'queued' | 'complete' | 'error' | 'partial';
+
+/** ClaimResponse.processNote.type — https://hl7.org/fhir/R4/valueset-note-type.html */
+export type NoteType = 'display' | 'print' | 'printoper';
