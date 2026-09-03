@@ -51,6 +51,7 @@ from track_a_clinical.models.prior_auth_request import (
     PRIOR_AUTH_STATUS_PENDING,
     PRIOR_AUTH_STATUS_SUBMITTED,
     PriorAuthRequest,
+    SubmissionMethod,
 )
 
 __all__ = [
@@ -76,6 +77,7 @@ __all__ = [
     "InsurancePolicy",
     "JsonObject",
     "PriorAuthRequest",
+    "SubmissionMethod",
     "dump_codes",
     "load_codes",
     "matching_key",
