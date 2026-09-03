@@ -9,7 +9,7 @@ from track_a_clinical.api import dependencies
 from track_a_clinical.main import create_app
 
 
-def test_app_exposes_the_session_and_note_routes() -> None:
+def test_app_exposes_the_session_note_and_prior_auth_routes() -> None:
     paths = create_app().openapi()["paths"]
 
     assert set(paths) == {
@@ -19,6 +19,8 @@ def test_app_exposes_the_session_and_note_routes() -> None:
         "/sessions/{session_id}/token",
         "/notes/{session_id}",
         "/notes/{session_id}/ehr-reference",
+        "/prior-auth/{request_id}",
+        "/prior-auth/{request_id}/submission",
     }
     assert set(paths["/sessions/start"]) == {"post"}
     # Read and edit share one path, which is why this asserts on the methods:
@@ -27,6 +29,11 @@ def test_app_exposes_the_session_and_note_routes() -> None:
     # Same again for the EHR-linkage sub-resource: a GET the write-back reads its
     # identifiers from, and the PATCH that records what it filed (TASK-053).
     assert set(paths["/notes/{session_id}/ehr-reference"]) == {"get", "patch"}
+    # The prior-auth pair is two paths rather than one for a reason worth
+    # keeping: the read is a whole request, and the PATCH is a sub-resource that
+    # records a submission, so a client cannot reach the write by guessing.
+    assert set(paths["/prior-auth/{request_id}"]) == {"get"}
+    assert set(paths["/prior-auth/{request_id}/submission"]) == {"patch"}
 
 
 def test_each_app_is_independent() -> None:

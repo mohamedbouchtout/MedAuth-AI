@@ -1,4 +1,4 @@
-"""``submission_method`` is a closed vocabulary, enforced on write (TASK-054).
+"""The prior-auth vocabularies are closed and enforced on write (TASK-054).
 
 The column is ``VARCHAR(50)`` and constrains nothing on its own, so the guarantee
 that one method has one spelling lives in :class:`SubmissionMethod` and in the
@@ -13,7 +13,14 @@ import uuid
 
 import pytest
 
-from track_a_clinical.models import PriorAuthRequest, SubmissionMethod
+from track_a_clinical.models import (
+    PRIOR_AUTH_STATUS_ERROR,
+    PRIOR_AUTH_STATUS_SUBMITTED,
+    PriorAuthRequest,
+    SubmissionMethod,
+    SubmissionOutcome,
+)
+from track_a_clinical.prior_auth import status_for_outcome
 
 
 def make_request(**overrides: object) -> PriorAuthRequest:
@@ -88,3 +95,56 @@ def test_the_refusal_names_what_is_permitted() -> None:
     assert "carrier-pigeon" in message
     for method in SubmissionMethod:
         assert method.value in message
+
+
+class TestPayerOutcome:
+    """``payer_outcome`` is the same arrangement one column over (TASK-054).
+
+    It arrives over HTTP from ``fhir-integration`` exactly as the method does, is
+    compared by string equality by whoever follows a queued request up, and sits
+    in a ``VARCHAR(20)`` that constrains nothing. So it gets the same enum and the
+    same validator, for the same reasons.
+    """
+
+    def test_every_member_is_accepted(self) -> None:
+        for outcome in SubmissionOutcome:
+            assert make_request(payer_outcome=outcome).payer_outcome == outcome.value
+
+    def test_null_is_accepted(self) -> None:
+        """A request that has not been submitted has no answer to hold."""
+        assert make_request(payer_outcome=None).payer_outcome is None
+
+    def test_an_unknown_outcome_raises_rather_than_being_stored(self) -> None:
+        """An answer we cannot name is not one we can honestly record."""
+        with pytest.raises(ValueError, match="payer_outcome must be one of"):
+            make_request(payer_outcome="approved")
+
+    def test_the_permitted_values_are_named_in_the_message(self) -> None:
+        with pytest.raises(ValueError, match="complete, error, partial, queued"):
+            make_request(payer_outcome="pending")
+
+    def test_a_differently_spelled_member_is_refused(self) -> None:
+        """Storing ``COMPLETE`` beside ``complete`` is what the enum exists to prevent."""
+        with pytest.raises(ValueError):
+            make_request(payer_outcome="COMPLETE")
+
+
+class TestStatusForOutcome:
+    """The lifecycle status a payer's answer puts a request into.
+
+    The distinction that matters is ``error`` against everything else: the payer
+    refused to process the request, so nothing is pending with them, and
+    recording that as ``submitted`` would leave someone waiting for a decision
+    that is never coming.
+    """
+
+    def test_a_refusal_is_not_a_submission(self) -> None:
+        assert status_for_outcome(SubmissionOutcome.ERROR) == PRIOR_AUTH_STATUS_ERROR
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [SubmissionOutcome.COMPLETE, SubmissionOutcome.QUEUED, SubmissionOutcome.PARTIAL],
+    )
+    def test_everything_the_payer_took_in_is_submitted(self, outcome: SubmissionOutcome) -> None:
+        """Which of the three it was stays on ``payer_outcome``, not here."""
+        assert status_for_outcome(outcome) == PRIOR_AUTH_STATUS_SUBMITTED

@@ -48,10 +48,12 @@ from track_a_clinical.models.insurance_policy import (
 from track_a_clinical.models.prior_auth_request import (
     PRIOR_AUTH_STATUS_APPROVED,
     PRIOR_AUTH_STATUS_DENIED,
+    PRIOR_AUTH_STATUS_ERROR,
     PRIOR_AUTH_STATUS_PENDING,
     PRIOR_AUTH_STATUS_SUBMITTED,
     PriorAuthRequest,
     SubmissionMethod,
+    SubmissionOutcome,
 )
 
 __all__ = [
@@ -63,6 +65,7 @@ __all__ = [
     "ENCOUNTER_STATUS_COMPLETED",
     "PRIOR_AUTH_STATUS_APPROVED",
     "PRIOR_AUTH_STATUS_DENIED",
+    "PRIOR_AUTH_STATUS_ERROR",
     "PRIOR_AUTH_STATUS_PENDING",
     "PRIOR_AUTH_STATUS_SUBMITTED",
     "SOURCE_COMPREHEND_MEDICAL",
@@ -78,6 +81,7 @@ __all__ = [
     "JsonObject",
     "PriorAuthRequest",
     "SubmissionMethod",
+    "SubmissionOutcome",
     "dump_codes",
     "load_codes",
     "matching_key",

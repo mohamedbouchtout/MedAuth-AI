@@ -28,9 +28,10 @@ EXPECTED_TABLES = {
 }
 
 # Straight from TASK-005's inline SQL, in declaration order, plus the columns
-# later migrations added: `state` (0003, TASK-024) and `launch_id` (0006,
-# TASK-052b). Written out rather than derived, so a column arrives here as a
-# deliberate edit and never as a side effect of touching a model.
+# later migrations added: `state` (0003, TASK-024), `launch_id` (0006,
+# TASK-052b) and `payer_outcome` (0007, TASK-054). Written out rather than
+# derived, so a column arrives here as a deliberate edit and never as a side
+# effect of touching a model.
 EXPECTED_COLUMNS = {
     "encounters": [
         "id",
@@ -88,6 +89,7 @@ EXPECTED_COLUMNS = {
         "clinical_evidence",
         "submission_method",
         "payer_reference_number",
+        "payer_outcome",
         "submitted_at",
         "decided_at",
         "denial_reason",
