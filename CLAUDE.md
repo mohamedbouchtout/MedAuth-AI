@@ -1405,7 +1405,7 @@ models generated from the same schema — only migration authorship is centraliz
 not query access.
 
 ### Where the shared SQLAlchemy models live (cross-cutting — applies to every task)
-The mapped classes for the five core tables live in
+The mapped classes for the core tables live in
 `services/track-a-clinical/src/track_a_clinical/models/`, one module per table,
 exported from the package `__init__`. Every service that touches those tables
 imports from there rather than mapping its own class against the same table:
@@ -1901,6 +1901,88 @@ What follows from that, and is easy to undo by accident:
 `resource_type` is the resource name the row is about — `Encounter`,
 `ClinicalNote`, `ClinicalNudge`, `PriorAuthRequest`, `Patient` — and
 `resource_id` is that row's primary key.
+
+### Provider identity — the registry that resolves an EHR practitioner (cross-cutting)
+Settled by TASK-025b, and settled here rather than inside it because TASK-070
+needs the same answer, and because every audit row TASK-030 and TASK-060 write
+takes its actor from the column this section decides how to fill.
+
+**This is the sibling of the section above, arriving from the other side.** That
+one asks where an EHR-asserted practitioner goes in the *audit* table, and
+answers: its own column, because `actor_id` is a UUID and a `Practitioner` id is
+not. This one asks the same question of `encounters.provider_id`, and the type
+mismatch is identical — `postgresql.UUID` against a FHIR `id` of
+`[A-Za-z0-9\-\.]{1,64}`, which HAPI answers as `"1"`. The answers differ because
+the two columns mean different things, and the difference is the whole content of
+this section.
+
+**Why the audit answer does not transfer.** `audit_log` records what happened, so
+recording the EHR's own reference verbatim in a second column is a complete
+answer — nothing else needs to join to it. `encounters.provider_id` is a *key*:
+TASK-030 and TASK-060 read it as `actor_id` for the work no request triggered,
+`GET`/`PATCH /notes/{session_id}` read it as the actor for a route with no
+credential, and `PATCH /nudges/{nudge_id}/acknowledge` resolves through two joins
+to reach it. Giving that column a second nullable sibling would fork every one of
+those readers, which is exactly the "who accessed patient X is now two columns"
+cost the section above accepts once and should not pay twice.
+
+**The decision: a `providers` table, and `provider_id` is a row in it.** One row
+per `Practitioner` the EHR has asserted and we have verified, with the reference
+stored as the claim gave it — normally an absolute URL, for the reason the audit
+column stores one: a `Practitioner` id is unique only within one EHR, so
+`Practitioner/1` on two servers is two different people. `UNIQUE` on that column,
+and resolution is a get-or-create, so two launches by one practitioner cannot
+mint two providers for one person.
+
+- **`POST /providers/resolve` in `track-a-clinical` is the only way a row is
+  created.** That service owns the migration history for the core schema and owns
+  `encounters`, so the table and its writer live there; `fhir-integration` calls
+  it over HTTP, holding no database connection of its own, exactly as the note
+  write-back does in the other direction.
+- **It is not a PHI route and writes no audit row.** A practitioner reference is
+  the identity of the *provider*, not of a patient, and Known Constraints #6 is
+  an if-and-only-if in both directions — an operational write in `audit_log`
+  makes "who accessed patient X" a query you have to filter rather than one you
+  can just run. It logs at INFO like `POST /policies/ingest`.
+- **The client never sees a practitioner reference.** `GET /fhir/launch-context`
+  returns `provider_id` already resolved, so an app receives an opaque local
+  identifier and cannot assert a provider identity of its own. That is "the
+  provider comes from the `encounters` row, never from the presented token's
+  claim", applied one step earlier — at the point the identity is minted rather
+  than at the point it is read back.
+- **A launch whose actor was never verified resolves to no provider.** TASK-051c
+  writes `fhir_practitioner_ref` only after checking the `id_token`'s signature
+  against the EHR's published keys, so a null there means we do not know who
+  launched us. `provider_id` is then null too, and a visit cannot be started —
+  never a placeholder row. Minting a provider for an unverified claim would put a
+  fabricated identity in the one column an auditor reads to answer "who saw this
+  patient", which is the failure the null-over-fabrication rule exists to
+  prevent.
+
+**Two alternatives were considered and rejected, and both will look tempting
+again:**
+
+- **Deriving a UUIDv5 from the practitioner reference** needs no table, no
+  migration and no HTTP hop, and it is deterministic, so it is the cheap answer
+  and it is wrong for one reason: it is one-way. Nothing anywhere would record
+  which practitioner a derived UUID came from, so every audit row written by the
+  Redis consumers would carry an actor that no query can resolve to a person —
+  and it would carry it *opaquely*, looking exactly like a provider this system
+  knows. That is worse than the honest null this repository prefers, because a
+  null is legible as an absence and a meaningless UUID is not.
+- **Widening `encounters.provider_id` to text** is the same move the section
+  above already rejects for `actor_id`, and it fails for the same reason: the
+  column's type is a guarantee other readers depend on, and relaxing it for one
+  new producer weakens it for all of them.
+
+**No foreign key from `encounters.provider_id` to `providers.id`, deliberately.**
+`POST /sessions/start` takes `provider_id` as an unauthenticated body field in
+v1 — a weakness this document already names in the session section — so a
+foreign key would convert a documented-weak field into a hard constraint, reject
+every existing row and every test double, and do it in the name of an invariant
+nothing currently assumes. What changes that: when provider authentication lands
+in Phase 5 and the field stops being caller-supplied, the constraint becomes
+free and should be added. Until then the registry is a resolver, not a gate.
 
 ### Alembic version table isolation
 hipaa-logger's migrations and each service's migrations run against the same database.

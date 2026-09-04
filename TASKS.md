@@ -2576,10 +2576,13 @@ The insurance policy RAG is the technical core. Build and validate before other 
       131 tests pass with 94% coverage against the 80% gate, and each commit in
       the series typechecks and passes its own suite.
 
-- [ ] **TASK-025b:** Real patient and provider selection on mobile
+- [x] **TASK-025b:** Real patient and provider selection on mobile
   - Prerequisite: TASK-025 (the seam this fills), TASK-052 (base FHIR resource
-    fetching)
-  - App: `apps/mobile`; also `services/fhir-integration` for the search route
+    fetching), TASK-051c (the verified `fhirUser` claim the provider half
+    resolves from), TASK-051d (`GET /fhir/launch-context`)
+  - App: `apps/mobile`; also `services/fhir-integration` for the search route and
+    `services/track-a-clinical` for the provider registry the search route's
+    sibling resolves against
   - **The gap.** TASK-025 starts a visit through an injected function returning
     `{patient_id, provider_id}`, because neither identifier has a real source
     yet. The seam let that screen ship with its refusal behaviour intact; this
@@ -2595,16 +2598,78 @@ The insurance policy RAG is the technical core. Build and validate before other 
     the chart in front of them. Take
     the launch context when there is one and search only when there is not.
   - It reads patient demographics, so it audits through hipaa-logger like every
-    other route in that service.
-  - Provider identity still arrives with SMART on FHIR in Phase 5. If that has
-    not landed, fill the patient half and say so rather than inventing a
-    provider.
-  - Until this lands, no build of `apps/mobile` can start a real encounter, and
-    that is deliberate — see the hardcoded-id argument in TASK-025.
+    other route in that service. **One `READ_PATIENT` row per match the response
+    discloses**, not one per call: a search that returned eight patients
+    disclosed eight identifiers, and a single row naming none of them would make
+    seven of those disclosures invisible to the one query the audit table exists
+    to answer. A search that matched nothing discloses nothing and writes no row,
+    on the same terms as a launch that carried no patient.
+  - **The provider half is no longer waiting on Phase 5, and this bullet
+    replaces the one that said it was.** That wording was written before
+    TASK-051c, which captures the SMART `fhirUser` claim, verifies it against the
+    EHR's published keys, and stores the resolved `Practitioner` reference on the
+    launch record. The provider is therefore *known* — what is missing is only a
+    type: `encounters.provider_id` is a UUID and a FHIR `Practitioner` id is
+    `[A-Za-z0-9\-\.]{1,64}`, which HAPI answers as `"1"`. So this task adds the
+    `providers` registry that turns one into the other. The decision, the two
+    alternatives rejected, and what it costs are in CLAUDE.md under "Provider
+    identity — the registry that resolves an EHR practitioner"; this task cites
+    that section and does not re-derive it.
+  - **`provider_id` is resolved server-side and reaches the client already
+    resolved.** `GET /fhir/launch-context` returns it alongside the patient, so
+    a client never sees a practitioner reference and never asserts a provider
+    identity of its own. That is the same rule as "the provider comes from the
+    `encounters` row, never from the presented token's claim", applied one step
+    earlier — at the point the identity is minted rather than at the point it is
+    read back.
+  - **What still blocks a real encounter on mobile is narrower now, and it is
+    not this task.** Every route that answers either half is keyed on
+    `X-MedAuth-Launch-Id`, because both need the launch's EHR access token — and
+    **no client in this repository can obtain a `launch_id` at all.**
+    `GET /fhir/callback` answers with JSON in whatever browser the EHR redirected,
+    and neither app has any launch flow. That gap was not visible from TASK-025b's
+    own text, was found while building it, and is genuinely two pieces of work
+    rather than one: **TASK-051e** decides how a completed launch reaches a client
+    without putting a capability handle in a URL, and **TASK-025c** builds the
+    mobile flow on top of it. So the patient source here is complete and tested
+    against both paths, behind one remaining seam — the `launch_id` — which is a
+    single opaque string rather than the "identify a patient and a provider" seam
+    it replaces.
   - **Test:** a search returns matches and the selection populates the
     start-visit call
   - **Test:** TASK-025's session screen tests still pass with the real
     implementation substituted for the seam
+
+- [ ] **TASK-025c:** Obtain a SMART launch from `apps/mobile`
+  - Prerequisite: **TASK-051e** (the handoff this consumes), TASK-051 (the launch
+    itself), TASK-025b (everything that consumes the resulting `launch_id`)
+  - App: `apps/mobile`
+  - **The gap, found while building TASK-025b.** Every route that identifies a
+    patient or a provider is keyed on `X-MedAuth-Launch-Id`, because each needs
+    the launch's EHR access token. Nothing in `apps/mobile` performs a SMART
+    launch, so the app holds no `launch_id` and cannot call any of them. This is
+    the whole of what still stops a real encounter starting on this platform —
+    TASK-025b filled everything downstream of it.
+  - Drive `GET /fhir/launch` in a system browser (Expo's `WebBrowser`
+    `openAuthSessionAsync`, not an in-app `WebView` — an OAuth password should
+    never be typed into a screen the app can read), and take the completed
+    launch back through whatever TASK-051e settles.
+  - **Both launch types, because TASK-025b's two paths depend on which one
+    happened.** An EHR launch carries `iss` and `launch` and yields a patient;
+    a standalone launch carries `iss` alone and yields none, which is what makes
+    the search path reachable. Do not build only the EHR case: the search half
+    of TASK-025b would then be untestable against a real launch.
+  - **`launch_id` is stored in memory for the life of the app process, never on
+    disk.** It resolves to an EHR access token, so it is a credential by the
+    definition this repository already applies to it — `expo-secure-store` would
+    be the floor if it ever needed to persist, and it does not, because a launch
+    outlives neither the working day nor `SMART_LAUNCH_RECORD_TTL_SECONDS`.
+  - **Test:** an EHR launch yields a `launch_id` and the patient source takes the
+    launch context path
+  - **Test:** a standalone launch yields a `launch_id` and the patient source
+    falls through to search
+  - **Test:** a launch the provider cancels leaves the app with no `launch_id`
+    and the start-visit action refusing, never a partially-configured state
 
 ---
 
@@ -4579,6 +4644,39 @@ logic do not change.
       deliberately** — it enumerates the mounted paths, so it is meant to fail
       when a route appears.
 
+- [ ] **TASK-051e:** Hand a completed launch back to a client
+  - Prerequisite: TASK-051 (the callback this changes)
+  - Service: `services/fhir-integration`; unblocks **TASK-025c** and **TASK-070**
+  - **The gap, found while building TASK-025b.** `GET /fhir/callback` answers
+    with `{launch_id, ehr_type, expires_in}` as JSON, in whatever browser the
+    EHR redirected. That is a perfectly good answer for a service-to-service
+    caller and no answer at all for an application: the browser renders the JSON
+    and the app that started the launch never sees it. So no client in this
+    repository can obtain a `launch_id`, and every launch-keyed route — the two
+    TASK-052 reads, TASK-051d's launch context, TASK-025b's patient search — is
+    unreachable from `apps/web` and `apps/mobile` alike.
+  - **The obvious fix is the one thing this repository forbids.** Redirecting to
+    the client with `?launch_id=...` puts a capability handle in a URL, which
+    `services/fhir-integration/src/api/fhir.py` refuses in terms: a `launch_id`
+    resolves to an EHR access token, and a query string is "the one place a
+    credential is certain to be logged by intermediaries". A fragment is not an
+    answer either — it survives the browser but not a native `WebBrowser`
+    result, and it still lands in history.
+  - **So the handoff needs a design, and it is a cross-cutting one.** Both apps
+    consume it and the CLAUDE.md rule for that case applies: settle it once in
+    that document and have TASK-025c and TASK-070 cite it. The shape to start
+    from is the one this codebase already uses for the launch itself — a
+    single-use, short-TTL handle exchanged for the real value over a POST, the
+    way `fhir_launch:{state}` is single-use and consumed by the callback. Decide
+    it against a real vendor redirect rather than in the abstract.
+  - **Whatever is chosen must keep TASK-051's own properties.** No access token,
+    refresh token or scope reaches the client; nothing is logged that names the
+    launch; and a handle that has been redeemed cannot be redeemed twice.
+  - **Test:** a completed launch is redeemable exactly once, and the second
+    attempt is a 404 rather than a second working handle
+  - **Test:** no log line and no redirect URL emitted by the flow contains the
+    `launch_id`
+
 - [x] **TASK-052:** Base FHIR resource fetching (implements base.py methods)
   - Service: `services/fhir-integration`
   - Prerequisite: **TASK-050** (the stubs and the normalized models this fills
@@ -5868,8 +5966,14 @@ logic do not change.
   - Start session: after an EHR launch, take the patient and encounter from
     **TASK-051d**'s `GET /fhir/launch-context` rather than searching for a
     patient the EHR has already named; fall back to patient search via
-    `GET /fhir/patient/search?query=...` for a standalone launch (TASK-025b adds
-    that route). Then `POST /sessions/start` (TASK-006) with the selected
+    `GET /fhir/patient/search?query=...` for a standalone launch (TASK-025b
+    built that route, and `apps/mobile` already resolves the two paths in
+    `src/session/patientSource.ts` — mirror that order rather than re-deriving
+    it). `provider_id` comes back from the launch-context call already resolved,
+    so this app never handles a practitioner reference. **Obtaining the
+    `launch_id` in the first place is TASK-051e plus this app's own half of
+    it** — the same gap TASK-025c closes on mobile, and this task cannot start a
+    session without it. Then `POST /sessions/start` (TASK-006) with the selected
     patient — passing `launch_id` and `ehr_encounter_id` too, which is what
     fills the payer columns (TASK-052b) — and begin audio capture (TASK-023)
     once session_id + jwt are returned
@@ -6212,12 +6316,15 @@ helpful."
    real-time endpoint all validate against the same `POST /sessions/start`-issued
    token. Do not build a parallel auth mechanism for convenience.
 
-9. **Two endpoints are flagged as possibly-missing, not assumed-present:**
+9. **Two endpoints were flagged as possibly-missing, not assumed-present:**
    FHIR patient search (`GET /fhir/patient/search`, needed by TASK-070) and
    prior-auth list (`GET /prior-auth?status=`, needed by TASK-072). If you reach
    either task and the endpoint doesn't exist yet, add it as part of that task
    rather than assuming it was built elsewhere — flag it back if the scope is
    unclear, same as any other gap found so far.
+
+   **Patient search is built**, by TASK-025b, which reached it first. TASK-070
+   calls it rather than adding it again. The prior-auth list is still open.
 
    **Patient search is for a standalone launch only.** After an EHR launch the
    EHR has already named the patient and TASK-051 stored it, so the identifier
