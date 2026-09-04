@@ -50,6 +50,10 @@ CORE_TABLES = (
     # mistake.
     "prior_auth_submission_attempts",
     "insurance_policies",
+    # Added whole by 0010 (TASK-025b), so the downgrade has to remove it too —
+    # a table missing from this tuple would leave the history looking reversible
+    # while the schema it left behind was not.
+    "providers",
 )
 
 CORE_INDEXES = (

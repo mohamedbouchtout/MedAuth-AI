@@ -22,6 +22,7 @@ def test_app_exposes_the_session_note_and_prior_auth_routes() -> None:
         "/prior-auth/{request_id}",
         "/prior-auth/{request_id}/routing",
         "/prior-auth/{request_id}/submission",
+        "/providers/resolve",
     }
     assert set(paths["/sessions/start"]) == {"post"}
     # Read and edit share one path, which is why this asserts on the methods:
