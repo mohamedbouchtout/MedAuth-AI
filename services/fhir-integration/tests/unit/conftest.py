@@ -192,6 +192,11 @@ class FakeFHIRServer:
 
     def __init__(self) -> None:
         self.patient: dict[str, Any] | None = patient_resource()
+        #: What ``Patient?name=`` answers with (TASK-025b). Separate from
+        #: ``patient`` above, which is the read by id: a search returns several
+        #: candidates and a read returns one, and a test needs to drive them
+        #: apart.
+        self.patient_matches: list[dict[str, Any]] = [patient_resource()]
         self.coverages: list[dict[str, Any]] = [coverage_resource()]
         self.conditions: list[dict[str, Any]] = [condition_resource()]
         self.encounter: dict[str, Any] | None = encounter_resource()
@@ -235,6 +240,8 @@ class FakeFHIRServer:
                 headers={"Location": f"{FHIR_BASE_URL}{path}/{self.created_id}/_history/1"},
             )
 
+        if path.endswith("/Patient"):
+            return httpx.Response(200, json=search_bundle(*self.patient_matches))
         if "/Patient/" in path:
             if self.patient is None:
                 return httpx.Response(404, json={"resourceType": "OperationOutcome"})

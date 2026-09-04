@@ -239,6 +239,116 @@ async def test_the_patient_maps_from_a_real_server(
     assert patient.address_state == "NH"
 
 
+@pytest.fixture(scope="module")
+def searchable(hapi: str) -> dict[str, str]:
+    """A patient whose *family name* is unique to this run, not just their id.
+
+    The ``seeded`` fixture varies the id per run and keeps the family name fixed,
+    which is right for reads by id and wrong for a search: this dev server is
+    persistent, so ``Patient?name=Testpatient`` accumulates a row per run and the
+    one just created falls past the result cap. Found by writing the test — the
+    search worked correctly and returned twenty older namesakes.
+    """
+    marker = uuid.uuid4().hex[:12]
+    family = f"Searchtarget{marker}"
+    with httpx.Client(base_url=hapi, timeout=30.0) as client:
+        created = client.post(
+            "/Patient",
+            json={
+                "resourceType": "Patient",
+                "name": [{"use": "official", "family": family, "given": ["Ada", "Marie"]}],
+                "gender": "female",
+                "birthDate": "1971-11-02",
+            },
+            headers={"Content-Type": "application/fhir+json"},
+        )
+        created.raise_for_status()
+    return {"patient_id": created.json()["id"], "family": family}
+
+
+async def test_a_name_search_finds_the_patient_on_a_real_server(
+    adapter: EHRAdapter, searchable: dict[str, str]
+) -> None:
+    """TASK-025b, and the assumption that most needed checking against a server.
+
+    ``Patient?name=`` is a US Core SHALL-support parameter, and the unit tests
+    only prove this repository can parse a Bundle it wrote itself. What a real
+    server settles is that the parameter is honoured at all, that it matches on
+    the name rather than through some full-text index, and that the searchset
+    comes back in the shape the flattener expects.
+    """
+    results = await adapter.search_patients(searchable["family"])
+
+    assert [match.patient_id for match in results.matches] == [searchable["patient_id"]]
+    assert results.truncated is False
+    match = results.matches[0]
+    assert match.family_name == searchable["family"]
+    assert match.given_names == ["Ada", "Marie"]
+    assert match.birth_date == "1971-11-02"
+    assert match.gender == "female"
+
+
+async def test_a_birth_date_narrows_a_real_search(
+    adapter: EHRAdapter, searchable: dict[str, str]
+) -> None:
+    """The ``birthdate`` parameter is honoured, and honoured as a filter.
+
+    The wrong date is the case that proves anything: a server that ignored an
+    unrecognised parameter would return the patient regardless, and the narrowing
+    a provider relies on to tell two same-named patients apart would be
+    decorative.
+    """
+    matching = await adapter.search_patients(searchable["family"], birth_date="1971-11-02")
+    assert [match.patient_id for match in matching.matches] == [searchable["patient_id"]]
+
+    wrong = await adapter.search_patients(searchable["family"], birth_date="1900-01-01")
+    assert wrong.matches == []
+
+
+async def test_a_name_matching_nobody_is_an_empty_result_not_a_404(
+    adapter: EHRAdapter,
+) -> None:
+    """A real server answers an empty searchset, which must not read as not-found.
+
+    The same distinction the ``?patient=`` search already relies on, and worth
+    proving against a server because it is the difference between "nobody by that
+    name" and "repeat your launch".
+    """
+    results = await adapter.search_patients(f"Nobodynamed{uuid.uuid4().hex[:12]}")
+
+    assert results.matches == []
+    assert results.truncated is False
+
+
+async def test_the_cap_is_applied_and_reported_against_a_real_server(
+    hapi: str, adapter: EHRAdapter
+) -> None:
+    """More matches than the limit come back capped, with ``truncated`` true.
+
+    Driven with a small limit rather than by posting twenty-one patients: what is
+    under test is that a real server honours ``_count`` and that the over-fetch
+    detects "there are more", not the constant's value.
+    """
+    family = f"Crowdedname{uuid.uuid4().hex[:12]}"
+    async with httpx.AsyncClient(base_url=hapi, timeout=30.0) as client:
+        for index in range(3):
+            created = await client.post(
+                "/Patient",
+                json={
+                    "resourceType": "Patient",
+                    "name": [{"use": "official", "family": family, "given": [f"Pat{index}"]}],
+                    "birthDate": "1980-01-01",
+                },
+                headers={"Content-Type": "application/fhir+json"},
+            )
+            created.raise_for_status()
+
+    results = await adapter.search_patients(family, limit=2)
+
+    assert len(results.matches) == 2
+    assert results.truncated is True
+
+
 async def test_the_coverage_maps_from_a_real_search(
     adapter: EHRAdapter, seeded: dict[str, str]
 ) -> None:

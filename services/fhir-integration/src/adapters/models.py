@@ -78,6 +78,58 @@ class CoverageInfo(BaseModel):
     member_id: str | None = None
 
 
+class PatientSearchMatch(BaseModel):
+    """One candidate returned by a patient search.
+
+    **Deliberately narrower than :class:`PatientInfo`.** A search answers with
+    several patients at once, and every field in the response is disclosed for
+    every one of them — including the people who are not the patient in the room.
+    So this carries only what a provider needs to tell one candidate from
+    another, which is the minimum-necessary principle applied to a list rather
+    than to a record. ``address_state`` in particular is absent: it exists on
+    ``PatientInfo`` for the site-of-care disagreement check and nothing on a
+    picker screen would read it.
+
+    Attributes:
+        patient_id: The patient's id on this EHR — what the caller sends to
+            ``POST /sessions/start`` once one is picked.
+        family_name: Family name, when the EHR held one.
+        given_names: Given names, in the order the EHR returned them.
+        birth_date: ``Patient.birthDate`` as the EHR spelled it. Present because
+            two people in one practice share a name far more often than they
+            share a name and a date of birth, and picking the wrong one files an
+            encounter against the wrong chart.
+        gender: Administrative gender, when recorded.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    patient_id: str
+    family_name: str | None = None
+    given_names: list[str] = []
+    birth_date: str | None = None
+    gender: AdministrativeGender | None = None
+
+
+class PatientSearchResults(BaseModel):
+    """What a patient search answers with.
+
+    Attributes:
+        matches: The candidates, capped. Empty is an ordinary answer — the EHR
+            holds nobody by that name — and never an error.
+        truncated: Whether the EHR had more matches than were returned. **Never
+            silently dropped**: a provider shown five of two hundred Smiths and
+            not told so will assume the person they want is not there. Same rule
+            as the transcript-limit one in CLAUDE.md — chunk and merge, or report
+            reduced coverage, but never truncate in silence.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    matches: list[PatientSearchMatch] = []
+    truncated: bool = False
+
+
 class PatientContext(BaseModel):
     """Everything a policy query needs about one patient, assembled from three fetches.
 
