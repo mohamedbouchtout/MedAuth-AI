@@ -47,6 +47,40 @@ describe('startVisit', () => {
     });
   });
 
+  it('sends the launch and encounter ids that fill the payer columns', async () => {
+    // Both, or neither is any use: the launch supplies the EHR credential and
+    // the encounter id says which visit to ask about. Sending one alone leaves
+    // insurance_payer NULL, and every policy query for the visit then reports
+    // missing parameters rather than answering.
+    const fetchImpl = vi.fn<FetchLike>(async () =>
+      jsonResponse(201, envelope({ session_id: SESSION_ID, jwt: 'a.b.c' })),
+    );
+
+    await apiWith(fetchImpl).startVisit({
+      patientId: 'patient-1',
+      providerId: PROVIDER_ID,
+      ehrEncounterId: 'Encounter/9',
+      launchId: 'launch-7',
+    });
+
+    expect(JSON.parse(fetchImpl.mock.calls[0]![1].body as string)).toEqual({
+      patient_id: 'patient-1',
+      provider_id: PROVIDER_ID,
+      ehr_encounter_id: 'Encounter/9',
+      launch_id: 'launch-7',
+    });
+  });
+
+  it('omits launch_id when the visit was started outside a launch', async () => {
+    const fetchImpl = vi.fn<FetchLike>(async () =>
+      jsonResponse(201, envelope({ session_id: SESSION_ID, jwt: 'a.b.c' })),
+    );
+
+    await apiWith(fetchImpl).startVisit({ patientId: 'p', providerId: PROVIDER_ID });
+
+    expect(JSON.parse(fetchImpl.mock.calls[0]![1].body as string)).not.toHaveProperty('launch_id');
+  });
+
   it('omits ehr_encounter_id when there is none', async () => {
     const fetchImpl = vi.fn<FetchLike>(async () =>
       jsonResponse(201, envelope({ session_id: SESSION_ID, jwt: 'a.b.c' })),
