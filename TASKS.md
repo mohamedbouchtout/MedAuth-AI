@@ -4062,6 +4062,45 @@ The insurance policy RAG is the technical core. Build and validate before other 
       `READ_COVERAGE` — which is the same looseness one layer down. They now use
       real members.
 
+- [ ] **TASK-046:** httpx logs PHI in outbound request URLs
+  - Prerequisite: none. Small, cross-cutting, and deliberately not folded into
+    TASK-025b, which is where it was noticed.
+  - Services: every Python service that calls out over `httpx` —
+    `fhir-integration`, `track-a-clinical`, `prior-auth`, `track-b-rag`
+  - **The gap.** `httpx` logs every request it makes at INFO, as
+    `HTTP Request: GET <full url> "HTTP/1.1 200 OK"`, and the full URL includes
+    the query string. CLAUDE.md's first regulatory rule is "never log PHI to
+    stdout or any unencrypted store", and this writes PHI to stdout in the
+    ordinary course of a working request. Nothing in this repository configures
+    the `httpx` logger, so it inherits the root level.
+  - **It predates the task that found it.** `EHRAdapter._search` has issued
+    `Coverage?patient={id}` and `Condition?patient={id}` since TASK-052, so a
+    patient identifier has been reaching that log line for several phases.
+    TASK-025b made it visible rather than introducing it: `Patient?name=` puts a
+    patient's *name* in the same place, which is what a HIPAA-flavoured test
+    finally caught.
+  - **The adapter layer is already careful about this and cannot reach it.**
+    `_get` deliberately does not render `str(exc)` on a transport failure,
+    because "httpx puts the full request URL in its message, and a search URL
+    carries a patient id" — the exact hazard, recognised, and closed on the one
+    path the module controls. The library's own logger is not that path.
+  - **Fix it once, not per service.** Raising `httpx`'s logger to WARNING is a
+    one-line change and the obvious answer, but doing it in four `main.py` files
+    is the duplication this repository refuses; and it is a decision about what
+    the whole platform logs, not about one service. Decide where the logging
+    configuration lives — most likely a small shared helper each service calls at
+    startup, on the same terms as `packages/cors-policy` — and set it there.
+  - **Do not solve it by moving identifiers out of query strings.** FHIR search
+    is defined with parameters in the query string; there is nowhere else for
+    them to go. The library's logging is what has to change.
+  - **Check the other loggers in the same pass.** `httpcore`, `urllib3` and
+    `boto3`/`botocore` all log request detail at DEBUG or INFO, and the question
+    "what does this write when someone turns the root logger up" is the same
+    question for each.
+  - **Test:** an outbound FHIR search carrying a patient name produces no log
+    record containing that name, at any level, from any logger
+  - **Test:** the same for a `?patient=` search carrying a patient identifier
+
 ---
 
 ## Phase 5 — FHIR Integration

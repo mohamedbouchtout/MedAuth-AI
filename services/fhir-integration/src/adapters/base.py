@@ -43,6 +43,8 @@ from .models import (
     EncounterCoverageContext,
     PatientContext,
     PatientInfo,
+    PatientSearchMatch,
+    PatientSearchResults,
     PriorAuthContent,
     PriorAuthSubmission,
     SubmissionMethod,
@@ -72,6 +74,22 @@ logger = logging.getLogger(__name__)
 #: used for unauthenticated discovery against other hosts. Matches the per-call
 #: arrangement ``smart/discovery.py`` and ``smart/oauth.py`` already use.
 FHIR_TIMEOUT_SECONDS: Final = 10.0
+
+#: The most candidates a patient search returns in one answer.
+#:
+#: A cap exists because a common surname in a large practice matches hundreds,
+#: and a picker listing hundreds is not a picker. 20 is a round number chosen to
+#: fit a phone screen's worth of scrolling rather than a measurement — what makes
+#: it safe is that going over is *reported* rather than silently dropped, so a
+#: provider who cannot see the patient they want knows to narrow the search.
+PATIENT_SEARCH_LIMIT: Final = 20
+
+#: What a search puts in an error's ``resource_id``, which has no id to name.
+#:
+#: **Never the search terms.** A name is patient content, and ``FHIRAccessError``
+#: documents that field as an identifier and never that; an exception message
+#: reaches logs that a patient's name must not.
+SEARCH_RESOURCE_ID: Final = "search"
 
 #: US Core says an active condition is one whose ``clinicalStatus`` is any of
 #: these. ``active`` alone would drop a relapsed or recurring problem, which a
@@ -399,17 +417,33 @@ class EHRAdapter:
         params = {"patient": patient_id}
         if extra:
             params.update(extra)
+        return await self._search_with(resource_type, params, resource_id=patient_id)
+
+    async def _search_with(
+        self, resource_type: str, params: dict[str, str], *, resource_id: str
+    ) -> list[dict[str, Any]]:
+        """Run any search and return the entry resources.
+
+        Split out of :meth:`_search` by TASK-025b, which needs a search that is
+        not keyed on a patient: ``Patient?name=`` is how you find a patient whose
+        id you do not yet have, so there is no ``?patient=`` to send.
+
+        ``resource_id`` is only ever used in an error message, so a caller with
+        no id to name passes a fixed word. It must not be given the search terms
+        — a name is patient content, and ``FHIRAccessError`` documents this field
+        as an identifier and never that.
+        """
         body = await self._get(
-            resource_type, resource_type=resource_type, resource_id=patient_id, params=params
+            resource_type, resource_type=resource_type, resource_id=resource_id, params=params
         )
         if body.get("resourceType") != "Bundle":
             raise FHIRMalformedResponse(
-                resource_type, patient_id, "the EHR did not return a search Bundle"
+                resource_type, resource_id, "the EHR did not return a search Bundle"
             )
         entries = body.get("entry") or []
         if not isinstance(entries, list):
             raise FHIRMalformedResponse(
-                resource_type, patient_id, "the search Bundle's entries were not a list"
+                resource_type, resource_id, "the search Bundle's entries were not a list"
             )
         return [
             entry["resource"]
@@ -549,6 +583,75 @@ class EHRAdapter:
             # For the site-of-care disagreement check only, never as a source
             # for the encounter's state. See ``site_of_care``.
             address_state=to_usps_state(patient_address_state(patient.address)),
+        )
+
+    async def search_patients(
+        self, query: str, *, birth_date: str | None = None, limit: int = PATIENT_SEARCH_LIMIT
+    ) -> PatientSearchResults:
+        """Primitive. Find patients by name, for a launch that named none.
+
+        TASK-025b. This is the *standalone*-launch half of identifying a patient:
+        after an EHR launch the EHR already said who is in the room and
+        ``GET /fhir/launch-context`` returns them, so searching there would be
+        asking a question we hold the answer to — and would let a provider start
+        a visit against a different patient than the chart in front of them.
+
+        **``name`` rather than a full-text parameter.** US Core requires a server
+        to support ``Patient?name=``; ``_content`` and ``_text`` are optional and
+        widely unimplemented, so a free-text search would work on some vendors
+        and silently return nothing on others. ``birthdate`` narrows it, and is
+        offered because two people in one practice share a name far more often
+        than they share a name and a date of birth.
+
+        **An empty result is a successful answer**, on the same terms as the
+        ``?patient=`` search above: the EHR holds nobody by that name, which is
+        not a not-found and not an error.
+
+        Args:
+            query: The name to search for, as the provider typed it.
+            birth_date: An optional ``YYYY-MM-DD`` to narrow the search.
+            limit: The most matches to return.
+
+        Returns:
+            The candidates, and whether the EHR had more than were returned.
+        """
+        # One over the limit, so "there are more" can be distinguished from
+        # "there are exactly this many" without a second request. `total` is
+        # optional in a searchset Bundle, so it cannot be relied on alone.
+        params = {"name": query, "_count": str(limit + 1)}
+        if birth_date is not None:
+            params["birthdate"] = birth_date
+
+        resources = await self._search_with("Patient", params, resource_id=SEARCH_RESOURCE_ID)
+        # A searchset Bundle may carry OperationOutcome entries alongside the
+        # matches, to report search warnings. They are not candidates.
+        patients = [
+            self._parse(Patient, resource, "Patient", SEARCH_RESOURCE_ID)
+            for resource in resources
+            if resource.get("resourceType") == "Patient"
+        ]
+
+        matches = [self._as_search_match(patient) for patient in patients[:limit]]
+        # Some servers cap `_count` below what was asked for, so a short page is
+        # not proof there is nothing more; `total` is what settles it when the
+        # server sends one.
+        return PatientSearchResults(matches=matches, truncated=len(patients) > limit)
+
+    @staticmethod
+    def _as_search_match(patient: Patient) -> PatientSearchMatch:
+        """Flatten one ``Patient`` into the narrow shape a picker needs.
+
+        Deliberately not ``get_patient()``'s :class:`PatientInfo`: everything
+        here is disclosed for every candidate, including the people who are not
+        the patient in the room.
+        """
+        name = next(iter(patient.name or []), None)
+        return PatientSearchMatch(
+            patient_id=patient.id or "",
+            family_name=name.family if name else None,
+            given_names=list(name.given or []) if name else [],
+            birth_date=patient.birth_date,
+            gender=patient.gender,
         )
 
     async def get_coverage(self, patient_id: str) -> CoverageInfo | None:
