@@ -110,13 +110,17 @@ main() {
         selected+=("services/track-b-rag")
         selected+=("services/policy-scraper")
         # fhir-integration declares it too, but for a different reason and only
-        # as a dev dependency: TASK-053's note write-back reads two of this
-        # service's payloads over HTTP and mirrors their shapes, and
-        # services/fhir-integration/tests/unit/test_note_contract.py proves the
-        # mirrors still match by building the payloads from the real response
-        # models. A field renamed here would otherwise leave the write-back
-        # reading a note it cannot parse, with a 502 from a service that is up
-        # as the only symptom.
+        # as a dev dependency: it calls this service over HTTP in two places and
+        # mirrors the payload shapes, and two contract tests prove the mirrors
+        # still match by building the payloads from the real response models.
+        # test_note_contract.py covers TASK-053's note write-back, where a field
+        # renamed here would leave the write-back reading a note it cannot
+        # parse, with a 502 from a service that is up as the only symptom.
+        # test_provider_contract.py covers TASK-025b's provider registry, where
+        # the drift is quieter still: the launch context would answer a null
+        # provider_id for every launch, which is also what a launch with an
+        # unverified actor answers, so a deployment mismatch would be
+        # indistinguishable from a normal state.
         selected+=("services/fhir-integration")
       fi
 

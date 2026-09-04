@@ -2410,21 +2410,127 @@ The insurance policy RAG is the technical core. Build and validate before other 
     targets exactly those specialties first (see the EHR priority order), so
     this is a customer-facing gap and not only a code one.
   - Move `KEYWORD_RULES` behind a loader so the table is data rather than
-    source, and decide deliberately where practice-specific rows live — a
-    config file, a Postgres table keyed by organization, or both. An
-    organization-scoped table is the likely answer, since `encounters` already
-    carries `organization_id`.
+    source. **Decided: practice-specific rows live in an organization-scoped
+    Postgres table**, keyed by `encounters.organization_id`, layered over the
+    built-in table rather than replacing it — a tenant adds rows and cannot
+    delete ours. A config file was the alternative and is rejected for the
+    reason this task exists at all: a file still needs a deploy, which is the
+    gap being closed.
+  - **This ships behind a seam, and live organization scoping is blocked on
+    work this task deliberately does not do.** `encounters.organization_id`
+    exists — it is in TASK-005's migration and on the `Encounter` model,
+    nullable — and **nothing in this repository ever writes it**. The only other
+    occurrences are fhir-integration's `get_organization()` and test fixtures.
+    So it is `NULL` for every real encounter today, and an org-scoped lookup
+    keyed on it would match nothing no matter how correct the lookup is.
+    - Build the loader and the org-scoped lookup in full, and test them against
+      **directly-constructed org-scoped rows** — an `organization_id` written by
+      the test itself, not one produced by a launch — so the resolution logic is
+      genuinely exercised rather than asserted against an always-`NULL` column.
+    - Say so where a reader will see it: an encounter with no `organization_id`
+      resolves against the built-in table alone, and that is the normal case
+      today rather than a failure.
+    - **Populating `organization_id` is TASK-052d**, on the fhir-integration and
+      track-a-clinical side, and is explicitly out of scope here. This is the
+      same split as TASK-024 and TASK-052b — build behind a seam, be honest
+      about what is stubbed, invent no placeholder — and it is taken again for
+      the same reason: fhir-integration already has several open threads
+      (TASK-054b, TASK-055 through TASK-059), and a task whose subject is a
+      loader should not also grow a SMART-launch write.
+  - **`procedure_key()`'s "cannot disagree" guarantee genuinely breaks here, and
+    must not be left standing as written.** `policy_dispatch.procedure_key()`
+    documents that resolving the code twice — once for the Redis dedup claim,
+    once inside `resolve_query_parameters()` — is safe because the lookup is
+    pure: *"They cannot disagree anyway — same function, same input."* That
+    holds only while the table is a module constant compiled at import. Once
+    resolution is org-aware and loaded, the two calls can observe different
+    rulesets at different times, and a divergence is not cosmetic: the claim
+    would be filed under `cpt:{code}` from one ruleset while the query is built
+    from another, so one order could raise two nudges, or a stale key could hold
+    the claim for the rest of the visit.
+    - **Preferred: engineer around it.** The consumer resolves the ruleset once
+      per mention and passes that one snapshot to both call sites, so they read
+      the same data within a single unit of work and divergence is structurally
+      impossible. Then rewrite the docstring to state the guarantee actually
+      being relied on — one resolved ruleset per mention — rather than the
+      module-constant purity it currently claims.
+    - **Fallback, only if threading the snapshot proves infeasible in this
+      task:** rewrite the docstring to state the weaker, accurate guarantee and
+      record the divergence window as a named, accepted risk with its
+      consequence spelled out. What is not acceptable is shipping the loader
+      with the current, now-false claim still sitting in the code.
   - **A practice-supplied row is subject to the same rule as ours**: an entry
     exists only where the spoken phrase determines the code. A tenant able to
     map "MRI" to one code for everything would reintroduce precisely the cache
     collision TASK-024 exists to prevent, on their own data and ours — the
     `rag:` key is not scoped per organization.
+  - **What "collapse" means, precisely — the original phrasing was wrong.** An
+    earlier draft of this task said to reject "a row that would collapse two
+    procedures onto one code", which reads as *two qualifier labels sharing a
+    code* and would reject the built-in table itself. The real rule:
+
+    > Reject a mapping when it would make two qualifier values that produce
+    > **different authorization answers** resolve to the same code.
+
+    - **Legitimate, and already shipped:** `knee`, `hip` and `ankle` all resolve
+      to `73721`, and `shoulder`, `elbow` and `wrist` all resolve to `73221`.
+      Those are not three procedures collapsed onto one code — `73721` *is* "MRI,
+      any joint of lower extremity", and a payer publishes one set of criteria at
+      that code covering all three. Same authorization answer, one code,
+      correctly shared.
+    - **The failing counterexample:** a tenant row adding `brain` to `73721`
+      under the `MRI` keyword. A brain MRI is `70551`, and payers gate it on
+      entirely different criteria — headache red flags and prior imaging, not the
+      six weeks of conservative therapy that gate an extremity joint. The answer
+      for a brain MRI would be written to `rag:{payer}:{plan_type}:{state}:73721`
+      and served to the next knee MRI on that plan. Silent, and it crosses
+      patients. A `default_qualifier` making a bare "MRI" resolve to any single
+      code is the same failure by another route, and is rejected on the same
+      grounds.
+    - **A loader cannot infer authorization answers, so the sharing is declared
+      rather than deduced.** A `ProcedureCode` shared by more than one qualifier
+      names the qualifier set it legitimately spans, so sharing is an explicit
+      assertion by whoever wrote the row rather than an emergent property of the
+      table. A row putting a qualifier onto a code whose declared span does not
+      include it is rejected at load, with the error naming both qualifiers and
+      the code. Declaring the span also documents the pairing for the
+      certified-coder review Issue #70 still owes on this table.
+  - **Detection is in scope alongside the loader.** `_KEYWORD_PATTERNS` in
+    `track_b_rag.keywords` is a separate compiled table, so a tenant rule for a
+    keyword the detector never fires on resolves nothing at all — a silent no-op,
+    which defeats the feature for exactly the practices it exists to serve. A
+    practice-supplied rule therefore supplies its keyword's detection pattern
+    too, loaded and compiled on the same path. Whatever the loader accepts must
+    be reachable end to end from a spoken sentence.
+  - **`NEVER_CODED` and `AXIS_NOT_SPOKEN` are not tenant-overridable in v1, and
+    that is a deliberate choice rather than an unstated assumption.** Those two
+    tables are TASK-024's recorded findings that a keyword names no coded
+    procedure at all, or that its code turns on an axis nobody speaks — an
+    X-ray's view count, a biopsy's technique. A tenant permitted to override them
+    could file a real, cacheable answer under a code the spoken phrase never
+    determined, which is the correctness problem TASK-024 already solved once,
+    reintroduced through the extension point. When a permissive option risks
+    silently undoing a settled correctness decision, take the restrictive one and
+    write down why. Revisit only if a real practice need surfaces that justifies
+    the added risk — not pre-emptively.
   - Keep the four refusal reasons; a loaded table changes where rows come from,
-    not what "no code" means.
+    not what "no code" means. A keyword absent from a tenant's table and from
+    ours is unknown to the module entirely, exactly as it is today.
   - **Test:** a practice-scoped row resolves for that organization and not for
-    another
-  - **Test:** a row that would collapse two procedures onto one code is rejected
-    at load, naming the conflict
+    another, against a directly-constructed `organization_id`
+  - **Test:** an encounter with a `NULL` `organization_id` — the only kind that
+    exists until TASK-052d — resolves against the built-in table
+  - **Test:** a tenant row adding a qualifier outside a shared code's declared
+    span is rejected at load, naming both qualifiers and the code
+  - **Test:** a tenant `default_qualifier` that would resolve an unqualified
+    mention to a single code is rejected at load
+  - **Test:** a tenant row overriding a `NEVER_CODED` or `AXIS_NOT_SPOKEN`
+    keyword is rejected at load
+  - **Test:** a tenant rule supplying a keyword the built-in detector does not
+    know is reachable end to end — a transcript sentence containing it resolves
+    the code
+  - **Test:** `procedure_key()` and `resolve_query_parameters()` resolve one
+    mention against the same ruleset snapshot
 
 - [x] **TASK-025:** Mobile session screen
   - Prerequisite: TASK-006 (`POST /sessions/start` and `/end`), TASK-006b
@@ -2639,6 +2745,71 @@ The insurance policy RAG is the technical core. Build and validate before other 
     start-visit call
   - **Test:** TASK-025's session screen tests still pass with the real
     implementation substituted for the seam
+  - **Built.** Three services and one app, in four commits.
+    - **The provider registry is `providers` in `track-a-clinical`**, migration
+      `0008`, resolved through `POST /providers/resolve`. Get-or-create,
+      answering 200 whichever happened — a caller cannot use "was this their
+      first launch" for anything, and a 201-then-200 sequence would make the
+      route behave differently for a new hire than for everyone else. The race
+      is handled by `ON CONFLICT DO NOTHING` rather than a check-then-insert,
+      and the integration test proves it with eight concurrent resolutions
+      against real PostgreSQL. That is the one thing the unit fake cannot: it
+      was written to match the assumption it would have to falsify.
+    - **The registry writes no audit row**, and that is the rule rather than an
+      omission. A practitioner reference identifies the provider, not a patient.
+      Nor does it log the reference: an operational log is not a roster of which
+      clinicians used the product and when.
+    - **`GET /fhir/patient/search` searches by `name`**, plus an optional
+      `birthdate`. `_content` and `_text` are optional in FHIR and widely
+      unimplemented, so a free-text search would work on some vendors and
+      silently return nothing on others — indistinguishable from a genuine
+      no-match, which is the failure mode this repository refuses everywhere.
+      The HAPI integration tests are what settle that the parameters are
+      honoured; the unit tests only prove this code parses a Bundle it wrote
+      itself.
+    - **A match carries less than `PatientInfo`**, because every field is
+      disclosed for every candidate including the people who are not the patient
+      in the room. `address_state` in particular has no reader on a picker
+      screen. One `READ_PATIENT` row per disclosed match, and none at all when
+      nothing matched.
+    - **Writing the HAPI tests found a fixture problem worth recording.** The
+      shared `seeded` fixture varies a patient's id per run and keeps the family
+      name fixed, so against the persistent dev server `Patient?name=Testpatient`
+      had accumulated 36 rows and the search correctly returned twenty older
+      namesakes. The search tests post their own uniquely-named patient. A test
+      that searches on a shared fixture's name will pass once and then stop
+      testing anything.
+    - **The picker had a defect its first test caught**: its effect depended on
+      the `onResolved` callback identity, so an inline callback re-read the
+      launch on every render — one request per keystroke, discarding the matches
+      already on screen. The callback is held in a ref and the effect depends
+      only on the launch.
+    - **`render` is awaited in this app's suite.** A non-awaited result has no
+      query methods on it at all, and the symptom is "render has not been
+      called" reported from a query, which names neither the cause nor the file.
+      `SessionScreen.test.tsx` already did this; it is written down here because
+      the failure mode gives no hint.
+    - **`startVisit` gained `launchId` in `packages/session-client`**, so both
+      apps get it rather than mobile alone. With `ehrEncounterId` it is what
+      fills the encounter's payer columns, and either alone leaves them NULL.
+    - **`apps/mobile/src/api/fhir.ts` stays in the app rather than becoming a
+      package.** TASK-070 needs the same two calls and is the extraction
+      trigger — the same trigger that moved `session-client` out of this app in
+      TASK-042 and `nudge-client` out of the web app in TASK-043. Extracting
+      before a second consumer exists would be guessing at the shape the second
+      one needs.
+    - **A HIPAA finding was recorded rather than fixed here: TASK-046.** `httpx`
+      logs every request URL at INFO, so a search query string — a patient's
+      name — reaches stdout from the library. It predates this task; `_search`
+      has issued `Coverage?patient={id}` since TASK-052. Configuring library
+      loggers is a platform-wide decision rather than one route's, and a test
+      pins the gap so closing it is visible instead of silent.
+    - **What still blocks a real encounter is one named constant**, `LAUNCH_ID`
+      in `App.tsx`. Nothing here performs a SMART launch, so this app holds no
+      `launch_id` and both routes are keyed on one. TASK-051e and TASK-025c.
+    - 169 mobile tests at 93% coverage, 497 in fhir-integration at 96%, 405 in
+      track-a-clinical at 99%, all against the 80% gate. Each commit typechecks
+      and passes its own suite.
 
 - [ ] **TASK-025c:** Obtain a SMART launch from `apps/mobile`
   - Prerequisite: **TASK-051e** (the handoff this consumes), TASK-051 (the launch
@@ -5407,6 +5578,46 @@ logic do not change.
       `docker compose up` and `seed-synthea.sh`, which implied a startup order
       that contradicts the one CLAUDE.md documents. One statement of that order,
       in the document that owns it.
+
+- [ ] **TASK-052d:** Populate encounter organization at SMART launch
+  - Prerequisite: **TASK-051** (the launch), **TASK-052** (`get_organization()`
+    and the encounter's `serviceProvider` reference, which is what actually
+    names the site of care), TASK-006 (owns `POST /sessions/start`, where the
+    encounter row is created), TASK-052b (populates the other launch-derived
+    columns on the same row, by the same path)
+  - Services: `services/fhir-integration`, `services/track-a-clinical`
+  - **Why this exists as its own task.** `encounters.organization_id` has been
+    in the schema since TASK-005 and **nothing has ever written it**, so it is
+    `NULL` on every encounter this system has created. That was harmless while
+    nothing read it. TASK-024b reads it: it scopes practice-supplied
+    procedure-code rows by organization, which is the whole point of letting a
+    practice extend the table. Until this task lands, that lookup is correct and
+    matches nothing, and every encounter resolves against the built-in table
+    alone.
+  - **It is the site of care, and this is the same question TASK-052b already
+    answered for `state`.** The organization is the encounter's
+    `serviceProvider`, resolved through `Organization` — not the patient's
+    registered practice, and not the payer. `EHRAdapter.get_patient_context()`
+    already walks that reference for TASK-052b's `state`, so this reuses a path
+    that exists rather than adding a fetch.
+  - **Decide deliberately what to do when the EHR names no organization**, and
+    write it down. `NULL` is the honest answer and it is what every encounter
+    carries today, so it must stay a supported state rather than becoming an
+    error — but a launch that *could* have named one and did not is worth a
+    WARNING naming the encounter, the same way an unknown payer is.
+  - **An `Organization` id is the EHR's, not ours, and the column is a UUID.**
+    This is the shape CLAUDE.md settles under "The EHR-asserted actor is its own
+    column": a FHIR `id` is `[A-Za-z0-9\-\.]{1,64}` and is only unique within one
+    EHR, so it is not a UUID and cannot be treated as globally unique. Resolve
+    this before writing any code — the options are the same ones that section
+    weighs, and the answer must not be to coerce an EHR id into a UUID column or
+    to widen a column other rows depend on.
+  - **Test:** an encounter created under a launch whose FHIR `Encounter` names a
+    `serviceProvider` carries the resolved organization
+  - **Test:** a launch naming no organization leaves the column `NULL` and warns,
+    and the encounter still starts
+  - **Test:** a practice-scoped procedure-code row (TASK-024b) resolves for an
+    encounter populated by this path, end to end
 
 - [x] **TASK-053:** SOAP note write-back (base.py)
   - Services: `services/fhir-integration` **and** `services/track-a-clinical`.
