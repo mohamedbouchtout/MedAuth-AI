@@ -40,7 +40,7 @@ import uuid
 from typing import Annotated, Final
 
 import httpx
-from fastapi import APIRouter, Depends, Header, Path, status
+from fastapi import APIRouter, Depends, Header, Path, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from redis.asyncio import Redis
 
@@ -48,7 +48,7 @@ from api_envelope import ApiHTTPException, ApiResponse, error_responses
 from fhir_types import Encounter
 from hipaa_logger import AuditAction
 from src.adapters import get_adapter
-from src.adapters.base import EHRAdapter
+from src.adapters.base import PATIENT_SEARCH_LIMIT, EHRAdapter
 from src.adapters.covermymeds import (
     CoverMyMedsClient,
     CoverMyMedsNotConfigured,
@@ -65,6 +65,7 @@ from src.adapters.models import (
     EncounterCoverageContext,
     NoteCode,
     PatientContext,
+    PatientSearchResults,
     PriorAuthContent,
     PriorAuthEvidence,
     PriorAuthProcedure,
@@ -94,6 +95,7 @@ from src.prior_auth_client import (
     PriorAuthRequestNotFound,
     PriorAuthServiceError,
 )
+from src.providers_client import ProvidersClient, ProviderServiceError
 from src.smart import store
 from src.smart.oauth import (
     TokenEndpointUnavailable,
@@ -149,8 +151,8 @@ class LaunchContextData(BaseModel):
     **It names its fields rather than serialising ``LaunchToken``.** That record
     also holds the EHR access token, the refresh token that renews it and the
     granted scope, and a response model derived from it would start disclosing
-    whatever field the next task adds to storage. Naming two fields means a
-    third can only be disclosed by someone deciding to disclose it.
+    whatever field the next task adds to storage. Naming the fields explicitly
+    means the next one can only be disclosed by someone deciding to disclose it.
 
     ``launch_id`` is deliberately not echoed back. The caller sent it in the
     request header, so it learns nothing from seeing it again — and it resolves
@@ -170,6 +172,15 @@ class LaunchContextData(BaseModel):
             "The encounter the EHR launched us from, as an id on that EHR. Null "
             "for a standalone launch, which has a patient and no encounter — "
             "not an error, and not a reason to repeat the launch."
+        ),
+    )
+    provider_id: str | None = Field(
+        default=None,
+        description=(
+            "The provider who authorized this launch, as a UUID this system "
+            "minted for them — what POST /sessions/start takes. Null when the "
+            "EHR did not say who launched us, could not prove it, or when the "
+            "registry could not be reached."
         ),
     )
 
@@ -511,6 +522,96 @@ async def read_patient_context(
 
 
 @router.get(
+    "/patient/search",
+    response_model=ApiResponse[PatientSearchResults],
+    status_code=status.HTTP_200_OK,
+    summary="Find patients by name, for a launch that named none",
+    response_description="The matching patients, and whether there were more.",
+    responses=error_responses(
+        401,
+        404,
+        422,
+        502,
+        504,
+        descriptions={
+            401: "This launch's EHR authorization is no longer valid; repeat the launch.",
+            404: "No such SMART launch.",
+            502: "The EHR, or its authorization server, was unreachable or unusable.",
+            504: "The EHR or its authorization server did not answer in time.",
+        },
+    ),
+)
+async def search_patients(
+    query: Annotated[
+        str,
+        Query(
+            min_length=1,
+            max_length=100,
+            description="The patient's name, as the provider typed it.",
+        ),
+    ],
+    adapter: Annotated[EHRAdapter, Depends(get_ehr_adapter)],
+    actor: Annotated[str | None, Depends(get_audit_actor)],
+    birth_date: Annotated[
+        str | None,
+        Query(
+            pattern=r"^\d{4}-\d{2}-\d{2}$",
+            description="An optional YYYY-MM-DD date of birth, to narrow the search.",
+        ),
+    ] = None,
+) -> ApiResponse[PatientSearchResults]:
+    """Return the patients matching a name, for a launch the EHR named none in.
+
+    TASK-025b. **This is the standalone-launch half of identifying a patient, and
+    it does not replace ``GET /fhir/launch-context``.** After an EHR launch the
+    EHR has already said who is in the room and TASK-051 stored the answer;
+    searching there would be asking a question we hold the answer to, and would
+    let a provider start a visit against a different patient than the chart in
+    front of them. A client takes the launch context when there is one and comes
+    here only when there is not.
+
+    **Matching nobody is a 200 with an empty list, never a 404.** "The EHR holds
+    nobody by that name" and "no such SMART launch" are different facts, and a
+    404 here would tell a client to repeat a launch that is working. The 404 this
+    route can answer is the launch one, from ``get_launch_record``.
+
+    **More matches than fit are reported, never silently dropped.** A provider
+    shown five of two hundred Smiths and not told so will conclude the patient
+    they want is not in the system. Same rule as the transcript-limit one in
+    CLAUDE.md — report reduced coverage rather than truncating in silence.
+
+    This is a PHI read, and it writes **one ``READ_PATIENT`` row per match the
+    response discloses** rather than one per call. A search that returned eight
+    patients disclosed eight identifiers, including seven belonging to people who
+    are not the patient in the room; a single row naming none of them would make
+    those seven disclosures invisible to the one query the audit table exists to
+    answer. A search that matched nothing discloses nothing and writes no row, on
+    the same terms as a launch that carried no patient.
+    """
+    try:
+        results = await adapter.search_patients(
+            query, birth_date=birth_date, limit=PATIENT_SEARCH_LIMIT
+        )
+    except Exception as exc:
+        raise _as_api_error(exc) from exc
+
+    if results.truncated:
+        # The count, never the query — a name is patient content and this is an
+        # operational log. The client is told through `truncated`; this line is
+        # so an operator can see the cap being hit routinely and reconsider it.
+        logger.info("A patient search matched more than the %d returned.", PATIENT_SEARCH_LIMIT)
+
+    for match in results.matches:
+        await audit_ehr_read(
+            action=AuditAction.READ_PATIENT,
+            resource_type=RESOURCE_TYPE_PATIENT,
+            resource_id=match.patient_id,
+            fhir_practitioner_ref=actor,
+        )
+    return ApiResponse[PatientSearchResults](data=results)
+
+
+@router.get(
     "/encounter/{encounter_id}",
     response_model=ApiResponse[Encounter],
     status_code=status.HTTP_200_OK,
@@ -624,6 +725,51 @@ async def read_encounter_coverage_context(
     return ApiResponse[EncounterCoverageContext](data=context)
 
 
+async def get_providers_client(
+    http_client: Annotated[httpx.AsyncClient, Depends(get_http_client)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> ProvidersClient:
+    """Build the client this service resolves providers through.
+
+    The same shared, pooled HTTP client and the same per-call timeout as
+    ``get_notes_client``: both call the same service, and one of them growing its
+    own transport would be the "adapter builds its own client" mistake one layer
+    up.
+    """
+    return ProvidersClient(
+        settings.track_a_clinical_url,
+        http_client,
+        settings.track_a_clinical_timeout_seconds,
+    )
+
+
+async def _resolve_provider(providers: ProvidersClient, actor: str | None) -> str | None:
+    """Turn this launch's verified practitioner reference into a ``provider_id``.
+
+    **An unverified actor resolves to nothing.** ``actor`` is ``None`` when the
+    EHR sent no ``id_token``, published no keys, or signed something that did not
+    check out (TASK-051c). Registering a provider from a claim we could not
+    verify would put a fabricated identity in the one column an auditor reads to
+    answer "who saw this patient" — the same fabrication the null-over-invention
+    rule refuses one table over.
+
+    **A registry that cannot be reached is a null, not a failed launch.** The
+    patient half of this response is what the caller mainly came for, and it was
+    read from a record this service already holds; failing the whole route
+    because a sibling service is restarting would make a working launch look
+    expired. The client sees a null ``provider_id`` and cannot start a visit,
+    which is the honest outcome and is recoverable by retrying.
+    """
+    if actor is None:
+        return None
+    try:
+        return await providers.resolve(actor)
+    except ProviderServiceError as exc:
+        # Not the reference, which names an individual clinician.
+        logger.warning("Could not resolve this launch's provider: %s", exc.detail)
+        return None
+
+
 @router.get(
     "/launch-context",
     response_model=ApiResponse[LaunchContextData],
@@ -647,6 +793,7 @@ async def read_encounter_coverage_context(
 async def read_launch_context(
     token: Annotated[store.LaunchToken, Depends(get_launch_record)],
     actor: Annotated[str | None, Depends(get_audit_actor)],
+    providers: Annotated[ProvidersClient, Depends(get_providers_client)],
 ) -> ApiResponse[LaunchContextData]:
     """Return the patient and encounter the EHR named when it launched us.
 
@@ -674,6 +821,15 @@ async def read_launch_context(
     without one and leaves the payer columns NULL, which
     ``resolve_query_parameters()`` already reports per procedure.
 
+    **provider_id is resolved here rather than sent by the client.** The
+    launch record holds a verified Practitioner reference and
+    POST /sessions/start needs a UUID; the registry in track-a-clinical
+    maps between them. Handing the reference to the client instead and letting it
+    resolve its own provider would let an app assert a provider identity of its
+    own, which is "the provider comes from the encounters row, never from the
+    presented token's claim" applied one step earlier. See CLAUDE.md, "Provider
+    identity — the registry that resolves an EHR practitioner".
+
     **It reads no chart, and it is still a PHI disclosure.** Which patient a
     provider was launched for is PHI whether it was read from the EHR just now
     or from our own Redis, so the route audits as ``READ_PATIENT`` like any
@@ -692,6 +848,7 @@ async def read_launch_context(
     context = LaunchContextData(
         patient_id=token.patient_id,
         encounter_id=token.encounter_id,
+        provider_id=await _resolve_provider(providers, actor),
     )
 
     # No patient, nothing disclosed, no row. A launch may carry no patient

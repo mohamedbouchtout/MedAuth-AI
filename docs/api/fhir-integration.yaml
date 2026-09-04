@@ -357,6 +357,130 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse_NoneType_'
+  /fhir/patient/search:
+    get:
+      tags:
+        - fhir
+      summary: Find patients by name, for a launch that named none
+      description: 'Return the patients matching a name, for a launch the EHR named none in.
+
+
+        TASK-025b. **This is the standalone-launch half of identifying a patient, and
+
+        it does not replace ``GET /fhir/launch-context``.** After an EHR launch the
+
+        EHR has already said who is in the room and TASK-051 stored the answer;
+
+        searching there would be asking a question we hold the answer to, and would
+
+        let a provider start a visit against a different patient than the chart in
+
+        front of them. A client takes the launch context when there is one and comes
+
+        here only when there is not.
+
+
+        **Matching nobody is a 200 with an empty list, never a 404.** "The EHR holds
+
+        nobody by that name" and "no such SMART launch" are different facts, and a
+
+        404 here would tell a client to repeat a launch that is working. The 404 this
+
+        route can answer is the launch one.
+
+
+        **More matches than fit are reported, never silently dropped.** A provider
+
+        shown five of two hundred Smiths and not told so will conclude the patient
+
+        they want is not in the system. Same rule as the transcript-limit one in
+
+        CLAUDE.md — report reduced coverage rather than truncating in silence.
+
+
+        This is a PHI read, and it writes **one ``READ_PATIENT`` row per match the
+
+        response discloses** rather than one per call. A search that returned eight
+
+        patients disclosed eight identifiers, including seven belonging to people who
+
+        are not the patient in the room; a single row naming none of them would make
+
+        those seven disclosures invisible to the one query the audit table exists to
+
+        answer. A search that matched nothing discloses nothing and writes no row.'
+      operationId: search_patients_fhir_patient_search_get
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+            maxLength: 100
+            minLength: 1
+            description: The patient's name, as the provider typed it.
+            title: Query
+          description: The patient's name, as the provider typed it.
+        - name: birth_date
+          in: query
+          required: false
+          schema:
+            anyOf:
+              - type: string
+                pattern: ^\d{4}-\d{2}-\d{2}$
+              - type: 'null'
+            description: An optional YYYY-MM-DD date of birth, to narrow the search.
+            title: Birth Date
+          description: An optional YYYY-MM-DD date of birth, to narrow the search.
+        - name: X-MedAuth-Launch-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            description: The launch_id returned by GET /fhir/callback. Names the SMART launch
+              whose EHR access token this read is made with. Not a session_id — the two are
+              different identifiers with different lifetimes.
+            title: X-Medauth-Launch-Id
+          description: The launch_id returned by GET /fhir/callback. Names the SMART launch
+            whose EHR access token this read is made with. Not a session_id — the two are different
+            identifiers with different lifetimes.
+      responses:
+        '200':
+          description: The matching patients, and whether there were more.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_PatientSearchResults_'
+        '401':
+          description: This launch's EHR authorization is no longer valid; repeat the launch.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '404':
+          description: No such SMART launch.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '422':
+          description: The request body or path parameter is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '502':
+          description: The EHR, or its authorization server, was unreachable or unusable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '504':
+          description: The EHR or its authorization server did not answer in time.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
   /fhir/encounter/{encounter_id}:
     get:
       tags:
@@ -1066,6 +1190,84 @@ components:
             - type: 'null'
       type: object
       title: ApiResponse[HealthData]
+    ApiResponse_PatientSearchResults_:
+      properties:
+        data:
+          anyOf:
+            - $ref: '#/components/schemas/PatientSearchResults'
+            - type: 'null'
+        error:
+          anyOf:
+            - $ref: '#/components/schemas/ApiError'
+            - type: 'null'
+      type: object
+      title: ApiResponse[PatientSearchResults]
+    PatientSearchMatch:
+      properties:
+        patient_id:
+          type: string
+          title: Patient Id
+          description: The patient's id on this EHR — what the caller sends to POST /sessions/start
+            once one is picked.
+        family_name:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Family Name
+          description: Family name, when the EHR held one.
+        given_names:
+          items:
+            type: string
+          type: array
+          title: Given Names
+          description: Given names, in the order the EHR returned them.
+        birth_date:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Birth Date
+          description: Patient.birthDate as the EHR spelled it. Present because two people in
+            one practice share a name far more often than they share a name and a date of
+            birth, and picking the wrong one files an encounter against the wrong chart.
+        gender:
+          anyOf:
+            - type: string
+              enum:
+                - male
+                - female
+                - other
+                - unknown
+            - type: 'null'
+          title: Gender
+          description: Administrative gender, when recorded.
+      type: object
+      required:
+        - patient_id
+      title: PatientSearchMatch
+      description: >-
+        One candidate returned by a patient search. Deliberately narrower than
+        PatientInfo: a search answers with several patients at once and every
+        field is disclosed for every one of them, including the people who are
+        not the patient in the room. address_state in particular is absent — it
+        exists on PatientInfo for the site-of-care disagreement check and nothing
+        on a picker screen would read it.
+    PatientSearchResults:
+      properties:
+        matches:
+          items:
+            $ref: '#/components/schemas/PatientSearchMatch'
+          type: array
+          title: Matches
+          description: The candidates, capped. Empty is an ordinary answer — the EHR holds nobody
+            by that name — and never an error.
+        truncated:
+          type: boolean
+          title: Truncated
+          description: Whether the EHR had more matches than were returned. Never silently dropped
+            a provider shown five of two hundred Smiths and not told so will assume the person
+            they want is not there.
+      type: object
+      title: PatientSearchResults
     ApiResponse_LaunchContextData_:
       properties:
         data:
@@ -1726,6 +1928,14 @@ components:
           description: The encounter the EHR launched us from, as an id on that EHR. Null for
             a standalone launch, which has a patient and no encounter — not an error, and not
             a reason to repeat the launch.
+        provider_id:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Provider Id
+          description: The provider who authorized this launch, as a UUID this system minted
+            for them — what POST /sessions/start takes. Null when the EHR did not say who
+            launched us, could not prove it, or when the registry could not be reached.
       type: object
       required:
         - patient_id

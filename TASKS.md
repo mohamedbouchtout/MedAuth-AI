@@ -2410,21 +2410,127 @@ The insurance policy RAG is the technical core. Build and validate before other 
     targets exactly those specialties first (see the EHR priority order), so
     this is a customer-facing gap and not only a code one.
   - Move `KEYWORD_RULES` behind a loader so the table is data rather than
-    source, and decide deliberately where practice-specific rows live — a
-    config file, a Postgres table keyed by organization, or both. An
-    organization-scoped table is the likely answer, since `encounters` already
-    carries `organization_id`.
+    source. **Decided: practice-specific rows live in an organization-scoped
+    Postgres table**, keyed by `encounters.organization_id`, layered over the
+    built-in table rather than replacing it — a tenant adds rows and cannot
+    delete ours. A config file was the alternative and is rejected for the
+    reason this task exists at all: a file still needs a deploy, which is the
+    gap being closed.
+  - **This ships behind a seam, and live organization scoping is blocked on
+    work this task deliberately does not do.** `encounters.organization_id`
+    exists — it is in TASK-005's migration and on the `Encounter` model,
+    nullable — and **nothing in this repository ever writes it**. The only other
+    occurrences are fhir-integration's `get_organization()` and test fixtures.
+    So it is `NULL` for every real encounter today, and an org-scoped lookup
+    keyed on it would match nothing no matter how correct the lookup is.
+    - Build the loader and the org-scoped lookup in full, and test them against
+      **directly-constructed org-scoped rows** — an `organization_id` written by
+      the test itself, not one produced by a launch — so the resolution logic is
+      genuinely exercised rather than asserted against an always-`NULL` column.
+    - Say so where a reader will see it: an encounter with no `organization_id`
+      resolves against the built-in table alone, and that is the normal case
+      today rather than a failure.
+    - **Populating `organization_id` is TASK-052d**, on the fhir-integration and
+      track-a-clinical side, and is explicitly out of scope here. This is the
+      same split as TASK-024 and TASK-052b — build behind a seam, be honest
+      about what is stubbed, invent no placeholder — and it is taken again for
+      the same reason: fhir-integration already has several open threads
+      (TASK-054b, TASK-055 through TASK-059), and a task whose subject is a
+      loader should not also grow a SMART-launch write.
+  - **`procedure_key()`'s "cannot disagree" guarantee genuinely breaks here, and
+    must not be left standing as written.** `policy_dispatch.procedure_key()`
+    documents that resolving the code twice — once for the Redis dedup claim,
+    once inside `resolve_query_parameters()` — is safe because the lookup is
+    pure: *"They cannot disagree anyway — same function, same input."* That
+    holds only while the table is a module constant compiled at import. Once
+    resolution is org-aware and loaded, the two calls can observe different
+    rulesets at different times, and a divergence is not cosmetic: the claim
+    would be filed under `cpt:{code}` from one ruleset while the query is built
+    from another, so one order could raise two nudges, or a stale key could hold
+    the claim for the rest of the visit.
+    - **Preferred: engineer around it.** The consumer resolves the ruleset once
+      per mention and passes that one snapshot to both call sites, so they read
+      the same data within a single unit of work and divergence is structurally
+      impossible. Then rewrite the docstring to state the guarantee actually
+      being relied on — one resolved ruleset per mention — rather than the
+      module-constant purity it currently claims.
+    - **Fallback, only if threading the snapshot proves infeasible in this
+      task:** rewrite the docstring to state the weaker, accurate guarantee and
+      record the divergence window as a named, accepted risk with its
+      consequence spelled out. What is not acceptable is shipping the loader
+      with the current, now-false claim still sitting in the code.
   - **A practice-supplied row is subject to the same rule as ours**: an entry
     exists only where the spoken phrase determines the code. A tenant able to
     map "MRI" to one code for everything would reintroduce precisely the cache
     collision TASK-024 exists to prevent, on their own data and ours — the
     `rag:` key is not scoped per organization.
+  - **What "collapse" means, precisely — the original phrasing was wrong.** An
+    earlier draft of this task said to reject "a row that would collapse two
+    procedures onto one code", which reads as *two qualifier labels sharing a
+    code* and would reject the built-in table itself. The real rule:
+
+    > Reject a mapping when it would make two qualifier values that produce
+    > **different authorization answers** resolve to the same code.
+
+    - **Legitimate, and already shipped:** `knee`, `hip` and `ankle` all resolve
+      to `73721`, and `shoulder`, `elbow` and `wrist` all resolve to `73221`.
+      Those are not three procedures collapsed onto one code — `73721` *is* "MRI,
+      any joint of lower extremity", and a payer publishes one set of criteria at
+      that code covering all three. Same authorization answer, one code,
+      correctly shared.
+    - **The failing counterexample:** a tenant row adding `brain` to `73721`
+      under the `MRI` keyword. A brain MRI is `70551`, and payers gate it on
+      entirely different criteria — headache red flags and prior imaging, not the
+      six weeks of conservative therapy that gate an extremity joint. The answer
+      for a brain MRI would be written to `rag:{payer}:{plan_type}:{state}:73721`
+      and served to the next knee MRI on that plan. Silent, and it crosses
+      patients. A `default_qualifier` making a bare "MRI" resolve to any single
+      code is the same failure by another route, and is rejected on the same
+      grounds.
+    - **A loader cannot infer authorization answers, so the sharing is declared
+      rather than deduced.** A `ProcedureCode` shared by more than one qualifier
+      names the qualifier set it legitimately spans, so sharing is an explicit
+      assertion by whoever wrote the row rather than an emergent property of the
+      table. A row putting a qualifier onto a code whose declared span does not
+      include it is rejected at load, with the error naming both qualifiers and
+      the code. Declaring the span also documents the pairing for the
+      certified-coder review Issue #70 still owes on this table.
+  - **Detection is in scope alongside the loader.** `_KEYWORD_PATTERNS` in
+    `track_b_rag.keywords` is a separate compiled table, so a tenant rule for a
+    keyword the detector never fires on resolves nothing at all — a silent no-op,
+    which defeats the feature for exactly the practices it exists to serve. A
+    practice-supplied rule therefore supplies its keyword's detection pattern
+    too, loaded and compiled on the same path. Whatever the loader accepts must
+    be reachable end to end from a spoken sentence.
+  - **`NEVER_CODED` and `AXIS_NOT_SPOKEN` are not tenant-overridable in v1, and
+    that is a deliberate choice rather than an unstated assumption.** Those two
+    tables are TASK-024's recorded findings that a keyword names no coded
+    procedure at all, or that its code turns on an axis nobody speaks — an
+    X-ray's view count, a biopsy's technique. A tenant permitted to override them
+    could file a real, cacheable answer under a code the spoken phrase never
+    determined, which is the correctness problem TASK-024 already solved once,
+    reintroduced through the extension point. When a permissive option risks
+    silently undoing a settled correctness decision, take the restrictive one and
+    write down why. Revisit only if a real practice need surfaces that justifies
+    the added risk — not pre-emptively.
   - Keep the four refusal reasons; a loaded table changes where rows come from,
-    not what "no code" means.
+    not what "no code" means. A keyword absent from a tenant's table and from
+    ours is unknown to the module entirely, exactly as it is today.
   - **Test:** a practice-scoped row resolves for that organization and not for
-    another
-  - **Test:** a row that would collapse two procedures onto one code is rejected
-    at load, naming the conflict
+    another, against a directly-constructed `organization_id`
+  - **Test:** an encounter with a `NULL` `organization_id` — the only kind that
+    exists until TASK-052d — resolves against the built-in table
+  - **Test:** a tenant row adding a qualifier outside a shared code's declared
+    span is rejected at load, naming both qualifiers and the code
+  - **Test:** a tenant `default_qualifier` that would resolve an unqualified
+    mention to a single code is rejected at load
+  - **Test:** a tenant row overriding a `NEVER_CODED` or `AXIS_NOT_SPOKEN`
+    keyword is rejected at load
+  - **Test:** a tenant rule supplying a keyword the built-in detector does not
+    know is reachable end to end — a transcript sentence containing it resolves
+    the code
+  - **Test:** `procedure_key()` and `resolve_query_parameters()` resolve one
+    mention against the same ruleset snapshot
 
 - [x] **TASK-025:** Mobile session screen
   - Prerequisite: TASK-006 (`POST /sessions/start` and `/end`), TASK-006b
@@ -2576,10 +2682,13 @@ The insurance policy RAG is the technical core. Build and validate before other 
       131 tests pass with 94% coverage against the 80% gate, and each commit in
       the series typechecks and passes its own suite.
 
-- [ ] **TASK-025b:** Real patient and provider selection on mobile
+- [x] **TASK-025b:** Real patient and provider selection on mobile
   - Prerequisite: TASK-025 (the seam this fills), TASK-052 (base FHIR resource
-    fetching)
-  - App: `apps/mobile`; also `services/fhir-integration` for the search route
+    fetching), TASK-051c (the verified `fhirUser` claim the provider half
+    resolves from), TASK-051d (`GET /fhir/launch-context`)
+  - App: `apps/mobile`; also `services/fhir-integration` for the search route and
+    `services/track-a-clinical` for the provider registry the search route's
+    sibling resolves against
   - **The gap.** TASK-025 starts a visit through an injected function returning
     `{patient_id, provider_id}`, because neither identifier has a real source
     yet. The seam let that screen ship with its refusal behaviour intact; this
@@ -2595,16 +2704,143 @@ The insurance policy RAG is the technical core. Build and validate before other 
     the chart in front of them. Take
     the launch context when there is one and search only when there is not.
   - It reads patient demographics, so it audits through hipaa-logger like every
-    other route in that service.
-  - Provider identity still arrives with SMART on FHIR in Phase 5. If that has
-    not landed, fill the patient half and say so rather than inventing a
-    provider.
-  - Until this lands, no build of `apps/mobile` can start a real encounter, and
-    that is deliberate — see the hardcoded-id argument in TASK-025.
+    other route in that service. **One `READ_PATIENT` row per match the response
+    discloses**, not one per call: a search that returned eight patients
+    disclosed eight identifiers, and a single row naming none of them would make
+    seven of those disclosures invisible to the one query the audit table exists
+    to answer. A search that matched nothing discloses nothing and writes no row,
+    on the same terms as a launch that carried no patient.
+  - **The provider half is no longer waiting on Phase 5, and this bullet
+    replaces the one that said it was.** That wording was written before
+    TASK-051c, which captures the SMART `fhirUser` claim, verifies it against the
+    EHR's published keys, and stores the resolved `Practitioner` reference on the
+    launch record. The provider is therefore *known* — what is missing is only a
+    type: `encounters.provider_id` is a UUID and a FHIR `Practitioner` id is
+    `[A-Za-z0-9\-\.]{1,64}`, which HAPI answers as `"1"`. So this task adds the
+    `providers` registry that turns one into the other. The decision, the two
+    alternatives rejected, and what it costs are in CLAUDE.md under "Provider
+    identity — the registry that resolves an EHR practitioner"; this task cites
+    that section and does not re-derive it.
+  - **`provider_id` is resolved server-side and reaches the client already
+    resolved.** `GET /fhir/launch-context` returns it alongside the patient, so
+    a client never sees a practitioner reference and never asserts a provider
+    identity of its own. That is the same rule as "the provider comes from the
+    `encounters` row, never from the presented token's claim", applied one step
+    earlier — at the point the identity is minted rather than at the point it is
+    read back.
+  - **What still blocks a real encounter on mobile is narrower now, and it is
+    not this task.** Every route that answers either half is keyed on
+    `X-MedAuth-Launch-Id`, because both need the launch's EHR access token — and
+    **no client in this repository can obtain a `launch_id` at all.**
+    `GET /fhir/callback` answers with JSON in whatever browser the EHR redirected,
+    and neither app has any launch flow. That gap was not visible from TASK-025b's
+    own text, was found while building it, and is genuinely two pieces of work
+    rather than one: **TASK-051e** decides how a completed launch reaches a client
+    without putting a capability handle in a URL, and **TASK-025c** builds the
+    mobile flow on top of it. So the patient source here is complete and tested
+    against both paths, behind one remaining seam — the `launch_id` — which is a
+    single opaque string rather than the "identify a patient and a provider" seam
+    it replaces.
   - **Test:** a search returns matches and the selection populates the
     start-visit call
   - **Test:** TASK-025's session screen tests still pass with the real
     implementation substituted for the seam
+  - **Built.** Three services and one app, in four commits.
+    - **The provider registry is `providers` in `track-a-clinical`**, migration
+      `0008`, resolved through `POST /providers/resolve`. Get-or-create,
+      answering 200 whichever happened — a caller cannot use "was this their
+      first launch" for anything, and a 201-then-200 sequence would make the
+      route behave differently for a new hire than for everyone else. The race
+      is handled by `ON CONFLICT DO NOTHING` rather than a check-then-insert,
+      and the integration test proves it with eight concurrent resolutions
+      against real PostgreSQL. That is the one thing the unit fake cannot: it
+      was written to match the assumption it would have to falsify.
+    - **The registry writes no audit row**, and that is the rule rather than an
+      omission. A practitioner reference identifies the provider, not a patient.
+      Nor does it log the reference: an operational log is not a roster of which
+      clinicians used the product and when.
+    - **`GET /fhir/patient/search` searches by `name`**, plus an optional
+      `birthdate`. `_content` and `_text` are optional in FHIR and widely
+      unimplemented, so a free-text search would work on some vendors and
+      silently return nothing on others — indistinguishable from a genuine
+      no-match, which is the failure mode this repository refuses everywhere.
+      The HAPI integration tests are what settle that the parameters are
+      honoured; the unit tests only prove this code parses a Bundle it wrote
+      itself.
+    - **A match carries less than `PatientInfo`**, because every field is
+      disclosed for every candidate including the people who are not the patient
+      in the room. `address_state` in particular has no reader on a picker
+      screen. One `READ_PATIENT` row per disclosed match, and none at all when
+      nothing matched.
+    - **Writing the HAPI tests found a fixture problem worth recording.** The
+      shared `seeded` fixture varies a patient's id per run and keeps the family
+      name fixed, so against the persistent dev server `Patient?name=Testpatient`
+      had accumulated 36 rows and the search correctly returned twenty older
+      namesakes. The search tests post their own uniquely-named patient. A test
+      that searches on a shared fixture's name will pass once and then stop
+      testing anything.
+    - **The picker had a defect its first test caught**: its effect depended on
+      the `onResolved` callback identity, so an inline callback re-read the
+      launch on every render — one request per keystroke, discarding the matches
+      already on screen. The callback is held in a ref and the effect depends
+      only on the launch.
+    - **`render` is awaited in this app's suite.** A non-awaited result has no
+      query methods on it at all, and the symptom is "render has not been
+      called" reported from a query, which names neither the cause nor the file.
+      `SessionScreen.test.tsx` already did this; it is written down here because
+      the failure mode gives no hint.
+    - **`startVisit` gained `launchId` in `packages/session-client`**, so both
+      apps get it rather than mobile alone. With `ehrEncounterId` it is what
+      fills the encounter's payer columns, and either alone leaves them NULL.
+    - **`apps/mobile/src/api/fhir.ts` stays in the app rather than becoming a
+      package.** TASK-070 needs the same two calls and is the extraction
+      trigger — the same trigger that moved `session-client` out of this app in
+      TASK-042 and `nudge-client` out of the web app in TASK-043. Extracting
+      before a second consumer exists would be guessing at the shape the second
+      one needs.
+    - **A HIPAA finding was recorded rather than fixed here: TASK-046.** `httpx`
+      logs every request URL at INFO, so a search query string — a patient's
+      name — reaches stdout from the library. It predates this task; `_search`
+      has issued `Coverage?patient={id}` since TASK-052. Configuring library
+      loggers is a platform-wide decision rather than one route's, and a test
+      pins the gap so closing it is visible instead of silent.
+    - **What still blocks a real encounter is one named constant**, `LAUNCH_ID`
+      in `App.tsx`. Nothing here performs a SMART launch, so this app holds no
+      `launch_id` and both routes are keyed on one. TASK-051e and TASK-025c.
+    - 169 mobile tests at 93% coverage, 497 in fhir-integration at 96%, 405 in
+      track-a-clinical at 99%, all against the 80% gate. Each commit typechecks
+      and passes its own suite.
+
+- [ ] **TASK-025c:** Obtain a SMART launch from `apps/mobile`
+  - Prerequisite: **TASK-051e** (the handoff this consumes), TASK-051 (the launch
+    itself), TASK-025b (everything that consumes the resulting `launch_id`)
+  - App: `apps/mobile`
+  - **The gap, found while building TASK-025b.** Every route that identifies a
+    patient or a provider is keyed on `X-MedAuth-Launch-Id`, because each needs
+    the launch's EHR access token. Nothing in `apps/mobile` performs a SMART
+    launch, so the app holds no `launch_id` and cannot call any of them. This is
+    the whole of what still stops a real encounter starting on this platform —
+    TASK-025b filled everything downstream of it.
+  - Drive `GET /fhir/launch` in a system browser (Expo's `WebBrowser`
+    `openAuthSessionAsync`, not an in-app `WebView` — an OAuth password should
+    never be typed into a screen the app can read), and take the completed
+    launch back through whatever TASK-051e settles.
+  - **Both launch types, because TASK-025b's two paths depend on which one
+    happened.** An EHR launch carries `iss` and `launch` and yields a patient;
+    a standalone launch carries `iss` alone and yields none, which is what makes
+    the search path reachable. Do not build only the EHR case: the search half
+    of TASK-025b would then be untestable against a real launch.
+  - **`launch_id` is stored in memory for the life of the app process, never on
+    disk.** It resolves to an EHR access token, so it is a credential by the
+    definition this repository already applies to it — `expo-secure-store` would
+    be the floor if it ever needed to persist, and it does not, because a launch
+    outlives neither the working day nor `SMART_LAUNCH_RECORD_TTL_SECONDS`.
+  - **Test:** an EHR launch yields a `launch_id` and the patient source takes the
+    launch context path
+  - **Test:** a standalone launch yields a `launch_id` and the patient source
+    falls through to search
+  - **Test:** a launch the provider cancels leaves the app with no `launch_id`
+    and the start-visit action refusing, never a partially-configured state
 
 ---
 
@@ -3997,6 +4233,45 @@ The insurance policy RAG is the technical core. Build and validate before other 
       `READ_COVERAGE` — which is the same looseness one layer down. They now use
       real members.
 
+- [ ] **TASK-046:** httpx logs PHI in outbound request URLs
+  - Prerequisite: none. Small, cross-cutting, and deliberately not folded into
+    TASK-025b, which is where it was noticed.
+  - Services: every Python service that calls out over `httpx` —
+    `fhir-integration`, `track-a-clinical`, `prior-auth`, `track-b-rag`
+  - **The gap.** `httpx` logs every request it makes at INFO, as
+    `HTTP Request: GET <full url> "HTTP/1.1 200 OK"`, and the full URL includes
+    the query string. CLAUDE.md's first regulatory rule is "never log PHI to
+    stdout or any unencrypted store", and this writes PHI to stdout in the
+    ordinary course of a working request. Nothing in this repository configures
+    the `httpx` logger, so it inherits the root level.
+  - **It predates the task that found it.** `EHRAdapter._search` has issued
+    `Coverage?patient={id}` and `Condition?patient={id}` since TASK-052, so a
+    patient identifier has been reaching that log line for several phases.
+    TASK-025b made it visible rather than introducing it: `Patient?name=` puts a
+    patient's *name* in the same place, which is what a HIPAA-flavoured test
+    finally caught.
+  - **The adapter layer is already careful about this and cannot reach it.**
+    `_get` deliberately does not render `str(exc)` on a transport failure,
+    because "httpx puts the full request URL in its message, and a search URL
+    carries a patient id" — the exact hazard, recognised, and closed on the one
+    path the module controls. The library's own logger is not that path.
+  - **Fix it once, not per service.** Raising `httpx`'s logger to WARNING is a
+    one-line change and the obvious answer, but doing it in four `main.py` files
+    is the duplication this repository refuses; and it is a decision about what
+    the whole platform logs, not about one service. Decide where the logging
+    configuration lives — most likely a small shared helper each service calls at
+    startup, on the same terms as `packages/cors-policy` — and set it there.
+  - **Do not solve it by moving identifiers out of query strings.** FHIR search
+    is defined with parameters in the query string; there is nowhere else for
+    them to go. The library's logging is what has to change.
+  - **Check the other loggers in the same pass.** `httpcore`, `urllib3` and
+    `boto3`/`botocore` all log request detail at DEBUG or INFO, and the question
+    "what does this write when someone turns the root logger up" is the same
+    question for each.
+  - **Test:** an outbound FHIR search carrying a patient name produces no log
+    record containing that name, at any level, from any logger
+  - **Test:** the same for a `?patient=` search carrying a patient identifier
+
 ---
 
 ## Phase 5 — FHIR Integration
@@ -4578,6 +4853,39 @@ logic do not change.
     - **`test_every_router_is_mounted` in `tests/unit/test_main.py` was updated
       deliberately** — it enumerates the mounted paths, so it is meant to fail
       when a route appears.
+
+- [ ] **TASK-051e:** Hand a completed launch back to a client
+  - Prerequisite: TASK-051 (the callback this changes)
+  - Service: `services/fhir-integration`; unblocks **TASK-025c** and **TASK-070**
+  - **The gap, found while building TASK-025b.** `GET /fhir/callback` answers
+    with `{launch_id, ehr_type, expires_in}` as JSON, in whatever browser the
+    EHR redirected. That is a perfectly good answer for a service-to-service
+    caller and no answer at all for an application: the browser renders the JSON
+    and the app that started the launch never sees it. So no client in this
+    repository can obtain a `launch_id`, and every launch-keyed route — the two
+    TASK-052 reads, TASK-051d's launch context, TASK-025b's patient search — is
+    unreachable from `apps/web` and `apps/mobile` alike.
+  - **The obvious fix is the one thing this repository forbids.** Redirecting to
+    the client with `?launch_id=...` puts a capability handle in a URL, which
+    `services/fhir-integration/src/api/fhir.py` refuses in terms: a `launch_id`
+    resolves to an EHR access token, and a query string is "the one place a
+    credential is certain to be logged by intermediaries". A fragment is not an
+    answer either — it survives the browser but not a native `WebBrowser`
+    result, and it still lands in history.
+  - **So the handoff needs a design, and it is a cross-cutting one.** Both apps
+    consume it and the CLAUDE.md rule for that case applies: settle it once in
+    that document and have TASK-025c and TASK-070 cite it. The shape to start
+    from is the one this codebase already uses for the launch itself — a
+    single-use, short-TTL handle exchanged for the real value over a POST, the
+    way `fhir_launch:{state}` is single-use and consumed by the callback. Decide
+    it against a real vendor redirect rather than in the abstract.
+  - **Whatever is chosen must keep TASK-051's own properties.** No access token,
+    refresh token or scope reaches the client; nothing is logged that names the
+    launch; and a handle that has been redeemed cannot be redeemed twice.
+  - **Test:** a completed launch is redeemable exactly once, and the second
+    attempt is a 404 rather than a second working handle
+  - **Test:** no log line and no redirect URL emitted by the flow contains the
+    `launch_id`
 
 - [x] **TASK-052:** Base FHIR resource fetching (implements base.py methods)
   - Service: `services/fhir-integration`
@@ -5271,6 +5579,46 @@ logic do not change.
       that contradicts the one CLAUDE.md documents. One statement of that order,
       in the document that owns it.
 
+- [ ] **TASK-052d:** Populate encounter organization at SMART launch
+  - Prerequisite: **TASK-051** (the launch), **TASK-052** (`get_organization()`
+    and the encounter's `serviceProvider` reference, which is what actually
+    names the site of care), TASK-006 (owns `POST /sessions/start`, where the
+    encounter row is created), TASK-052b (populates the other launch-derived
+    columns on the same row, by the same path)
+  - Services: `services/fhir-integration`, `services/track-a-clinical`
+  - **Why this exists as its own task.** `encounters.organization_id` has been
+    in the schema since TASK-005 and **nothing has ever written it**, so it is
+    `NULL` on every encounter this system has created. That was harmless while
+    nothing read it. TASK-024b reads it: it scopes practice-supplied
+    procedure-code rows by organization, which is the whole point of letting a
+    practice extend the table. Until this task lands, that lookup is correct and
+    matches nothing, and every encounter resolves against the built-in table
+    alone.
+  - **It is the site of care, and this is the same question TASK-052b already
+    answered for `state`.** The organization is the encounter's
+    `serviceProvider`, resolved through `Organization` — not the patient's
+    registered practice, and not the payer. `EHRAdapter.get_patient_context()`
+    already walks that reference for TASK-052b's `state`, so this reuses a path
+    that exists rather than adding a fetch.
+  - **Decide deliberately what to do when the EHR names no organization**, and
+    write it down. `NULL` is the honest answer and it is what every encounter
+    carries today, so it must stay a supported state rather than becoming an
+    error — but a launch that *could* have named one and did not is worth a
+    WARNING naming the encounter, the same way an unknown payer is.
+  - **An `Organization` id is the EHR's, not ours, and the column is a UUID.**
+    This is the shape CLAUDE.md settles under "The EHR-asserted actor is its own
+    column": a FHIR `id` is `[A-Za-z0-9\-\.]{1,64}` and is only unique within one
+    EHR, so it is not a UUID and cannot be treated as globally unique. Resolve
+    this before writing any code — the options are the same ones that section
+    weighs, and the answer must not be to coerce an EHR id into a UUID column or
+    to widen a column other rows depend on.
+  - **Test:** an encounter created under a launch whose FHIR `Encounter` names a
+    `serviceProvider` carries the resolved organization
+  - **Test:** a launch naming no organization leaves the column `NULL` and warns,
+    and the encounter still starts
+  - **Test:** a practice-scoped procedure-code row (TASK-024b) resolves for an
+    encounter populated by this path, end to end
+
 - [x] **TASK-053:** SOAP note write-back (base.py)
   - Services: `services/fhir-integration` **and** `services/track-a-clinical`.
     An earlier draft of this task listed one service and six lines; the eight
@@ -5868,8 +6216,14 @@ logic do not change.
   - Start session: after an EHR launch, take the patient and encounter from
     **TASK-051d**'s `GET /fhir/launch-context` rather than searching for a
     patient the EHR has already named; fall back to patient search via
-    `GET /fhir/patient/search?query=...` for a standalone launch (TASK-025b adds
-    that route). Then `POST /sessions/start` (TASK-006) with the selected
+    `GET /fhir/patient/search?query=...` for a standalone launch (TASK-025b
+    built that route, and `apps/mobile` already resolves the two paths in
+    `src/session/patientSource.ts` — mirror that order rather than re-deriving
+    it). `provider_id` comes back from the launch-context call already resolved,
+    so this app never handles a practitioner reference. **Obtaining the
+    `launch_id` in the first place is TASK-051e plus this app's own half of
+    it** — the same gap TASK-025c closes on mobile, and this task cannot start a
+    session without it. Then `POST /sessions/start` (TASK-006) with the selected
     patient — passing `launch_id` and `ehr_encounter_id` too, which is what
     fills the payer columns (TASK-052b) — and begin audio capture (TASK-023)
     once session_id + jwt are returned
@@ -6212,12 +6566,15 @@ helpful."
    real-time endpoint all validate against the same `POST /sessions/start`-issued
    token. Do not build a parallel auth mechanism for convenience.
 
-9. **Two endpoints are flagged as possibly-missing, not assumed-present:**
+9. **Two endpoints were flagged as possibly-missing, not assumed-present:**
    FHIR patient search (`GET /fhir/patient/search`, needed by TASK-070) and
    prior-auth list (`GET /prior-auth?status=`, needed by TASK-072). If you reach
    either task and the endpoint doesn't exist yet, add it as part of that task
    rather than assuming it was built elsewhere — flag it back if the scope is
    unclear, same as any other gap found so far.
+
+   **Patient search is built**, by TASK-025b, which reached it first. TASK-070
+   calls it rather than adding it again. The prior-auth list is still open.
 
    **Patient search is for a standalone launch only.** After an EHR launch the
    EHR has already named the patient and TASK-051 stored it, so the identifier

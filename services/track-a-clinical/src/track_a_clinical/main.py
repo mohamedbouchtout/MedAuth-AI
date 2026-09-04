@@ -25,6 +25,7 @@ from track_a_clinical.api.dependencies import close_redis, get_redis
 from track_a_clinical.api.health import router as health_router
 from track_a_clinical.api.notes import router as notes_router
 from track_a_clinical.api.prior_auth import router as prior_auth_router
+from track_a_clinical.api.providers import router as providers_router
 from track_a_clinical.api.sessions import router as sessions_router
 from track_a_clinical.bedrock import reset_clients
 from track_a_clinical.config import get_settings
@@ -77,6 +78,7 @@ def create_app() -> FastAPI:
     app.include_router(sessions_router)
     app.include_router(notes_router)
     app.include_router(prior_auth_router)
+    app.include_router(providers_router)
     return app
 
 
