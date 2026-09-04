@@ -49,6 +49,36 @@ class StartSessionRequest(BaseModel):
     launch_id: str | None = Field(default=None, max_length=64)
 
 
+class ResolveProviderRequest(BaseModel):
+    """Body of ``POST /providers/resolve``.
+
+    One field, and it is the practitioner reference **as a verified ``fhirUser``
+    claim gave it** — normally an absolute URL. Not a bare id: a ``Practitioner``
+    id is unique only within one EHR, so ``Practitioner/1`` from two servers
+    names two people, and accepting bare ids would merge them into one provider.
+
+    This route is server-to-server. No browser calls it, and no client ever holds
+    a practitioner reference — ``GET /fhir/launch-context`` hands an app the
+    resolved ``provider_id`` instead, so nothing outside this network can assert
+    a provider identity. See CLAUDE.md, "Provider identity — the registry that
+    resolves an EHR practitioner".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    fhir_practitioner_ref: str = Field(min_length=1, max_length=512)
+
+
+class ProviderData(BaseModel):
+    """``data`` payload returned by ``POST /providers/resolve``.
+
+    Only the identifier the caller asked for. The reference it was resolved from
+    is not echoed: the caller sent it and learns nothing from seeing it again.
+    """
+
+    provider_id: uuid.UUID
+
+
 class StartSessionData(BaseModel):
     """``data`` payload returned by ``POST /sessions/start``."""
 

@@ -638,6 +638,58 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /providers/resolve:
+    post:
+      tags: [providers]
+      operationId: resolveProvider
+      summary: Resolve an EHR practitioner reference to a provider id
+      description: >-
+        Returns the `provider_id` for one practitioner, creating the registry row
+        the first time that practitioner is seen. `encounters.provider_id` is a
+        UUID and a FHIR `Practitioner` id is not — HAPI answers `"1"` — so this is
+        the mapping between the identity a SMART launch verifies (TASK-051c) and
+        the value the core schema keys on.
+
+
+        **Server-to-server.** `fhir-integration` calls it while answering
+        `GET /fhir/launch-context`, and that route hands an app the resolved
+        `provider_id` rather than the reference. A client that could present a
+        practitioner reference would be asserting a provider identity of its own.
+
+
+        **Idempotent, and 200 whether or not the row was new.** One practitioner
+        is one provider forever; a second row would split that clinician's
+        encounters between two ids with nothing erroring. A caller cannot use
+        "was this their first launch" for anything, so the status does not
+        report it.
+
+
+        **No audit row.** A practitioner reference identifies the provider, not a
+        patient, so nothing here touches PHI — and an operational write in
+        `audit_log` turns "who accessed patient X" from a query you can run into
+        one you have to filter.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResolveProviderRequest'
+      responses:
+        '200':
+          description: The provider id for this practitioner.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderResponse'
+        '422':
+          description: >-
+            The body is invalid — a missing, empty or over-long
+            `fhir_practitioner_ref`, or an unknown field.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   schemas:
     SubmissionMethod:
@@ -1247,3 +1299,46 @@ components:
           type: 'null'
         error:
           $ref: '#/components/schemas/Error'
+
+    ResolveProviderRequest:
+      type: object
+      description: >-
+        The practitioner to resolve, as a verified SMART `fhirUser` claim gave
+        it.
+      required:
+        - fhir_practitioner_ref
+      properties:
+        fhir_practitioner_ref:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: >-
+            The `Practitioner` reference, normally an absolute URL such as
+            `https://ehr.example.com/fhir/Practitioner/abc-123`. **Not a bare
+            id**: a `Practitioner` id is unique only within one EHR, so
+            `Practitioner/1` from two servers names two people and would merge
+            into one provider.
+      additionalProperties: false
+
+    ProviderData:
+      type: object
+      description: >-
+        The resolved provider. The reference it came from is not echoed — the
+        caller sent it and learns nothing from seeing it again.
+      required:
+        - provider_id
+      properties:
+        provider_id:
+          type: string
+          format: uuid
+          description: What goes in `POST /sessions/start`'s `provider_id`.
+
+    ProviderResponse:
+      type: object
+      required: [data, error]
+      properties:
+        data:
+          $ref: '#/components/schemas/ProviderData'
+        error:
+          nullable: true
+          type: object

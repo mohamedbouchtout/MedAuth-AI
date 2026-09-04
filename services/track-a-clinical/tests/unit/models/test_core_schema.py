@@ -25,13 +25,17 @@ EXPECTED_TABLES = {
     "clinical_nudges",
     "prior_auth_requests",
     "insurance_policies",
+    # 0008, TASK-025b. Not one of TASK-005's five: it exists because an EHR
+    # asserts a Practitioner reference and `encounters.provider_id` is a UUID.
+    "providers",
 }
 
 # Straight from TASK-005's inline SQL, in declaration order, plus the columns
 # later migrations added: `state` (0003, TASK-024), `launch_id` (0006,
-# TASK-052b) and `payer_outcome` (0007, TASK-054). Written out rather than
-# derived, so a column arrives here as a deliberate edit and never as a side
-# effect of touching a model.
+# TASK-052b) and `payer_outcome` (0007, TASK-054) — and the `providers` table
+# 0008 added whole (TASK-025b). Written out rather than derived, so a column
+# arrives here as a deliberate edit and never as a side effect of touching a
+# model.
 EXPECTED_COLUMNS = {
     "encounters": [
         "id",
@@ -107,6 +111,12 @@ EXPECTED_COLUMNS = {
         "effective_date",
         "qdrant_collection",
     ],
+    "providers": [
+        "id",
+        "fhir_practitioner_ref",
+        "created_at",
+        "deleted_at",
+    ],
 }
 
 #: TASK-005 names seven indexes; anything beyond them was added by a later
@@ -126,7 +136,7 @@ EXPECTED_INDEXES = {
 }
 
 
-def test_metadata_holds_exactly_the_five_core_tables() -> None:
+def test_metadata_holds_exactly_the_core_tables() -> None:
     """audit_log is absent on purpose — hipaa-logger owns it and migrates it first."""
     assert set(Base.metadata.tables) == EXPECTED_TABLES
 
