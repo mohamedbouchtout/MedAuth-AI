@@ -35,6 +35,20 @@ export interface StartVisitInput {
   patientId: string;
   providerId: string;
   ehrEncounterId?: string;
+  /**
+   * The SMART launch this visit was started from, when there was one.
+   *
+   * Sent alongside `ehrEncounterId` because the service needs both to fill the
+   * encounter's payer columns: the launch supplies the EHR credential and the
+   * encounter id says which visit to ask about. Either alone leaves them NULL,
+   * and a NULL payer means every policy query for the visit reports missing
+   * parameters instead of answering.
+   *
+   * **It is not a `sessionId` and the two are never interchangeable.** A launch
+   * precedes the visit and can outlive several of them; see CLAUDE.md, "A SMART
+   * launch is not an encounter session".
+   */
+  launchId?: string;
 }
 
 /**
@@ -162,6 +176,9 @@ export function createSessionsApi(
       };
       if (input.ehrEncounterId !== undefined) {
         payload.ehr_encounter_id = input.ehrEncounterId;
+      }
+      if (input.launchId !== undefined) {
+        payload.launch_id = input.launchId;
       }
       return sessionCall('/sessions/start', jsonPost(payload));
     },
