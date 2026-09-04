@@ -36,8 +36,16 @@ import type { PatientSource } from '../session/patientSource';
 import { recoveryFor } from '../session/recovery';
 import { visitPhase, type SessionStatus } from '../session/visitPhase';
 
+/**
+ * Shown when the injected source resolves to nothing.
+ *
+ * Since TASK-025b the patient and provider are decided before this screen is
+ * reached — `PatientPickerScreen` does that, and reports its own failures with
+ * its own messages. So this is now the last-resort case rather than the ordinary
+ * one, and it still refuses rather than inventing a subject.
+ */
 export const NO_SUBJECT_MESSAGE =
-  'MedAuth AI cannot start a visit yet: this build has no way to identify the patient and provider. Patient selection arrives in TASK-025b.';
+  'MedAuth AI cannot start a visit: the patient and provider for it are not known.';
 
 export const VISIT_COMPLETED_MESSAGE =
   'This visit has already been completed and cannot be reopened. Start a new visit.';
@@ -161,9 +169,17 @@ export function SessionScreen({
       return;
     }
 
+    // The chart entry and the launch are passed through when the subject has
+    // them: together they are what lets the service fill the encounter's payer
+    // columns, and either alone leaves them NULL. A standalone launch has no
+    // chart entry and legitimately sends neither.
     const started = await sessions.startVisit({
       patientId: subject.patientId,
       providerId: subject.providerId,
+      ...(subject.ehrEncounterId === undefined
+        ? {}
+        : { ehrEncounterId: subject.ehrEncounterId }),
+      ...(subject.launchId === undefined ? {} : { launchId: subject.launchId }),
     });
     if (!started.ok) {
       setSessionStatus({

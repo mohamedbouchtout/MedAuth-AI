@@ -73,10 +73,34 @@ export const TRACK_B_RAG_URL =
   process.env.EXPO_PUBLIC_TRACK_B_RAG_URL ?? 'http://localhost:8002';
 
 /**
+ * The HTTP origin for fhir-integration — origin only, no path; the client
+ * appends `/fhir/...`.
+ *
+ * **This is the third HTTP origin this app needs, and it is not either of the
+ * others.** `API_BASE_URL` is track-a-clinical, which owns the session
+ * lifecycle; `TRACK_B_RAG_URL` is track-b-rag, which owns nudge acknowledgement;
+ * this is fhir-integration, which owns the two routes that say which patient a
+ * visit is about (TASK-025b). Three services, three ports, three variables —
+ * collapsing them waits on the Phase 6 gateway CLAUDE.md defers to under "CORS
+ * and browser reachability".
+ *
+ * `EXPO_PUBLIC_FHIR_BASE_URL` is added to `.env.example` by TASK-025b; unlike
+ * the four before it, it is genuinely new rather than one that had been sitting
+ * there unread. The local-dev default is fhir-integration's port from the table
+ * in CLAUDE.md.
+ *
+ * A deployed build must set an `https://` origin: the search sends a patient's
+ * name in a query string, its answer carries patient identifiers, and every call
+ * carries a `launch_id` that resolves to an EHR access token.
+ */
+export const FHIR_INTEGRATION_URL =
+  process.env.EXPO_PUBLIC_FHIR_BASE_URL ?? 'http://localhost:8004';
+
+/**
  * True when the configured origin is not TLS-protected.
  *
  * Covers both schemes this app configures — `ws://` for the two WebSocket
- * origins and `http://` for the two HTTP ones — because the rule they are
+ * origins and `http://` for the three HTTP ones — because the rule they are
  * checked against is one rule, CLAUDE.md's "TLS everywhere", and a second
  * near-identical helper is how one origin ends up quietly exempt.
  */

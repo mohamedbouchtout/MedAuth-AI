@@ -1,24 +1,35 @@
 import { StatusBar } from 'expo-status-bar';
 import { View, StyleSheet } from 'react-native';
 
-import { SessionScreen } from './src/screens/SessionScreen';
-import { patientSelectionUnavailable } from './src/session/patientSource';
+import { VisitFlow } from './src/screens/VisitFlow';
+
+/**
+ * The SMART launch this app holds.
+ *
+ * `null` in every build, because **nothing here performs a SMART launch yet** —
+ * that is TASK-025c, and the handoff it depends on is TASK-051e. Both routes
+ * that identify a patient are keyed on a `launch_id`, because both spend the
+ * launch's EHR access token, so without one this app can identify nobody, and
+ * the picker says so rather than starting a visit against an invented
+ * identifier.
+ *
+ * It is one named constant so that the remaining gap is a single value: when
+ * TASK-025c lands, what replaces it is the launch that task obtains, and nothing
+ * else on this path changes.
+ */
+const LAUNCH_ID: string | null = null;
 
 /**
  * Root.
  *
- * The session screen (TASK-025) is wired to `patientSelectionUnavailable`, which
- * is the seam described in `src/session/patientSource.ts`: nothing on this
- * platform can identify a patient or a provider until TASK-025b adds the FHIR
- * patient search route and SMART on FHIR supplies the provider. So this build
- * shows a provider that a visit cannot be started, rather than starting one
- * against an invented patient id — an encounter, a SOAP note and a prior-auth
- * bundle filed against the wrong patient is silent at every layer below this.
+ * Everything about the flow lives in `VisitFlow`, which is a component rather
+ * than inline here so the whole path — launch context, search, selection, start
+ * visit — can be driven in a test with a launch injected.
  */
 export default function App() {
   return (
     <View style={styles.root}>
-      <SessionScreen patientSource={patientSelectionUnavailable} />
+      <VisitFlow launchId={LAUNCH_ID} />
       <StatusBar style="auto" />
     </View>
   );
