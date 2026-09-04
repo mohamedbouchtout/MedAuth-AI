@@ -593,3 +593,90 @@ class TestWhereTheStateComesFrom:
         assert context.coverage is None
         assert context.requires_manual_confirmation is True
         assert context.state == "MA"
+
+
+class TestPatientSearchTruncation:
+    """A partial result must never be reported as a complete one. TASK-025b.
+
+    The rule this guards is CLAUDE.md's: report reduced coverage rather than
+    truncating in silence. It is worth its own class because the two signals
+    that detect "there are more" cover different servers, and a change that
+    keeps one and drops the other passes every other test in this file.
+    """
+
+    @staticmethod
+    def _bundle(count: int, *, total: object) -> dict[str, object]:
+        """A searchset carrying ``count`` patients and whatever ``total`` says."""
+        return {
+            "resourceType": "Bundle",
+            "type": "searchset",
+            "total": total,
+            "entry": [
+                {"resource": patient_resource(patient_id=f"patient-{index}")}
+                for index in range(count)
+            ],
+        }
+
+    async def test_a_server_that_caps_count_still_reports_more(self, ehr: FakeFHIRServer) -> None:
+        """The regression this class exists for.
+
+        A server may honour ``_count`` only up to its own maximum, so asking for
+        ``limit + 1`` and receiving fewer is not proof there is nothing more. The
+        over-fetch alone reads that as a complete list, and a provider who is not
+        told otherwise concludes the patient is not in the system.
+        """
+        ehr.fail("/Patient", httpx.Response(200, json=self._bundle(3, total=200)))
+
+        results = await adapter_for(ehr).search_patients("Smith", limit=20)
+
+        assert len(results.matches) == 3
+        assert results.truncated is True
+
+    async def test_a_complete_small_result_is_not_reported_as_truncated(
+        self, ehr: FakeFHIRServer
+    ) -> None:
+        """The guard against satisfying the test above by always reporting True."""
+        ehr.fail("/Patient", httpx.Response(200, json=self._bundle(3, total=3)))
+
+        results = await adapter_for(ehr).search_patients("Smith", limit=20)
+
+        assert len(results.matches) == 3
+        assert results.truncated is False
+
+    async def test_the_over_fetch_still_detects_more_without_a_total(
+        self, ehr: FakeFHIRServer
+    ) -> None:
+        """``total`` is optional in a searchset, so the page itself must still count."""
+        bundle = self._bundle(3, total=None)
+        del bundle["total"]
+        ehr.fail("/Patient", httpx.Response(200, json=bundle))
+
+        results = await adapter_for(ehr).search_patients("Smith", limit=2)
+
+        assert len(results.matches) == 2
+        assert results.truncated is True
+
+    async def test_a_total_that_is_not_a_count_is_ignored_rather_than_trusted(
+        self, ehr: FakeFHIRServer
+    ) -> None:
+        """``True`` is an ``int`` in Python and would otherwise read as a total of 1."""
+        ehr.fail("/Patient", httpx.Response(200, json=self._bundle(3, total=True)))
+
+        results = await adapter_for(ehr).search_patients("Smith", limit=20)
+
+        assert results.truncated is False
+
+    async def test_operation_outcome_entries_are_not_counted_as_candidates(
+        self, ehr: FakeFHIRServer
+    ) -> None:
+        """A search warning rides in the same Bundle and is not a patient."""
+        bundle = self._bundle(2, total=2)
+        entries = bundle["entry"]
+        assert isinstance(entries, list)
+        entries.append({"resource": {"resourceType": "OperationOutcome"}})
+        ehr.fail("/Patient", httpx.Response(200, json=bundle))
+
+        results = await adapter_for(ehr).search_patients("Smith", limit=20)
+
+        assert len(results.matches) == 2
+        assert results.truncated is False

@@ -17,14 +17,22 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hipaa_logger import AuditAction
+from src.adapters.base import PATIENT_SEARCH_LIMIT
 from src.adapters.factory import EHRType
 from src.api import fhir as fhir_routes
 from src.api.dependencies import get_http_client, get_redis
 from src.main import create_app
+from src.providers_client import ProviderServiceError
 from src.smart import store
 from src.smart.store import LaunchToken
 from tests.unit.api.conftest import TOKEN_ENDPOINT, FakeRedis
-from tests.unit.conftest import ACCESS_TOKEN, FHIR_BASE_URL, FakeFHIRServer, coverage_resource
+from tests.unit.conftest import (
+    ACCESS_TOKEN,
+    FHIR_BASE_URL,
+    FakeFHIRServer,
+    coverage_resource,
+    patient_resource,
+)
 
 LAUNCH_ID = "3f2a7c18-0d64-4a51-9f0e-8b1c2d3e4f50"
 HEADERS = {fhir_routes.LAUNCH_ID_HEADER: LAUNCH_ID}
@@ -605,7 +613,13 @@ class TestLaunchContext:
         response = contextless_launch_client.get("/fhir/launch-context", headers=HEADERS)
 
         assert response.status_code == 200
-        assert response.json()["data"] == {"patient_id": None, "encounter_id": None}
+        assert response.json()["data"] == {
+            "patient_id": None,
+            "encounter_id": None,
+            # No registry is configured on this client, so the resolution fails
+            # and the launch still answers. See TestLaunchContextProvider.
+            "provider_id": None,
+        }
         assert audit.calls == []
 
     def test_an_unverified_launch_records_no_actor(
@@ -672,10 +686,14 @@ class TestLaunchContext:
         """
         response = client.get("/fhir/launch-context", headers=HEADERS)
 
-        assert set(response.json()["data"]) == {"patient_id", "encounter_id"}
+        assert set(response.json()["data"]) == {"patient_id", "encounter_id", "provider_id"}
         assert ACCESS_TOKEN not in response.text
         assert "ehr-refresh-token" not in response.text
         assert "scope" not in response.text
+        # Nor the practitioner reference the provider id was resolved from: a
+        # client receives an opaque local identifier and cannot assert a provider
+        # identity of its own.
+        assert PRACTITIONER_REF not in response.text
 
     def test_the_launch_id_reaches_no_log_line(
         self, client: TestClient, audit: AuditRecorder, caplog: pytest.LogCaptureFixture
@@ -699,3 +717,347 @@ class TestLaunchContext:
 
         assert response.status_code == 200
         assert ehr_server.requested_paths == []
+
+
+class FakeProviders:
+    """Stands in for the registry in ``track-a-clinical``.
+
+    Records what it was asked to resolve, so a test can assert the *verified*
+    reference reached it and that nothing else did.
+    """
+
+    def __init__(self, provider_id: str | None = None, error: Exception | None = None) -> None:
+        self.provider_id = provider_id or "8f14e45f-ceea-467a-9c0e-1b2a3c4d5e6f"
+        self.error = error
+        self.resolved: list[str] = []
+
+    async def resolve(self, fhir_practitioner_ref: str) -> str:
+        self.resolved.append(fhir_practitioner_ref)
+        if self.error is not None:
+            raise self.error
+        return self.provider_id
+
+
+def with_providers(test_client: TestClient, providers: FakeProviders) -> TestClient:
+    """Point a launch-context route at a fake registry."""
+    test_client.app.dependency_overrides[fhir_routes.get_providers_client] = lambda: providers
+    return test_client
+
+
+class TestLaunchContextProvider:
+    """Resolving a launch's practitioner into a ``provider_id`` (TASK-025b).
+
+    ``POST /sessions/start`` needs a UUID and a FHIR ``Practitioner`` id is not
+    one, so the launch context carries the resolved identifier rather than the
+    reference. What matters here is which reference reaches the registry, and
+    that neither an unverified actor nor an unreachable registry breaks a launch
+    that is otherwise working.
+    """
+
+    def test_it_resolves_the_verified_practitioner_and_returns_the_provider_id(
+        self, client: TestClient, audit: AuditRecorder
+    ) -> None:
+        providers = FakeProviders()
+
+        response = with_providers(client, providers).get("/fhir/launch-context", headers=HEADERS)
+
+        assert response.status_code == 200
+        assert response.json()["data"]["provider_id"] == providers.provider_id
+        # The absolute reference, not a bare id: Practitioner/1 on two servers is
+        # two different people.
+        assert providers.resolved == [PRACTITIONER_REF]
+
+    def test_an_unverified_actor_resolves_to_no_provider_and_asks_nothing(
+        self, anonymous_client: TestClient, audit: AuditRecorder
+    ) -> None:
+        """A claim we could not verify never becomes a provider row.
+
+        Registering one would put a fabricated identity in the column an auditor
+        reads to answer who saw this patient — the same fabrication the
+        null-over-invention rule refuses one table over. The registry is not even
+        asked, so nothing can be created by accident.
+        """
+        providers = FakeProviders()
+
+        response = with_providers(anonymous_client, providers).get(
+            "/fhir/launch-context", headers=HEADERS
+        )
+
+        assert response.status_code == 200
+        assert response.json()["data"]["provider_id"] is None
+        assert providers.resolved == []
+
+    def test_an_unreachable_registry_is_a_null_provider_not_a_failed_launch(
+        self, client: TestClient, audit: AuditRecorder
+    ) -> None:
+        """The patient half is what the caller mainly came for, and it is intact.
+
+        Failing the whole route because a sibling service is restarting would
+        make a launch that is working perfectly look expired — the same
+        conflation this repository refuses when a payer silence is read as a
+        negative determination.
+        """
+        providers = FakeProviders(error=ProviderServiceError("track-a-clinical is not configured"))
+
+        response = with_providers(client, providers).get("/fhir/launch-context", headers=HEADERS)
+
+        assert response.status_code == 200
+        body = response.json()["data"]
+        assert body["provider_id"] is None
+        assert body["patient_id"] == "synthea-123"
+
+    def test_a_failed_resolution_never_logs_the_practitioner_reference(
+        self, client: TestClient, audit: AuditRecorder, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The reference names an individual clinician; the warning names the failure."""
+        providers = FakeProviders(
+            error=ProviderServiceError("track-a-clinical could not be reached")
+        )
+
+        with caplog.at_level("DEBUG"):
+            with_providers(client, providers).get("/fhir/launch-context", headers=HEADERS)
+
+        assert PRACTITIONER_REF not in caplog.text
+        assert "prov-77" not in caplog.text
+        assert "could not be reached" in caplog.text
+
+
+class TestPatientSearch:
+    """``GET /fhir/patient/search`` — the standalone-launch half (TASK-025b).
+
+    After an EHR launch the patient is the one the EHR named and
+    ``/fhir/launch-context`` returns them; this route answers the case where
+    nobody told us who is in the room. The assertions that matter are about what
+    is disclosed and audited, and about a truncated result being reported rather
+    than silently short.
+    """
+
+    def test_it_returns_the_matches(
+        self, client: TestClient, audit: AuditRecorder, ehr_server: FakeFHIRServer
+    ) -> None:
+        response = client.get("/fhir/patient/search", params={"query": "Sanchez"}, headers=HEADERS)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["error"] is None
+        assert body["data"]["truncated"] is False
+        assert body["data"]["matches"] == [
+            {
+                "patient_id": "synthea-123",
+                "family_name": "Sanchez",
+                "given_names": ["Aurelio", "Luis"],
+                "birth_date": "1962-04-17",
+                "gender": "male",
+            }
+        ]
+
+    def test_it_discloses_less_per_candidate_than_a_patient_read(
+        self, client: TestClient, audit: AuditRecorder
+    ) -> None:
+        """Minimum necessary, applied to a list rather than to a record.
+
+        Every field here is disclosed for every candidate, including the people
+        who are not the patient in the room, so the shape is narrower than
+        ``PatientInfo`` — ``address_state`` in particular has no reader on a
+        picker screen.
+        """
+        response = client.get("/fhir/patient/search", params={"query": "Sanchez"}, headers=HEADERS)
+
+        assert "address_state" not in response.json()["data"]["matches"][0]
+
+    def test_it_searches_by_name_and_not_by_a_full_text_parameter(
+        self, client: TestClient, audit: AuditRecorder, ehr_server: FakeFHIRServer
+    ) -> None:
+        """US Core requires ``Patient?name=``; ``_content`` and ``_text`` are optional.
+
+        A free-text parameter would work on some vendors and silently return
+        nothing on others, which is indistinguishable from a genuine no-match —
+        the failure mode this repository refuses everywhere.
+        """
+        client.get("/fhir/patient/search", params={"query": "Sanchez"}, headers=HEADERS)
+
+        searched = ehr_server.requested_paths[-1]
+        assert "name=Sanchez" in searched
+        assert "_content" not in searched
+        assert "_text" not in searched
+
+    def test_a_birth_date_narrows_the_search(
+        self, client: TestClient, audit: AuditRecorder, ehr_server: FakeFHIRServer
+    ) -> None:
+        """Two people in a practice share a name far more often than a name and a DOB."""
+        client.get(
+            "/fhir/patient/search",
+            params={"query": "Sanchez", "birth_date": "1962-04-17"},
+            headers=HEADERS,
+        )
+
+        assert "birthdate=1962-04-17" in ehr_server.requested_paths[-1]
+
+    def test_matching_nobody_is_an_empty_200_and_audits_nothing(
+        self, client: TestClient, audit: AuditRecorder, ehr_server: FakeFHIRServer
+    ) -> None:
+        """Nobody by that name, and no such launch, are different facts.
+
+        A 404 here would tell a client to repeat a launch that is working. And
+        nothing was disclosed, so no row records a disclosure.
+        """
+        ehr_server.patient_matches = []
+
+        response = client.get("/fhir/patient/search", params={"query": "Nobody"}, headers=HEADERS)
+
+        assert response.status_code == 200
+        assert response.json()["data"] == {"matches": [], "truncated": False}
+        assert audit.calls == []
+
+    def test_it_audits_one_row_per_disclosed_match(
+        self, client: TestClient, audit: AuditRecorder, ehr_server: FakeFHIRServer
+    ) -> None:
+        """Three matches disclosed three identifiers, two of them not the patient.
+
+        A single row naming none of them would make those disclosures invisible
+        to the one query the audit table exists to answer.
+        """
+        ehr_server.patient_matches = [patient_resource(f"synthea-{index}") for index in range(3)]
+
+        client.get("/fhir/patient/search", params={"query": "Sanchez"}, headers=HEADERS)
+
+        assert [call["action"] for call in audit.calls] == [AuditAction.READ_PATIENT] * 3
+        assert [call["resource_id"] for call in audit.calls] == [
+            "synthea-0",
+            "synthea-1",
+            "synthea-2",
+        ]
+        assert {call["fhir_practitioner_ref"] for call in audit.calls} == {PRACTITIONER_REF}
+        assert {call["actor_id"] for call in audit.calls} == {None}
+
+    def test_more_matches_than_fit_are_reported_and_capped(
+        self, client: TestClient, audit: AuditRecorder, ehr_server: FakeFHIRServer
+    ) -> None:
+        """A provider shown 20 of 200 Smiths has to be told there were more.
+
+        Otherwise they conclude the patient they want is not in the system. Same
+        rule as the transcript-limit one: report reduced coverage, never truncate
+        in silence.
+        """
+        ehr_server.patient_matches = [
+            patient_resource(f"synthea-{index}") for index in range(PATIENT_SEARCH_LIMIT + 5)
+        ]
+
+        response = client.get("/fhir/patient/search", params={"query": "Smith"}, headers=HEADERS)
+
+        body = response.json()["data"]
+        assert body["truncated"] is True
+        assert len(body["matches"]) == PATIENT_SEARCH_LIMIT
+        # One row per patient actually disclosed, not per patient the EHR held.
+        assert len(audit.calls) == PATIENT_SEARCH_LIMIT
+
+    def test_a_search_warning_entry_is_not_a_candidate(
+        self, client: TestClient, audit: AuditRecorder, ehr_server: FakeFHIRServer
+    ) -> None:
+        """A searchset Bundle may carry OperationOutcome entries beside the matches."""
+        ehr_server.patient_matches = [
+            {"resourceType": "OperationOutcome", "issue": []},
+            patient_resource("synthea-9"),
+        ]
+
+        response = client.get("/fhir/patient/search", params={"query": "Sanchez"}, headers=HEADERS)
+
+        matches = response.json()["data"]["matches"]
+        assert [match["patient_id"] for match in matches] == ["synthea-9"]
+
+    def test_the_query_reaches_no_log_line_this_service_writes(
+        self,
+        client: TestClient,
+        audit: AuditRecorder,
+        ehr_server: FakeFHIRServer,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A patient name is patient content, and this is an operational log.
+
+        Driven through the truncation branch on purpose: that is the one place
+        this route logs anything at all, so asserting against a clean search
+        would pass by having nothing to inspect. The line reports the count and
+        never the terms.
+
+        **Scoped to this repository's own loggers, and that scope is a finding
+        rather than a convenience.** `httpx` logs every request it makes at INFO
+        including the full URL, so `Patient?name=Sanchez` reaches stdout from the
+        library. That is real, and it predates this route — `_search` has been
+        issuing `Coverage?patient={id}` since TASK-052 — so it is **TASK-046**
+        rather than something this test can assert away. The test below pins the
+        gap, so nobody reads this narrowing as "checked and clean".
+        """
+        ehr_server.patient_matches = [
+            patient_resource(f"synthea-{index}") for index in range(PATIENT_SEARCH_LIMIT + 1)
+        ]
+
+        with caplog.at_level("DEBUG"):
+            client.get("/fhir/patient/search", params={"query": "Sanchez"}, headers=HEADERS)
+
+        ours = [record for record in caplog.records if record.name.startswith("src.")]
+        assert ours, "expected the truncation branch to log"
+        assert all("Sanchez" not in record.getMessage() for record in ours)
+
+    def test_the_httpx_logger_still_carries_the_query_and_that_is_task_046(
+        self, client: TestClient, audit: AuditRecorder, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Pins the known gap, so closing it is visible rather than silent.
+
+        When TASK-046 configures the library's logger this test fails and is
+        deleted in that change — which is the point of writing the gap down as an
+        assertion instead of as a comment.
+        """
+        with caplog.at_level("INFO"):
+            client.get("/fhir/patient/search", params={"query": "Sanchez"}, headers=HEADERS)
+
+        library = [record for record in caplog.records if record.name.startswith("httpx")]
+        assert any("Sanchez" in record.getMessage() for record in library)
+
+    def test_an_unreachable_ehr_keeps_its_own_status_and_code(
+        self, client: TestClient, audit: AuditRecorder, ehr_server: FakeFHIRServer
+    ) -> None:
+        """Unreachable is the only one of the three outcomes worth retrying."""
+        ehr_server.fail("/Patient", httpx.Response(503))
+
+        response = client.get("/fhir/patient/search", params={"query": "Sanchez"}, headers=HEADERS)
+
+        assert response.status_code == 502
+        assert response.json()["error"]["code"] == fhir_routes.ERROR_CODE_UPSTREAM_UNAVAILABLE
+        assert audit.calls == []
+
+    def test_a_non_bundle_answer_is_malformed_rather_than_empty(
+        self, client: TestClient, audit: AuditRecorder, ehr_server: FakeFHIRServer
+    ) -> None:
+        """A 200 that is not a searchset is a vendor quirk, not a no-match."""
+        ehr_server.fail("/Patient", httpx.Response(200, json={"resourceType": "Patient"}))
+
+        response = client.get("/fhir/patient/search", params={"query": "Sanchez"}, headers=HEADERS)
+
+        assert response.status_code == 502
+        assert response.json()["error"]["code"] == fhir_routes.ERROR_CODE_MALFORMED
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {},
+            {"query": ""},
+            {"query": "x" * 101},
+            {"query": "Sanchez", "birth_date": "17-04-1962"},
+        ],
+        ids=["missing", "empty", "too-long", "malformed-birth-date"],
+    )
+    def test_it_refuses_a_query_it_cannot_run(
+        self, client: TestClient, audit: AuditRecorder, params: dict[str, str]
+    ) -> None:
+        response = client.get("/fhir/patient/search", params=params, headers=HEADERS)
+
+        assert response.status_code == 422
+        assert audit.calls == []
+
+    def test_it_is_keyed_on_the_launch_like_every_other_route_here(
+        self, client: TestClient, audit: AuditRecorder
+    ) -> None:
+        """No launch, no search: the EHR credential comes from the launch record."""
+        response = client.get("/fhir/patient/search", params={"query": "Sanchez"})
+
+        assert response.status_code == 422
