@@ -1,6 +1,6 @@
 """SQLAlchemy models for the schema track-a-clinical migrates.
 
-This is the single definition of these five tables for the whole monorepo. A
+This is the single definition of these tables for the whole monorepo. A
 service that writes one of them imports the class from here rather than mapping
 its own — ``track-b-rag`` writes ``clinical_nudges``, ``prior-auth`` writes
 ``prior_auth_requests``, and both read ``encounters``::
@@ -59,6 +59,7 @@ from track_a_clinical.models.prior_auth_request import (
 from track_a_clinical.models.prior_auth_submission_attempt import (
     PriorAuthSubmissionAttempt,
 )
+from track_a_clinical.models.provider import Provider
 
 __all__ = [
     "DEFAULT_QDRANT_COLLECTION",
@@ -86,6 +87,7 @@ __all__ = [
     "JsonObject",
     "PriorAuthRequest",
     "PriorAuthSubmissionAttempt",
+    "Provider",
     "SubmissionMethod",
     "SubmissionOutcome",
     "dump_codes",

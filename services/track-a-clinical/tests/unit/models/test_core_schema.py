@@ -31,13 +31,17 @@ EXPECTED_TABLES = {
     # deliberate resubmission is a new fact rather than an overwrite of the
     # first attempt's result.
     "prior_auth_submission_attempts",
+    # 0010, TASK-025b. Not one of TASK-005's five: it exists because an EHR
+    # asserts a Practitioner reference and `encounters.provider_id` is a UUID.
+    "providers",
 }
 
 # Straight from TASK-005's inline SQL, in declaration order, plus the columns
 # later migrations added: `state` (0003, TASK-024), `launch_id` (0006,
-# TASK-052b) and `payer_outcome` (0007, TASK-054). Written out rather than
-# derived, so a column arrives here as a deliberate edit and never as a side
-# effect of touching a model.
+# TASK-052b) and `payer_outcome` (0007, TASK-054) — and the `providers` table
+# 0010 added whole (TASK-025b). Written out rather than derived, so a column
+# arrives here as a deliberate edit and never as a side effect of touching a
+# model.
 EXPECTED_COLUMNS = {
     "encounters": [
         "id",
@@ -123,6 +127,12 @@ EXPECTED_COLUMNS = {
         "last_ingested_at",
         "effective_date",
         "qdrant_collection",
+    ],
+    "providers": [
+        "id",
+        "fhir_practitioner_ref",
+        "created_at",
+        "deleted_at",
     ],
 }
 
