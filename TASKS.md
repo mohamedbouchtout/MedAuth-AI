@@ -5550,9 +5550,12 @@ logic do not change.
     - **The Athenahealth write test needs `ATHENA_TEST_ENCOUNTER_ID`, which is
       unset.** It fails naming the variable rather than inventing an encounter
       id — filing a note against a chart entry that does not exist is worse than
-      not running. The nightly job's token request now also asks for
-      `system/DocumentReference.write`, so a read-only registration fails at the
-      token endpoint rather than inside the write.
+      not running. The nightly job's token request now also asks for the
+      document-write scope, so a read-only registration fails at the token
+      endpoint rather than inside the write. That scope is
+      `system/DocumentReference.c` as of TASK-051e, which moved every requested
+      scope to SMART v2 syntax; it read `system/DocumentReference.write` when
+      this task shipped.
     - **`_create` is the adapter's second HTTP call site, and it is a method of
       its own rather than a generalised `_request`.** A create answers
       differently from a read: the id arrives in a `Location` header, and
