@@ -97,6 +97,56 @@ class TestLaunchScopes:
 
         assert Settings().authorization_scopes(ehr_launch=False) == "openid fhirUser launch/patient"
 
+    def test_v2_scopes_pass_through_with_only_the_launch_scope_appended(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A v2 scope reaches the authorization endpoint as written.
+
+        The launch-shaped scope is the only thing this method adds, and nothing
+        rewrites the permission syntax on the way past. TASK-051e.
+        """
+        monkeypatch.setenv("SMART_SCOPES", "openid fhirUser offline_access user/*.rs")
+
+        assert Settings().authorization_scopes(ehr_launch=True) == (
+            "openid fhirUser offline_access user/*.rs launch"
+        )
+        assert Settings().authorization_scopes(ehr_launch=False) == (
+            "openid fhirUser offline_access user/*.rs launch/patient"
+        )
+
+
+class TestScopesAreSmartV2:
+    """CLAUDE.md pins SMART on FHIR 2.0, and the scope strings must match it.
+
+    This default was v1 syntax (``user/*.read``) until TASK-051e, and nothing
+    caught it: Athenahealth advertises ``permission-v1`` alongside
+    ``permission-v2``, so v1 scopes are honoured there and the only vendor this
+    repository has ever pointed at could not reveal the mismatch. A vendor
+    advertising ``permission-v2`` alone would refuse every launch, and TASK-056
+    (Cerner) and TASK-057 (Epic) are the next two adapters.
+    """
+
+    #: v1 permission syntax. ``.rs``/``.cruds`` are v2; these three are not.
+    V1_SUFFIXES = (".read", ".write", ".*")
+
+    def test_the_default_scopes_use_v2_permission_syntax(self) -> None:
+        scopes = Settings().smart_scopes.split()
+
+        offenders = [s for s in scopes if s.endswith(self.V1_SUFFIXES)]
+        assert not offenders, f"v1 scope syntax in the default SMART_SCOPES: {offenders}"
+
+    def test_the_default_still_requests_a_resource_scope(self) -> None:
+        """Guards the obvious wrong way to make the test above pass.
+
+        Dropping the resource scope entirely would satisfy a "no v1 syntax"
+        assertion while requesting no FHIR permission at all.
+        """
+        scopes = Settings().smart_scopes.split()
+
+        assert any("/" in s and "." in s for s in scopes), (
+            f"no resource scope requested at all: {scopes}"
+        )
+
 
 def test_the_launch_ttl_default_matches_the_documented_ten_minutes() -> None:
     assert Settings().smart_launch_ttl_seconds == 600

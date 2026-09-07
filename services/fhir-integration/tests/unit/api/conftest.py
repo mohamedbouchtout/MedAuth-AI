@@ -158,7 +158,7 @@ class FakeAuthorizationServer:
                     "token_type": "Bearer",
                     "expires_in": 3600,
                     "refresh_token": "ehr-refresh-token",
-                    "scope": "launch user/*.read",
+                    "scope": "launch user/*.rs",
                     "patient": "Patient/synthea-123",
                     "id_token": idtokens.id_token(),
                 }
@@ -176,7 +176,7 @@ def smart_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Configure a deployment with a generic and an Athena registration."""
     get_settings.cache_clear()
     monkeypatch.setenv("SMART_REDIRECT_URI", REDIRECT_URI)
-    monkeypatch.setenv("SMART_SCOPES", "openid fhirUser user/*.read")
+    monkeypatch.setenv("SMART_SCOPES", "openid fhirUser user/*.rs")
     monkeypatch.setenv("SMART_LAUNCH_TTL_SECONDS", "600")
     monkeypatch.setenv("GENERIC_CLIENT_ID", "medauth-generic-client")
     monkeypatch.setenv("GENERIC_CLIENT_SECRET", "generic-secret-value")

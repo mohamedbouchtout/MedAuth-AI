@@ -93,11 +93,17 @@ def access_token() -> str:
         TOKEN_URL,
         data={
             "grant_type": "client_credentials",
-            # DocumentReference.write is TASK-053's; a registration granted
-            # reads only fails here rather than inside the write test.
+            # SMART v2 syntax, per TASK-051e and the pin in CLAUDE.md: ``.rs``
+            # is v1's ``.read``. The write is ``.c`` rather than the mechanical
+            # ``.cud`` v1's ``.write`` maps to — TASK-053 creates a
+            # DocumentReference and never updates or deletes one, and asking a
+            # vendor for delete rights on clinical documents nothing exercises
+            # would throw away the granularity v2 is being adopted for.
+            # The write scope is TASK-053's; a registration granted reads only
+            # fails here rather than inside the write test.
             "scope": (
-                "system/Patient.read system/Coverage.read "
-                "system/Condition.read system/DocumentReference.write"
+                "system/Patient.rs system/Coverage.rs "
+                "system/Condition.rs system/DocumentReference.c"
             ),
         },
         auth=(CLIENT_ID, CLIENT_SECRET),
@@ -157,8 +163,8 @@ async def test_a_note_writes_to_the_sandbox(adapter: EHRAdapter) -> None:
     than not running.
 
     The scope is wider than the reads above — this asks for
-    ``system/DocumentReference.write`` — so a registration granted read access
-    only fails at the token endpoint rather than here.
+    ``system/DocumentReference.c`` — so a registration granted read access only
+    fails at the token endpoint rather than here.
     """
     if not TEST_ENCOUNTER_ID:
         pytest.fail(

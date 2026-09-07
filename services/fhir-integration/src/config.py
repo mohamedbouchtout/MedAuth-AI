@@ -88,7 +88,14 @@ class Settings(BaseSettings):
     #: one — ``launch`` and ``launch/patient`` are appended per launch type by
     #: ``authorization_scopes()`` below, because which of the two applies is a
     #: property of the launch rather than of the deployment.
-    smart_scopes: str = Field(default="openid fhirUser offline_access user/*.read")
+    #:
+    #: **SMART v2 syntax** (``.rs``), not v1's ``.read`` — CLAUDE.md pins SMART
+    #: on FHIR 2.0, and ``smart/pkce.py`` and ``smart/identity.py`` already
+    #: depend on that pin specifically. This default was v1 until TASK-051e; it
+    #: worked only because Athenahealth advertises ``permission-v1`` alongside
+    #: ``permission-v2``, and a vendor advertising v2 alone would have refused
+    #: every launch. Do not "simplify" it back to ``.read``.
+    smart_scopes: str = Field(default="openid fhirUser offline_access user/*.rs")
 
     #: How long a launch may sit between the authorization redirect and the
     #: callback that consumes it. A round default matching the "~10 min" in
