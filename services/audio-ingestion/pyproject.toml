@@ -11,7 +11,7 @@ dependencies = [
     # is not a floor to drift upward from. A Dependabot bump is a change to
     # review against tests/unit/test_transcribe_medical.py, not a routine one.
     "amazon-transcribe==0.6.4",
-    "anyio>=4.6",
+    "anyio>=4.15.0",
     "boto3>=1.43.82",
     "fastapi>=0.115",
     "medauth-api-envelope",
