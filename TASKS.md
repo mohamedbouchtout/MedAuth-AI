@@ -5780,6 +5780,47 @@ logic do not change.
   - Document any Athenahealth-specific quirks in `adapters/athena.py` docstring
   - Get sandbox credentials from developer.athenahealth.com — add to .env.example
   - This is the first fully operational EHR integration — treat it as the v1 milestone
+  - **Blocked on provisioning, not on code, as of this writing.** The
+    Athenahealth Preview client answers `access_denied` — "Policy evaluation
+    failed" — to every scope in either syntax, across two separate app
+    registrations. The credential itself is genuine: requesting `openid` returns
+    the distinct `Cannot request 'openid' scopes using client credentials`, so
+    the gateway recognises the client and is evaluating it. The
+    authorization_code half got further — a real browser launch showed
+    `SMART_REDIRECT_URI` accepted, PKCE S256 carried, and `user/*.rs` passing
+    through with no scope rejection — and then stopped at a clinician login this
+    developer account has no user for. Both are subscription and account state
+    on athenahealth's side. Nothing here is waiting on a change to this
+    repository.
+  - **Quirk found, and it is the one this task is meant to record.** Advertising
+    `permission-v2` in `.well-known/smart-configuration` does *not* imply every
+    v2 scope string is registered in the Okta authorization server behind it.
+    Probed with `client_credentials` against
+    `api.preview.platform.athenahealth.com/oauth2/v1/token`:
+
+    | Scope | Response |
+    |---|---|
+    | `system/Patient.read` | 401 `access_denied` — policy |
+    | `system/Patient.rs` | 401 `access_denied` — policy |
+    | `user/*.read` | 400 `Invalid Scope` — not configured |
+    | `user/*.rs` | 400 `Invalid Scope` — not configured |
+    | `system/*.read` | 401 `access_denied` — policy |
+    | `system/*.rs` | 400 `Invalid Scope` — not configured |
+
+    The two errors mean different things and the distinction is the useful part:
+    `access_denied` is a scope the authorization server has registered and this
+    app is not permitted, while `Invalid Scope`/"not configured" is a scope
+    string their server does not know at all. `system/*.rs` is the
+    counter-example and the quirk. Nothing in this repository requests a
+    `system/*` wildcard, so it costs us nothing today; record it before reaching
+    for one. Move it into `adapters/athena.py`'s docstring when that file grows
+    its first Athena-specific override.
+  - **What that probe cannot answer**, stated so it is not over-read: every call
+    above is `client_credentials`, in which `user/` scopes are meaningless, so
+    both `user/*` forms being unregistered on that endpoint is expected and says
+    nothing about either syntax. v1 and v2 behave identically within each
+    matched pair; the axis that actually separates the responses is wildcard
+    versus per-resource, not syntax version.
 
 - [ ] **TASK-056:** Cerner adapter
   - Prerequisite: TASK-055 complete (Athenahealth working in production pilot)
