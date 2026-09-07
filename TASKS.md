@@ -4579,6 +4579,56 @@ logic do not change.
       deliberately** — it enumerates the mounted paths, so it is meant to fail
       when a route appears.
 
+- [ ] **TASK-051e:** Move requested SMART scopes to v2 syntax
+  - Service: `services/fhir-integration`
+  - Prerequisite: **TASK-051** (the launch that spends `SMART_SCOPES`); wanted
+    by every adapter task after it, because the break this closes is latent
+    rather than present
+  - **The gap.** CLAUDE.md pins SMART on FHIR 2.0, and two shipped pieces of
+    code depend on that pin specifically — `smart/pkce.py` makes PKCE
+    unconditional because v2 requires it of every client, and TASK-051c reads
+    the `fhirUser` claim while deliberately refusing SMART 1.0's `profile` as a
+    fallback. The scope strings never followed. `Settings.smart_scopes` defaults
+    to `openid fhirUser offline_access user/*.read`, which is v1 syntax, and
+    `tests/integration/test_athena_sandbox.py` asks for
+    `system/DocumentReference.write`. The spec's own mapping is `.read` →
+    `.rs`, `.write` → `.cud`, `.*` → `.cruds`.
+  - **This has not failed yet, and the reason it has not is the reason it is
+    worth its own task.** Athenahealth advertises `permission-v1` *and*
+    `permission-v2` in its `.well-known/smart-configuration` — verified against
+    both `api.preview.platform.athenahealth.com` and the athenaPractice sandbox
+    — and the SMART v2 spec says a server advertising `permission-v1` SHOULD
+    honour v1 scopes. So v1 syntax works against the one vendor this repository
+    has ever pointed at, and would fail against a vendor advertising
+    `permission-v2` alone. The next adapters are one task away, so the latent
+    break is not hypothetical.
+  - **`.write` → `.c`, not `.cud`, for the write-back.** TASK-053 files a
+    `DocumentReference` and never updates or deletes one, so the mechanical v1
+    mapping would keep asking a vendor for delete rights on clinical documents
+    that nothing in this repository exercises. v2's granularity is the whole
+    reason to prefer it for a PHI-writing app under minimum-necessary, and
+    taking `.cud` here would discard exactly that benefit.
+  - **`ATHENA_TOKEN_URL` is read by `tests/integration/test_athena_sandbox.py`
+    and appears nowhere in `.env.example`** — a setting that looks configured
+    and is not, the failure CLAUDE.md names in the cross-service config rule.
+    Found in the same pass and fixed here rather than left as a second ticket.
+    Its default points at `api.preview.platform.athenahealth.com` while
+    `ATHENA_FHIR_BASE_URL` may well be set to a different Athena platform
+    entirely, and the mismatch surfaces as an authentication failure rather than
+    as a configuration one.
+  - **Test:** no `.read`, `.write` or `.*` scope literal remains in requested
+    scope strings — the v1 forms are gone rather than merely supplemented
+  - **Test:** the default still requests a resource scope at all, which guards
+    the obvious wrong way to satisfy the test above
+  - **Test:** `Settings.authorization_scopes()` appends the launch-shaped scope
+    to v2 scopes unchanged, for both launch types
+  - **What this task does not do.** `Settings.smart_scopes` is spent in the
+    *authorization_code* launch through the authorize endpoint, and confirming
+    the default against a real vendor launch needs credentials this repository
+    does not yet hold. That confirmation belongs to whichever vendor task lands
+    first, not here. The change is verifiable without credentials and should not
+    wait on them.
+
 - [x] **TASK-052:** Base FHIR resource fetching (implements base.py methods)
   - Service: `services/fhir-integration`
   - Prerequisite: **TASK-050** (the stubs and the normalized models this fills
