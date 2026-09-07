@@ -4240,9 +4240,16 @@ logic do not change.
       against what is registered in the Athenahealth developer portal, and the
       Development-versus-Preview access question is unresolved. A mismatch fails
       at the vendor's authorization server before any request reaches MedAuth,
-      so it is invisible from our logs. Nothing in the repository evidences a
-      successful launch against a real vendor. TASK-055 is where that is
-      settled; TASK-052's gated sandbox test carries the same caveat.
+      so it is invisible from our logs. **Partly settled since:** a real
+      browser launch against `api.preview.platform.athenahealth.com` was
+      accepted — the registered redirect URI matched, the PKCE S256 challenge
+      was carried, and the v2 scopes passed through with no scope rejection. So
+      the authorization request this service builds is correct against a real
+      vendor. What is still unevidenced is everything after the redirect: that
+      launch stopped at a clinician login the developer account has no user
+      for, so no code has ever been exchanged for a token. Whichever vendor task
+      completes first — TASK-055 (Athenahealth) or TASK-055b (eClinicalWorks) —
+      settles the rest; TASK-052's gated sandbox test carries the same caveat.
 
 - [x] **TASK-051b:** EHR access token refresh
   - Prerequisite: **TASK-051**
@@ -4382,8 +4389,9 @@ logic do not change.
       lifetime has been checked against it — SMART returns no `refresh_expires_in`
       to check against. `SMART_TOKEN_REFRESH_SKEW_SECONDS` is 120 on the same
       footing. Both are assumptions, like TASK-006b's
-      `SESSION_REMINT_GRACE_SECONDS`, and TASK-055 is where a real vendor
-      launch would settle them.
+      `SESSION_REMINT_GRACE_SECONDS`, and whichever vendor task completes first
+      — TASK-055 (Athenahealth) or TASK-055b (eClinicalWorks) — is where a real
+      vendor launch would settle them.
 
 - [x] **TASK-051c:** Capture the SMART `fhirUser` claim as the audit actor
   - Prerequisite: **TASK-051**; wanted by **TASK-052** and every later PHI read
@@ -4470,8 +4478,9 @@ logic do not change.
       per-request dependency cache means one Redis load and one renewal.
     - **Open item, not code:** the SMART 1.0 `profile` claim is deliberately not
       read as a fallback for `fhirUser`, and no real vendor sandbox has been
-      launched against yet — TASK-055 is where a live launch would show whether
-      any priority EHR still emits only the older claim.
+      launched against yet — whichever vendor task completes first, TASK-055
+      (Athenahealth) or TASK-055b (eClinicalWorks), is where a live launch would
+      show whether any priority EHR still emits only the older claim.
 
 - [x] **TASK-051d:** Expose the SMART launch context to the client
   - Prerequisite: **TASK-051** (the launch that captures the context this
@@ -5884,7 +5893,11 @@ logic do not change.
   - Document real eCW quirks in `adapters/ecw.py`'s docstring as they are found
 
 - [ ] **TASK-056:** Cerner adapter
-  - Prerequisite: TASK-055 complete (Athenahealth working in production pilot)
+  - Prerequisite: **TASK-052** and **TASK-053** (the reads and the write-back
+    this exercises). **Not TASK-055** — that prerequisite was written when
+    Athenahealth was the only vendor in play, and it now only transmits a
+    provisioning blocker to a vendor that does not share it. Cerner's sandbox at
+    code.cerner.com is self-serve, so this task is startable today
   - Register at code.cerner.com, get sandbox credentials
   - Implement CernerAdapter(EHRAdapter) — override get_patient_context() to handle
     incomplete Coverage resource (add requires_manual_confirmation fallback)
@@ -5892,7 +5905,9 @@ logic do not change.
   - **Test:** full integration test suite against Cerner sandbox
 
 - [ ] **TASK-057:** Epic adapter
-  - Prerequisite: at least 3 paying customers on Athenahealth or Cerner
+  - Prerequisite: at least 3 paying customers on any shipped EHR integration —
+    Athenahealth, eClinicalWorks or Cerner. eClinicalWorks joins the list
+    because it is a v1 target product, not merely a later adapter
   - Register at open.epic.com, work through App Orchard review process
   - Implement EpicAdapter(EHRAdapter) — override get_patient_context() to optionally
     enrich with Epic proprietary extensions (preferred language, scheduling context)
@@ -5901,7 +5916,8 @@ logic do not change.
   - Note: Epic production access requires App Orchard approval + reference customer
 
 - [ ] **TASK-058:** Modernizing Medicine (EMA) adapter
-  - Prerequisite: TASK-055 complete
+  - Prerequisite: **TASK-052** and **TASK-053**. **Not TASK-055**, for the
+    reason given under TASK-056
   - High priority despite lower market share — EMA targets dermatology + orthopedics specifically
   - Register at developer.modmed.com
   - Implement ModMedAdapter(EHRAdapter)
