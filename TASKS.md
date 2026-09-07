@@ -4579,7 +4579,7 @@ logic do not change.
       deliberately** — it enumerates the mounted paths, so it is meant to fail
       when a route appears.
 
-- [ ] **TASK-051e:** Move requested SMART scopes to v2 syntax
+- [x] **TASK-051e:** Move requested SMART scopes to v2 syntax
   - Service: `services/fhir-integration`
   - Prerequisite: **TASK-051** (the launch that spends `SMART_SCOPES`); wanted
     by every adapter task after it, because the break this closes is latent
@@ -4628,6 +4628,12 @@ logic do not change.
     does not yet hold. That confirmation belongs to whichever vendor task lands
     first, not here. The change is verifiable without credentials and should not
     wait on them.
+  - **Built.** `Settings.smart_scopes` defaults to
+    `openid fhirUser offline_access user/*.rs`; the gated Athena check requests
+    `system/Patient.rs system/Coverage.rs system/Condition.rs
+    system/DocumentReference.c`; `ATHENA_TOKEN_URL` is in `.env.example`.
+    `TestScopesAreSmartV2` in `tests/unit/test_config.py` is the guard, and it
+    fails on any `.read`/`.write`/`.*` literal reaching a requested scope.
 
 - [x] **TASK-052:** Base FHIR resource fetching (implements base.py methods)
   - Service: `services/fhir-integration`
