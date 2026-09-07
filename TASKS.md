@@ -5822,6 +5822,67 @@ logic do not change.
     matched pair; the axis that actually separates the responses is wildcard
     versus per-resource, not syntax version.
 
+- [ ] **TASK-055b:** eClinicalWorks sandbox validation
+  - **Read the number as a position, not as a dependency.** The `b` suffix
+    everywhere else in this document marks a follow-up to its parent task. Here
+    it marks insertion order only: eClinicalWorks is second in CLAUDE.md's EHR
+    priority order, so this belongs directly after TASK-055, and Phase 5 has no
+    free integer between 055 and 056. **This task is not gated on TASK-055 and
+    does not inherit its blockers** — being able to proceed while Athenahealth
+    is stuck on provisioning is the entire reason it exists.
+  - Service: `services/fhir-integration`
+  - Prerequisite: **TASK-050** (`ecw.py` and the issuer detection already
+    exist), **TASK-052** and **TASK-053** (the reads and the write-back this
+    exercises). Not TASK-055.
+  - **What is already in place, so this task does not rebuild it.**
+    `ECWAdapter` is a real class in `adapters/ecw.py` with no overrides;
+    `detect_ehr_from_issuer()` already matches `"eclinicalworks"`;
+    `ECW_CLIENT_ID`, `ECW_CLIENT_SECRET` and `ECW_FHIR_BASE_URL` are already in
+    `.env.example`. What is missing is a credential behind them and any
+    evidence about what eCW actually returns.
+  - **The access gate is the first real piece of work, and it is paperwork
+    rather than engineering.** eCW's FHIR sandbox is reached through their
+    developer portal with registration and review; their getting-started
+    documentation sits behind a login wall, and write APIs additionally involve
+    contracting. Start the registration before writing any code here, because
+    that queue — not the code — sets the schedule. Record the actual
+    requirements in this task once they are known, in place of this paragraph,
+    which is assembled from their public site rather than from an account.
+  - **`ECW_TOKEN_URL` needs adding to `.env.example`** alongside the three
+    entries that already exist. This is the same gap TASK-051e closed for
+    Athenahealth, and it is worth closing before the credential arrives rather
+    than after it produces a confusing authentication failure.
+  - Implement whatever `ECWAdapter` actually needs, and nothing it does not.
+    CLAUDE.md expects "minor coverage field handling"; that is a prediction, not
+    a finding, and the override goes in only once a real response shows what
+    differs. An override written ahead of the evidence is the single-EHR logic
+    the adapter architecture exists to prevent, arriving from the other
+    direction.
+  - **Three things deferred elsewhere land on whichever vendor task completes
+    first, and this is now a candidate for that.** Each was written pointing at
+    TASK-055 when Athenahealth was the only vendor in play:
+    - `SMART_LAUNCH_RECORD_TTL_SECONDS` (8h) and
+      `SMART_TOKEN_REFRESH_SKEW_SECONDS` (120) are stated assumptions rather
+      than measurements — TASK-051b. A real token response carries a real
+      lifetime, which is what turns them into measured values.
+    - Whether the `fhirUser` claim actually arrives, and so whether SMART 1.0's
+      `profile` fallback that TASK-051c deliberately did not implement is ever
+      needed — TASK-051c.
+    - Whether the v2 scope default survives a real authorize endpoint, which
+      TASK-051e explicitly could not confirm without credentials.
+  - **Test:** a gated live suite mirroring
+    `tests/integration/test_athena_sandbox.py` — `RUN_ECW_LIVE_TESTS=1`, off by
+    default, paired with its own job in `nightly-live-checks.yml` named after
+    the dependency it exercises. A gate without a scheduled run is a deletion,
+    per CLAUDE.md
+  - **Test:** every FHIR resource response validated against real sandbox data,
+    not fixtures — `Patient`, `Coverage`, `Condition`, `Encounter`, and the
+    `DocumentReference` write-back
+  - **This task does not close TASK-052 or TASK-053.** Those are closed by the
+    HAPI checks, exactly as `test_athena_sandbox.py`'s docstring already says of
+    itself. A vendor suite is validation, not the acceptance gate
+  - Document real eCW quirks in `adapters/ecw.py`'s docstring as they are found
+
 - [ ] **TASK-056:** Cerner adapter
   - Prerequisite: TASK-055 complete (Athenahealth working in production pilot)
   - Register at code.cerner.com, get sandbox credentials

@@ -122,8 +122,8 @@ class TestScopesAreSmartV2:
     caught it: Athenahealth advertises ``permission-v1`` alongside
     ``permission-v2``, so v1 scopes are honoured there and the only vendor this
     repository has ever pointed at could not reveal the mismatch. A vendor
-    advertising ``permission-v2`` alone would refuse every launch, and TASK-056
-    (Cerner) and TASK-057 (Epic) are the next two adapters.
+    advertising ``permission-v2`` alone would refuse every launch, and
+    TASK-055b (eClinicalWorks) and TASK-056 (Cerner) are the next two adapters.
     """
 
     #: v1 permission syntax. ``.rs``/``.cruds`` are v2; these three are not.
