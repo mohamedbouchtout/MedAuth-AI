@@ -136,6 +136,12 @@ class PriorAuthRequest(Base):
     __table_args__ = (
         sa.Index("idx_prior_auth_encounter", "encounter_id"),
         sa.Index("idx_prior_auth_status", "status"),
+        # One bundle per encounter (migration 0008). TASK-060 assembles from a
+        # Redis signal, and pub/sub delivery is not exactly-once — the same
+        # reason clinical_notes carries uq_clinical_notes_encounter, with a
+        # worse consequence: TASK-061 submits from these rows, so a duplicate
+        # is a payer asked to open two reviews of one request.
+        sa.UniqueConstraint("encounter_id", name="uq_prior_auth_requests_encounter"),
     )
 
     id: Mapped[uuid.UUID] = uuid_primary_key()
