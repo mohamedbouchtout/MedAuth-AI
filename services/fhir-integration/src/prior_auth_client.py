@@ -44,7 +44,7 @@ class PriorAuthServiceError(Exception):
 
     Attributes:
         detail: A fixed description of what failed. Never derived from a response
-            body: that service's bodies carry transcript excerpts, and this
+            body: that service's bodies carry clinical documentation, and this
             message reaches an envelope.
         timed_out: Whether the call timed out, which the route turns into a 504
             rather than a 502.
@@ -122,7 +122,7 @@ class StoredEvidence(BaseModel):
     """One excerpt of clinical documentation, as the stored row carries it.
 
     Attributes:
-        text: The excerpt itself. A transcript excerpt, and PHI.
+        text: The excerpt itself. Clinical documentation, and PHI.
         criterion: The payer criterion it is offered against, when the gap
             analysis tied it to one.
     """
@@ -192,7 +192,7 @@ class PriorAuthClient:
     async def get_request(self, request_id: str) -> StoredPriorAuthRequest:
         """Read one prior-authorization request.
 
-        This is a PHI read — the row carries transcript excerpts — and the
+        This is a PHI read — the row carries note excerpts and codes — and the
         ``READ_PRIOR_AUTH`` row for it is written by that service's route, which
         is the whole reason this call exists rather than an import.
 
@@ -290,7 +290,7 @@ class PriorAuthClient:
         """Validate a payload, without letting the rejected values into the error.
 
         Pydantic echoes offending values in its message and these payloads carry
-        transcript excerpts. The same rule, for the same reason, as the note
+        clinical documentation. The same rule, for the same reason, as the note
         client's ``_parse``.
         """
         try:

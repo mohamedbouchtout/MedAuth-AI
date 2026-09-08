@@ -204,7 +204,7 @@ async def test_read_falls_back_to_the_encounters_payer(
 async def test_read_audits_as_a_prior_auth_read(
     client: AsyncClient, request_row: PriorAuthRequest, recorded_audit: RecordedAudit
 ) -> None:
-    """The row carries transcript excerpts, so reading it is a PHI access."""
+    """The row carries note excerpts, so reading it is a PHI access."""
     await client.get(f"/prior-auth/{request_row.id}")
 
     assert recorded_audit.actions == [AuditAction.READ_PRIOR_AUTH]
