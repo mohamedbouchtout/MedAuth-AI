@@ -7,8 +7,15 @@ dependencies = [
     "asyncpg>=0.30",
     "fastapi>=0.115",
     "httpx>=0.28",
+    "medauth-api-envelope",
     "medauth-fhir-types",
     "medauth-hipaa-logger",
+    # The shared SQLAlchemy models. TASK-060 reads clinical_notes and
+    # clinical_nudges and writes prior_auth_requests, and CLAUDE.md's "Where the
+    # shared SQLAlchemy models live" requires importing the mapped classes from
+    # here rather than mapping a second definition against the same tables.
+    # This is what makes the named package below necessary.
+    "medauth-track-a-clinical",
     "pydantic>=2.13.5",
     "pydantic-settings>=2.6",
     "redis>=8.1.0",
@@ -21,4 +28,11 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+# A named package rather than `src`, for the reason CLAUDE.md gives for
+# track-a-clinical and track-b-rag: every service declaring `packages = ["src"]`
+# installs a top-level module called `src` into the shared virtualenv, and they
+# shadow each other. That is tolerable only while nothing imports across a
+# service boundary. TASK-060 crosses it — this service imports
+# `track_a_clinical.models` — so the rename happens now, while the service is
+# still empty, rather than as churn afterwards.
+packages = ["src/prior_auth"]

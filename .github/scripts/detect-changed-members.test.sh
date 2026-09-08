@@ -83,12 +83,13 @@ section 'service and package selection'
 assert_members 'a service selects only itself' \
   'services/track-b-rag/src/x.py' '["services/track-b-rag"]'
 # Four couplings at once: the JWT contract test in packages/session-auth, the
-# shared SQLAlchemy models that track-b-rag and policy-scraper import from this
-# service rather than mapping their own, and fhir-integration's note contract
-# test, which proves the write-back still parses this service's note payloads.
+# shared SQLAlchemy models that track-b-rag, policy-scraper and prior-auth
+# import from this service rather than mapping their own, and fhir-integration's
+# note contract test, which proves the write-back still parses this service's
+# note payloads.
 assert_members 'track-a-clinical src selects its dependents' \
   'services/track-a-clinical/src/x.py' \
-  '["packages/session-auth","services/fhir-integration","services/policy-scraper","services/track-a-clinical","services/track-b-rag"]'
+  '["packages/session-auth","services/fhir-integration","services/policy-scraper","services/prior-auth","services/track-a-clinical","services/track-b-rag"]'
 
 # The model dependents hang off src/ specifically. A migration or a test is not
 # code those services import, so it selects the JWT pairing and no more — the
