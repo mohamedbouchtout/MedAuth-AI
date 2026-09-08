@@ -77,10 +77,22 @@ class SubmissionMethod(StrEnum):
     #: (TASK-054).
     COVERMYMEDS = "covermymeds"
 
-    #: Fax, the floor every payer still accepts. Named in this column's own
-    #: comment since TASK-005 and routed by TASK-061; a member for unbuilt work
-    #: is expected here for the same reason ``AuditAction`` carries one, and an
-    #: unused member is inert in a way a documented-but-absent value is not.
+    #: Fax, the floor every payer still accepts. **Nothing routes here, and no
+    #: task specifies it.** An earlier comment said this member was "named in
+    #: this column's own comment since TASK-005 and routed by TASK-061"; neither
+    #: half checks out — TASK-005's schema block carries no such comment, the
+    #: string "fax" appears nowhere in TASKS.md, and TASK-061 routes on payer
+    #: capability and hands a payer with no automated path to a person rather
+    #: than to a fax transport. The pilot geography was checked before deciding
+    #: that: the seeded Massachusetts corpus is BCBSMA coverage criteria, which
+    #: says nothing about submission channels, and that plan delegates advanced
+    #: imaging review to Carelon's portal. So there is no observed payer
+    #: requiring fax to build for.
+    #:
+    #: The member stays because it costs nothing and an unused one is inert, the
+    #: same as ``AuditAction``'s members for unbuilt work. What is removed is the
+    #: false citation: a comment naming a task that does not specify it reads as
+    #: a commitment somebody has already made.
     FAX = "fax"
 
 

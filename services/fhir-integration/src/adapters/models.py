@@ -173,7 +173,10 @@ class SubmissionMethod(StrEnum):
     #: CoverMyMeds, for an EHR or payer with no FHIR PAS support.
     COVERMYMEDS = "covermymeds"
 
-    #: Fax. Routed by TASK-061 in ``prior-auth``, never by this service.
+    #: Fax. **Nothing routes here** — see the owning enum in
+    #: ``track_a_clinical.models.prior_auth_request`` for why the previous claim
+    #: that TASK-061 routes it was wrong. Mirrored so the contract test can
+    #: compare the two vocabularies member for member.
     FAX = "fax"
 
 
