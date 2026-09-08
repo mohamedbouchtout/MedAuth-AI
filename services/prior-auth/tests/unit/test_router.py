@@ -95,6 +95,18 @@ def submitted(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 class TestChoosingAPath:
     """The one question, and how the payer name reaches it."""
 
+    def test_capability_is_resolved_through_the_shared_vocabulary(self) -> None:
+        """One definition of the CMS-0057-F set, read by both consumers.
+
+        ``track_b_rag.crd`` asks the same question mid-encounter. It held the
+        set privately until this task became its second consumer; a literal
+        copied here instead would be the two-spellings failure the vocabulary
+        exists to prevent, one level up.
+        """
+        from payer_vocab import supports_prior_auth_api
+
+        assert router.supports_prior_auth_api is supports_prior_auth_api
+
     def test_a_mandated_payer_has_an_automated_path(self) -> None:
         slug, reason = router.choose_path("Medicare Advantage")
 

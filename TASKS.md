@@ -6160,7 +6160,7 @@ logic do not change.
       and the drift test asserts the documented channels are the ones the
       consumer actually holds.
 
-- [ ] **TASK-061:** Submission router
+- [x] **TASK-061:** Submission router
   - Service: `services/prior-auth`
   - `POST /prior-auth/{request_id}/submit`
   - Prerequisite: TASK-060 (which writes the rows this submits) and TASK-054
@@ -6381,8 +6381,70 @@ logic do not change.
   - **Test:** resubmitting a `denied` request writes attempt 2 and leaves
     attempt 1 intact; resubmitting a `submitted` one is a 409 and writes no
     attempt
-  - **Test:** two concurrent submissions of one request produce one attempt row,
-    the loser learning it lost
+  - **Test:** the refusal is the update's own `WHERE` clause answering, not a
+    read taken before it — both callers reach the update and the loser is told
+    it lost, writing no attempt row. **True concurrency is not simulated**: what
+    guarantees it is the row lock plus `uq_pa_attempts_request_number`, and that
+    constraint was verified by applying the migration to a real database, not by
+    a unit test
+  - Built (175 tests in `prior-auth` at 99% coverage; 358 in `track-a-clinical`,
+    442 in `fhir-integration`, 110 in `payer-vocab`). Notes on what the
+    implementation settled that this text did not:
+    - **`supports_crd()` and `supports_prior_auth_api()` are two names over one
+      set**, rather than one function or one alias. Both read
+      `CMS_0057_PAYERS`, and a test asserts they agree over the set plus a
+      sample from outside it — so the day a payer is observed publishing one API
+      and not the other, every call site already says which capability it meant
+      and the split is a two-line change rather than a re-reading of each
+      caller. `track_b_rag.crd` now carries no set and no predicate of its own,
+      which is what that service's remaining test asserts.
+    - **A fourth manual reason appeared: `no-payer-recorded`.** TASK-060
+      deliberately assembles a bundle without a payer name rather than
+      discarding an encounter's findings, so a request with no payer is
+      reachable by design and cannot be routed. It is the manual case with its
+      own label rather than being folded into "payer has no API", which would
+      say something false about a payer nobody recorded.
+    - **The payer question is asked before the launch check**, so a request that
+      is both unsupported *and* unlinked reports the payer. Both facts are true;
+      reporting the launch would send someone looking for an EHR linkage problem
+      when the payer simply has no API.
+    - **"We could not ask" never becomes "there is nothing to ask".** An
+      unreachable submitter raises and the route answers 502/504; it does not
+      record a manual outcome, which would take a submittable request off the
+      automated path because of a network blip with nothing to put it back.
+    - **A timed-out submission is reported as ambiguous, not as a failure.** The
+      payer may have taken the request in, so the 504's message says to
+      reconcile rather than retry, and nothing retries automatically — the same
+      rule TASK-054 applies to an ambiguous create.
+    - **`submittable` is a computed field on both payloads, and it fixed a
+      shipped defect.** `fhir-integration` refused a submission on
+      `submitted_at` alone; a denied request carries one, so every legitimate
+      resubmission was refused before the payer was called — and the refusal was
+      indistinguishable from the accidental double-submit the check exists for.
+      The rule now has one owner, in the service that owns the row, and no
+      caller re-derives it.
+    - **The revision id had to be abbreviated to fit.** `alembic_version` holds
+      `VARCHAR(32)` and `0009_prior_auth_submission_attempts` is 35 characters.
+      Alembic does not check this, so it imported cleanly and passed every unit
+      test; it failed only when applied to a real database. Keep new revision
+      ids under 32 characters.
+    - **The migration and its backfill were verified by applying the whole chain
+      to a scratch database**, because this host cannot reach the published
+      Postgres port and the async integration suite could not run. What that
+      confirmed: an already-submitted request gets attempt 1 stamped with its
+      original submission time, a pending one gets no row, a second attempt
+      inserts, and a duplicate attempt number is refused by
+      `uq_pa_attempts_request_number`. The autogenerate comparison in
+      `tests/integration/test_migrations.py` has **not** been run against this
+      migration locally — CI runs it.
+    - **`packages/cors-policy` installs nothing for an empty allow-list**, so the
+      test asserting CORS is now installed has to configure an origin, and the
+      complementary test asserting an unconfigured deployment answers no browser
+      is the one that actually guards against a permissive default shipping.
+    - **The routing read is asserted against `track-a-clinical`'s router rather
+      than its application**, because building that app constructs settings
+      requiring a JWT signing key this service has no business holding. The
+      router carries the paths, which is the whole contract under test.
 
 ---
 
