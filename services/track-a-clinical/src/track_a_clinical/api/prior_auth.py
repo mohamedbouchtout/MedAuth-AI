@@ -48,9 +48,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/prior-auth", tags=["prior-auth"])
 
 ERROR_CODE_REQUEST_NOT_FOUND = "prior_auth_request_not_found"
-#: Refusing a second submission rather than recording it. A payer that receives
-#: one request twice may open two reviews, and the second reference number would
-#: overwrite the first here with nothing recording that two exist.
+#: Refusing to submit a request the payer is still holding. A payer that
+#: receives one request twice may open two reviews of it.
+#:
+#: Since TASK-061 this is narrower than its name suggests, and the name is kept
+#: because it is a published error code that ``fhir-integration`` matches on: a
+#: request the payer *denied* or *refused to take in* is resubmittable, and that
+#: writes a new ``prior_auth_submission_attempts`` row rather than answering
+#: this. What is refused is a repeat of a live request.
 ERROR_CODE_ALREADY_SUBMITTED = "prior_auth_already_submitted"
 
 REQUEST_ERROR_DESCRIPTIONS = {
@@ -141,10 +146,11 @@ async def read_prior_auth_request(
         descriptions=REQUEST_ERROR_DESCRIPTIONS
         | {
             status.HTTP_409_CONFLICT: (
-                "This request has already been submitted "
-                "(`prior_auth_already_submitted`). Refused rather than recorded "
-                "twice: a payer that receives one request twice may open two "
-                "reviews, and only one reference number can be kept here."
+                "This request is not in a state that may be submitted "
+                "(`prior_auth_already_submitted`) — the payer is still holding "
+                "it. Refused rather than recorded twice: a payer that receives "
+                "one request twice may open two reviews. A `denied` or `error` "
+                "request may be resubmitted, and is recorded as a new attempt."
             ),
         },
     ),
@@ -166,9 +172,15 @@ async def record_prior_auth_submission(
     pending with the payer, and recording it as submitted would leave someone
     waiting for a decision on a request that was never taken in.
 
-    **Write-once, enforced by the update's own ``WHERE`` clause** rather than by
-    a preceding read, so two concurrent submissions cannot both be recorded. The
-    caller that loses learns it lost.
+    **Each attempt is write-once, enforced by the update's own ``WHERE`` clause**
+    rather than by a preceding read, so two concurrent submissions cannot both be
+    recorded. The caller that loses learns it lost.
+
+    **A deliberate resubmission is a new attempt row, not a second write here.**
+    A `denied` or `error` request may be sent again (TASK-072's flow); each
+    transmission gets a ``prior_auth_submission_attempts`` row, and the columns
+    on this row carry the latest attempt's result. A request the payer is still
+    holding is refused exactly as it always was.
 
     The actor is the encounter's provider, never the calling service.
     """
@@ -188,7 +200,7 @@ async def record_prior_auth_submission(
         raise ApiHTTPException(
             status.HTTP_409_CONFLICT,
             ERROR_CODE_ALREADY_SUBMITTED,
-            f"Prior authorization request {request_id} has already been submitted",
+            f"Prior authorization request {request_id} is not in a submittable state",
         )
 
     return ApiResponse[PriorAuthRequestData](

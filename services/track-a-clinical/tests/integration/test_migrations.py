@@ -43,6 +43,12 @@ CORE_TABLES = (
     "clinical_notes",
     "clinical_nudges",
     "prior_auth_requests",
+    # TASK-061, migration 0009. Listed here as well as in the unit suite's
+    # EXPECTED_TABLES because this history owns it: the downgrade test asserts
+    # that everything *not* named here survives a downgrade to base, so a table
+    # this history drops and this tuple omits reads as one that was dropped by
+    # mistake.
+    "prior_auth_submission_attempts",
     "insurance_policies",
 )
 
@@ -53,6 +59,7 @@ CORE_INDEXES = (
     "idx_clinical_nudges_encounter",
     "idx_prior_auth_encounter",
     "idx_prior_auth_status",
+    "idx_pa_attempts_request",
     "idx_insurance_policies_payer_state",
 )
 

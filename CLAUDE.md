@@ -1409,7 +1409,7 @@ models generated from the same schema — only migration authorship is centraliz
 not query access.
 
 ### Where the shared SQLAlchemy models live (cross-cutting — applies to every task)
-The mapped classes for the five core tables live in
+The mapped classes for the shared tables live in
 `services/track-a-clinical/src/track_a_clinical/models/`, one module per table,
 exported from the package `__init__`. Every service that touches those tables
 imports from there rather than mapping its own class against the same table:

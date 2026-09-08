@@ -2,9 +2,12 @@
 
 TASK-054. Three properties here are rules rather than implementation details:
 
-* **A request is submitted to a payer once.** A second attempt is refused,
-  because a payer that receives one request twice may open two reviews and only
-  one reference number can be kept here.
+* **A request the payer is holding is never submitted again.** A repeat is
+  refused, because a payer that receives one request twice may open two reviews.
+  A request the payer *denied* or *refused to take in* may be resubmitted
+  (TASK-061), and that is a new attempt row rather than an overwrite of what the
+  payer said the first time — the distinction the old ``submitted_at IS NULL``
+  guard could not draw.
 * **The refusal is decided by the update, not by a read before it.** A
   check-then-write leaves a window in which two callers both pass the check.
 * **A payer's refusal is recorded as a refusal.** An ``error`` outcome does not
@@ -25,10 +28,10 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import Update
+from sqlalchemy import Select, Update
 
 from hipaa_logger import AuditAction
-from track_a_clinical import audit
+from track_a_clinical import audit, prior_auth
 from track_a_clinical.api.dependencies import get_db_session
 from track_a_clinical.api.prior_auth import (
     ERROR_CODE_ALREADY_SUBMITTED,
@@ -36,6 +39,7 @@ from track_a_clinical.api.prior_auth import (
 )
 from track_a_clinical.main import create_app
 from track_a_clinical.models import (
+    PRIOR_AUTH_STATUS_DENIED,
     PRIOR_AUTH_STATUS_ERROR,
     PRIOR_AUTH_STATUS_PENDING,
     PRIOR_AUTH_STATUS_SUBMITTED,
@@ -65,10 +69,15 @@ def make_request(encounter: Encounter) -> PriorAuthRequest:
 class PriorAuthSession:
     """A session that models the conditional update rather than always succeeding.
 
-    ``UPDATE ... RETURNING`` answers the way PostgreSQL would: an id when
-    ``submitted_at`` was still NULL, nothing when another writer had got there
-    first. A fake that always returned an id would let the submit-once rule pass
-    by coincidence.
+    ``UPDATE ... RETURNING`` answers the way PostgreSQL would: an id when the
+    row was in a submittable state, nothing when it was not. A fake that always
+    returned an id would let the submit-once rule pass by coincidence.
+
+    Since TASK-061 the predicate is "never submitted, **or** sitting in a
+    terminal unsuccessful state", so this fake models both halves — a fake that
+    still only understood ``submitted_at IS NULL`` would report the
+    resubmission path as broken and the regression it exists to catch as
+    working.
     """
 
     def __init__(self, *, encounter: Encounter | None, request: PriorAuthRequest | None) -> None:
@@ -78,6 +87,9 @@ class PriorAuthSession:
         self.rollbacks = 0
         self.refreshes = 0
         self.updates = 0
+        #: The attempt rows handed to ``session.add()``. The history half of the
+        #: write, which the parent row's columns cannot show.
+        self.added: list[Any] = []
 
     async def execute(self, _statement: Any) -> Any:
         return _Result(
@@ -86,10 +98,25 @@ class PriorAuthSession:
             else (self.request, self.encounter)
         )
 
+    def add(self, instance: Any) -> None:
+        self.added.append(instance)
+
     async def scalar(self, statement: Any) -> Any:
+        if isinstance(statement, Select):
+            # Counting the attempts already recorded, so the next number is
+            # known. Answered from what this fake was actually given rather than
+            # from a constant, or the second attempt would always be numbered 2.
+            return len(self.added)
+
         assert isinstance(statement, Update)
         self.updates += 1
-        if self.request is None or self.request.submitted_at is not None:
+        if self.request is None:
+            return None
+        submittable = (
+            self.request.submitted_at is None
+            or self.request.status in prior_auth.RESUBMITTABLE_STATUSES
+        )
+        if not submittable:
             return None
         # Apply what the statement actually carries rather than what this module
         # expects: a fake that wrote its own constants could not fail on a
@@ -328,6 +355,111 @@ async def test_a_second_submission_is_refused(
     # Both attempts reached the update: the refusal is the WHERE clause's answer
     # rather than a read taken before it.
     assert fake.updates == 2
+
+
+async def test_the_first_submission_writes_attempt_one(
+    client: AsyncClient, request_row: PriorAuthRequest, fake: PriorAuthSession
+) -> None:
+    """The history half of the write, which the parent's columns cannot show."""
+    await client.patch(
+        f"/prior-auth/{request_row.id}/submission",
+        json={
+            "submission_method": "fhir-pas",
+            "outcome": "complete",
+            "payer_reference_number": PAYER_REFERENCE,
+        },
+    )
+
+    assert len(fake.added) == 1
+    attempt = fake.added[0]
+    assert attempt.attempt_number == 1
+    assert attempt.submission_method == "fhir-pas"
+    assert attempt.payer_outcome == "complete"
+    assert attempt.payer_reference_number == PAYER_REFERENCE
+    assert attempt.request_id == request_row.id
+
+
+async def test_a_denied_request_may_be_resubmitted_as_a_second_attempt(
+    client: AsyncClient, request_row: PriorAuthRequest, fake: PriorAuthSession
+) -> None:
+    """TASK-072's flow. The capability this task exists to provide.
+
+    Attempt 1 stays exactly as it was: a resubmission is a new fact, never an
+    overwrite of what the payer said the first time.
+    """
+    await client.patch(
+        f"/prior-auth/{request_row.id}/submission",
+        json={
+            "submission_method": "fhir-pas",
+            "outcome": "complete",
+            "payer_reference_number": PAYER_REFERENCE,
+        },
+    )
+    # The payer decided against it. Nothing in this repository reads an
+    # adjudication yet, so the state is set directly — what is under test is the
+    # resubmission, not how the row got to denied.
+    request_row.status = PRIOR_AUTH_STATUS_DENIED
+
+    second = await client.patch(
+        f"/prior-auth/{request_row.id}/submission",
+        json={
+            "submission_method": "covermymeds",
+            "outcome": "queued",
+            "payer_reference_number": None,
+        },
+    )
+
+    assert second.status_code == 200
+    assert [attempt.attempt_number for attempt in fake.added] == [1, 2]
+    first, latest = fake.added
+    assert first.payer_outcome == "complete"
+    assert first.payer_reference_number == PAYER_REFERENCE
+    assert latest.submission_method == "covermymeds"
+    assert latest.payer_outcome == "queued"
+    assert latest.payer_reference_number is None
+    # And the parent carries the latest attempt's result, which is what every
+    # existing reader wants.
+    assert request_row.payer_outcome == "queued"
+
+
+async def test_a_request_the_payer_refused_may_be_resubmitted(
+    client: AsyncClient, request_row: PriorAuthRequest, fake: PriorAuthSession
+) -> None:
+    """``error`` means the payer never took it in, so nothing is pending.
+
+    Refusing a resubmission here would strand a request that no payer is
+    holding and no person was told to chase.
+    """
+    first = await client.patch(
+        f"/prior-auth/{request_row.id}/submission",
+        json={"submission_method": "fhir-pas", "outcome": "error"},
+    )
+    assert first.status_code == 200
+    assert request_row.status == PRIOR_AUTH_STATUS_ERROR
+
+    second = await client.patch(
+        f"/prior-auth/{request_row.id}/submission",
+        json={"submission_method": "fhir-pas", "outcome": "queued"},
+    )
+
+    assert second.status_code == 200
+    assert [attempt.attempt_number for attempt in fake.added] == [1, 2]
+
+
+async def test_a_refused_resubmission_writes_no_attempt(
+    client: AsyncClient, request_row: PriorAuthRequest, fake: PriorAuthSession
+) -> None:
+    """A request the payer is still holding must not be asked again.
+
+    The unchanged half of the guard: what TASK-061 widened is which *states* may
+    be submitted from, never whether a live request may be sent twice.
+    """
+    body = {"submission_method": "fhir-pas", "outcome": "complete"}
+    await client.patch(f"/prior-auth/{request_row.id}/submission", json=body)
+    refused = await client.patch(f"/prior-auth/{request_row.id}/submission", json=body)
+
+    assert refused.status_code == 409
+    assert len(fake.added) == 1
 
 
 async def test_a_refused_second_submission_writes_no_audit_row(

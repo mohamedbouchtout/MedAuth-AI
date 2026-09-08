@@ -7,6 +7,7 @@ separately proves the migration produces the same shape in PostgreSQL.
 
 from __future__ import annotations
 
+import pytest
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
@@ -17,6 +18,7 @@ from track_a_clinical.models import (
     Encounter,
     InsurancePolicy,
     PriorAuthRequest,
+    PriorAuthSubmissionAttempt,
 )
 
 EXPECTED_TABLES = {
@@ -25,6 +27,10 @@ EXPECTED_TABLES = {
     "clinical_nudges",
     "prior_auth_requests",
     "insurance_policies",
+    # TASK-061, migration 0009: one row per transmission to a payer, so a
+    # deliberate resubmission is a new fact rather than an overwrite of the
+    # first attempt's result.
+    "prior_auth_submission_attempts",
 }
 
 # Straight from TASK-005's inline SQL, in declaration order, plus the columns
@@ -94,6 +100,17 @@ EXPECTED_COLUMNS = {
         "decided_at",
         "denial_reason",
     ],
+    "prior_auth_submission_attempts": [
+        "id",
+        "request_id",
+        "attempt_number",
+        "submission_method",
+        "payer_outcome",
+        "payer_reference_number",
+        "submitted_at",
+        "denial_reason",
+        "created_at",
+    ],
     "insurance_policies": [
         "id",
         "payer",
@@ -123,10 +140,12 @@ EXPECTED_INDEXES = {
     # TASK-040, migration 0005: one nudge per procedure per encounter. Partial
     # on cpt_code IS NOT NULL — TASK-044's keyword-only nudges carry no code.
     "uq_clinical_nudges_encounter_cpt",
+    # TASK-061, migration 0009: the attempts a request has been through.
+    "idx_pa_attempts_request",
 }
 
 
-def test_metadata_holds_exactly_the_five_core_tables() -> None:
+def test_metadata_holds_exactly_the_expected_tables() -> None:
     """audit_log is absent on purpose — hipaa-logger owns it and migrates it first."""
     assert set(Base.metadata.tables) == EXPECTED_TABLES
 
@@ -244,3 +263,30 @@ def test_relationships_resolve_from_the_package_import() -> None:
     assert Encounter.nudges.property.mapper.class_ is ClinicalNudge
     assert Encounter.prior_auth_requests.property.mapper.class_ is PriorAuthRequest
     assert ClinicalNote.encounter.property.mapper.class_ is Encounter
+    attempts = PriorAuthRequest.submission_attempts.property
+    assert attempts.mapper.class_ is PriorAuthSubmissionAttempt
+    assert PriorAuthSubmissionAttempt.request.property.mapper.class_ is PriorAuthRequest
+
+
+def test_submission_attempts_are_unique_per_request_and_number() -> None:
+    """The guard that replaced ``submitted_at IS NULL`` as the duplicate check.
+
+    It has to admit attempt 2 while refusing a second attempt 2 — the
+    distinction a single ``submitted_at`` could not draw, and the reason
+    TASK-061 added a table rather than relaxing the old predicate.
+    """
+    constraints = {
+        constraint.name: sorted(column.name for column in constraint.columns)
+        for constraint in PriorAuthSubmissionAttempt.__table__.constraints
+        if isinstance(constraint, sa.UniqueConstraint)
+    }
+    assert constraints["uq_pa_attempts_request_number"] == ["attempt_number", "request_id"]
+
+
+def test_an_attempt_refuses_a_method_or_outcome_it_cannot_name() -> None:
+    """The same backstop the parent row carries, for values arriving over HTTP."""
+    attempt = PriorAuthSubmissionAttempt()
+    with pytest.raises(ValueError, match="submission_method must be one of"):
+        attempt.submission_method = "FHIR_PAS"
+    with pytest.raises(ValueError, match="payer_outcome must be one of"):
+        attempt.payer_outcome = "accepted"
