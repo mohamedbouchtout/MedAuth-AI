@@ -560,6 +560,63 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /prior-auth/{request_id}/routing:
+    get:
+      tags: [prior-auth]
+      operationId: readPriorAuthRouting
+      summary: Read what a submission path is chosen from
+      description: >-
+        Returns the three facts a submission router chooses a path from: which
+        payer, whether the request may be sent, and which SMART launch holds the
+        credential. Its caller is TASK-061's router in `prior-auth`.
+
+
+        **This route writes no audit row, and that is the rule rather than an
+        exception to it.** A route audits if and only if it touches PHI, in both
+        directions, because the audit table's value comes from every row in it
+        being a PHI access. This response carries no patient identifier, no
+        procedure, no diagnosis and no note excerpt.
+
+
+        `GET /prior-auth/{request_id}` audits, correctly, because it returns
+        clinical evidence. Routing through that route instead would have written
+        a `READ_PRIOR_AUTH` row for an access that read no clinical content, and
+        pulled note excerpts across the network for a decision that never looks
+        at them. Do not add a clinical field to this payload: the moment one
+        appears, the route owes an audit row.
+
+
+        Unauthenticated in v1, on the same terms as every other route here.
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          description: The prior-authorization request being routed.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The payer, the launch, and whether the request may be sent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriorAuthRoutingResponse'
+        '404':
+          description: >-
+            No such prior-authorization request, or its encounter has been
+            soft-deleted (`prior_auth_request_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: The path parameter is not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /prior-auth/{request_id}/submission:
     patch:
       tags: [prior-auth]
@@ -683,6 +740,7 @@ components:
         - submission_method
         - payer_reference_number
         - submitted_at
+        - submittable
       properties:
         request_id:
           type: string
@@ -767,9 +825,59 @@ components:
           type: string
           format: date-time
           nullable: true
+          description: When it was transmitted, or null.
+        submittable:
+          type: boolean
           description: >-
-            When it was transmitted, or null. Non-null is what makes a repeat
-            submission refusable before a payer is ever called.
+            Whether this request may be sent to a payer now — never submitted,
+            or sitting in a terminal unsuccessful state (`denied`, `error`) and
+            therefore resubmittable. Computed by this service because the rule
+            belongs to whoever owns the row; a caller that re-derived it from
+            `submitted_at` would refuse every legitimate resubmission (TASK-061).
+
+    PriorAuthRoutingData:
+      type: object
+      description: >-
+        Just enough to choose a submission path, and deliberately nothing more.
+        Carries no patient identifier, no procedure, no diagnosis and no note
+        excerpt — which is why the route returning it writes no audit row.
+      required: [request_id, status, payer_name, launch_id, submittable]
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          description: The request this describes.
+        status:
+          type: string
+          description: Where the request has got to in our own process.
+        payer_name:
+          type: string
+          nullable: true
+          description: >-
+            The payer's own display name. Never a `payer_vocab` slug — the router
+            normalises it before asking about the payer's capabilities.
+        launch_id:
+          type: string
+          nullable: true
+          description: >-
+            The SMART launch the encounter was started under, or null when it was
+            started outside one. The credential a submission is made with hangs
+            off this, so a null means no automated path exists.
+        submittable:
+          type: boolean
+          description: Whether the request may be sent now, by the rule above.
+
+    PriorAuthRoutingResponse:
+      type: object
+      description: The standard envelope, carrying one routing decision's inputs.
+      required: [data, error]
+      properties:
+        data:
+          $ref: '#/components/schemas/PriorAuthRoutingData'
+          nullable: true
+        error:
+          $ref: '#/components/schemas/Error'
+          nullable: true
 
     PriorAuthRequestResponse:
       type: object

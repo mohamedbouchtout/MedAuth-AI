@@ -17,6 +17,7 @@ from track_a_clinical.models import (
     SubmissionOutcome,
     load_codes,
 )
+from track_a_clinical.prior_auth import is_submittable
 
 
 class StartSessionRequest(BaseModel):
@@ -304,8 +305,14 @@ class PriorAuthRequestData(BaseModel):
             thing this payload carries.
         submission_method: How it went out, or null before it has.
         payer_reference_number: The payer's reference, when it gave one.
-        submitted_at: When it was transmitted, or null. **Non-null is what makes
-            a repeat submission refusable** before a payer is ever called.
+        submitted_at: When it was transmitted, or null.
+        submittable: Whether this request may be sent to a payer now. **Computed
+            here rather than derived by the caller**, because the rule belongs to
+            the service that owns the row: never submitted, or sitting in a
+            terminal unsuccessful state (`denied`, `error`) and therefore
+            resubmittable. A caller that re-derived it from ``submitted_at``
+            would refuse every legitimate resubmission, which is what
+            ``fhir-integration`` did until TASK-061.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -325,6 +332,7 @@ class PriorAuthRequestData(BaseModel):
     submission_method: str | None
     payer_reference_number: str | None
     submitted_at: datetime.datetime | None
+    submittable: bool
 
     @classmethod
     def from_rows(cls, *, request: PriorAuthRequest, encounter: Encounter) -> PriorAuthRequestData:
@@ -351,6 +359,62 @@ class PriorAuthRequestData(BaseModel):
             submission_method=request.submission_method,
             payer_reference_number=request.payer_reference_number,
             submitted_at=request.submitted_at,
+            submittable=is_submittable(request),
+        )
+
+
+class PriorAuthRoutingData(BaseModel):
+    """Just enough to choose a submission path — and deliberately nothing more.
+
+    ``GET /prior-auth/{request_id}`` answers with the procedures, the diagnoses
+    and the clinical evidence, because a *submitter* needs them. A **router**
+    needs none of that: it asks which payer, whether the request may be sent, and
+    which SMART launch holds the credential. Handing it the full payload would
+    read note excerpts — the most sensitive thing this service returns — for a
+    decision that never looks at them, and would write a ``READ_PRIOR_AUTH`` row
+    for an access that touched no clinical content.
+
+    So this payload carries no patient identifier, no procedure, no diagnosis and
+    no excerpt, and **the route that returns it writes no audit row** — per
+    CLAUDE.md's rule that a route audits if and only if it touches PHI, in both
+    directions. Adding a clinical field here would make that rule false, so
+    anything needing one belongs on the full route instead.
+
+    Attributes:
+        request_id: The row this describes.
+        status: Where the request has got to in our process.
+        payer_name: The payer's own display name, which the router normalises
+            through ``payer_vocab`` before asking about its capabilities.
+            **Never a slug**: this is the payer's own spelling, as stored.
+        launch_id: The SMART launch the encounter was started under, or null when
+            it was started outside one. The credential a submission is made with
+            hangs off this, so a null means no automated path exists.
+        submittable: Whether the request may be sent now, by the same rule the
+            full payload reports.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    request_id: uuid.UUID
+    status: str
+    payer_name: str | None
+    launch_id: str | None
+    submittable: bool
+
+    @classmethod
+    def from_rows(cls, *, request: PriorAuthRequest, encounter: Encounter) -> PriorAuthRoutingData:
+        """Render the routing decision's inputs from the two rows.
+
+        ``payer_name`` falls back to the encounter's ``insurance_payer`` exactly
+        as the full payload's does — both hold the payer's own display name, so
+        the fallback joins two spellings of one fact.
+        """
+        return cls(
+            request_id=request.id,
+            status=request.status,
+            payer_name=request.payer_name or encounter.insurance_payer,
+            launch_id=encounter.launch_id,
+            submittable=is_submittable(request),
         )
 
 

@@ -1084,9 +1084,11 @@ def _prior_auth_service_error(exc: PriorAuthServiceError) -> ApiHTTPException:
                 "the endpoint does not implement `Claim/$submit`."
             ),
             409: (
-                "This request has already been submitted "
-                "(`PRIOR_AUTH_ALREADY_SUBMITTED`). Refused before the payer is "
-                "called: a payer receiving one request twice may open two reviews."
+                "This request is not in a state that may be submitted "
+                "(`PRIOR_AUTH_ALREADY_SUBMITTED`) — the payer is still holding "
+                "it. Refused before the payer is called: a payer receiving one "
+                "request twice may open two reviews. A `denied` or `error` "
+                "request is resubmittable and is not refused here."
             ),
             422: (
                 "The body is invalid, or the request cannot be made into a "
@@ -1140,14 +1142,18 @@ async def submit_prior_auth(
     except PriorAuthServiceError as exc:
         raise _prior_auth_service_error(exc) from exc
 
-    if stored.submitted_at is not None:
+    # The owning service decides this; this route only reports it. Reasoning from
+    # ``submitted_at`` here — which is what this did until TASK-061 — refuses
+    # every legitimate resubmission of a denied request, because a denied request
+    # carries a submission time too.
+    if not stored.submittable:
         raise ApiHTTPException(
             status_code=status.HTTP_409_CONFLICT,
             code=ERROR_CODE_PRIOR_AUTH_ALREADY_SUBMITTED,
             message=(
-                "This prior authorization has already been submitted. Submitting "
-                "it again would ask the payer to open a second review of one "
-                "request."
+                "This prior authorization is not in a state that may be "
+                "submitted — the payer is still holding it. Submitting it again "
+                "would ask the payer to open a second review of one request."
             ),
         )
 

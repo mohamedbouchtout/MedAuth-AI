@@ -338,6 +338,111 @@ async def test_recording_audits_as_a_submission(
     assert recorded_audit.actions == [AuditAction.SUBMIT_PRIOR_AUTH]
 
 
+async def test_routing_returns_what_a_path_is_chosen_from(
+    client: AsyncClient, request_row: PriorAuthRequest, encounter: Encounter
+) -> None:
+    encounter.launch_id = "launch-2f9c"
+
+    response = await client.get(f"/prior-auth/{request_row.id}/routing")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "request_id": str(request_row.id),
+        "status": PRIOR_AUTH_STATUS_PENDING,
+        "payer_name": "Aetna",
+        "launch_id": "launch-2f9c",
+        "submittable": True,
+    }
+
+
+async def test_routing_carries_no_clinical_content(
+    client: AsyncClient, request_row: PriorAuthRequest
+) -> None:
+    """The reason this route exists at all, asserted rather than assumed.
+
+    A router chooses a path from the payer and the launch; it never looks at a
+    diagnosis or a note excerpt. Pulling those across the network for a decision
+    that ignores them is what the narrow payload avoids — and what makes the
+    absent audit row correct rather than an omission.
+    """
+    data = (await client.get(f"/prior-auth/{request_row.id}/routing")).json()["data"]
+
+    assert not {
+        "clinical_evidence",
+        "diagnoses",
+        "procedures",
+        "patient_fhir_id",
+        "insurance_member_id",
+    } & set(data)
+
+
+async def test_routing_writes_no_audit_row(
+    client: AsyncClient, request_row: PriorAuthRequest, recorded_audit: RecordedAudit
+) -> None:
+    """CLAUDE.md's audit rule is an "if and only if", in both directions.
+
+    The audit table's value comes from every row in it being a PHI access, so a
+    read over non-clinical data must not write one. The full read next door does
+    audit, correctly, because it returns clinical evidence.
+    """
+    await client.get(f"/prior-auth/{request_row.id}/routing")
+
+    assert recorded_audit.calls == []
+
+
+async def test_routing_reports_a_denied_request_as_submittable(
+    client: AsyncClient, request_row: PriorAuthRequest
+) -> None:
+    """The flag exists so no caller re-derives the rule from ``submitted_at``.
+
+    A denied request carries one and is still submittable; a caller reasoning
+    from the timestamp alone would refuse TASK-072's whole flow.
+    """
+    request_row.submitted_at = datetime.datetime.now(datetime.UTC)
+    request_row.status = PRIOR_AUTH_STATUS_DENIED
+
+    data = (await client.get(f"/prior-auth/{request_row.id}/routing")).json()["data"]
+
+    assert data["submittable"] is True
+
+
+async def test_routing_reports_a_live_request_as_not_submittable(
+    client: AsyncClient, request_row: PriorAuthRequest
+) -> None:
+    """A request the payer is still holding must not be sent again."""
+    request_row.submitted_at = datetime.datetime.now(datetime.UTC)
+    request_row.status = PRIOR_AUTH_STATUS_SUBMITTED
+
+    data = (await client.get(f"/prior-auth/{request_row.id}/routing")).json()["data"]
+
+    assert data["submittable"] is False
+
+
+async def test_routing_reports_a_missing_launch_as_null(
+    client: AsyncClient, request_row: PriorAuthRequest, encounter: Encounter
+) -> None:
+    """No launch means no credential, so no automated path — not an error here."""
+    encounter.launch_id = None
+
+    data = (await client.get(f"/prior-auth/{request_row.id}/routing")).json()["data"]
+
+    assert data["launch_id"] is None
+
+
+async def test_routing_is_404_for_an_unknown_request() -> None:
+    app = create_app()
+    app.dependency_overrides[get_db_session] = lambda: PriorAuthSession(
+        encounter=None, request=None
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://track-a-clinical"
+    ) as http:
+        response = await http.get(f"/prior-auth/{uuid.uuid4()}/routing")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == ERROR_CODE_REQUEST_NOT_FOUND
+
+
 async def test_a_second_submission_is_refused(
     client: AsyncClient, request_row: PriorAuthRequest, fake: PriorAuthSession
 ) -> None:

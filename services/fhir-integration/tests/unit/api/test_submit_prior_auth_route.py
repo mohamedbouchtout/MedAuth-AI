@@ -108,6 +108,7 @@ class FakeUpstreams:
             "diagnoses": [LLM_CODE, SUGGESTED_CODE],
             "clinical_evidence": [{"text": "12 weeks of physical therapy, no improvement"}],
             "submitted_at": None,
+            "submittable": True,
             "payer_reference_number": None,
         }
         self.pas_response: dict[str, Any] = claim_response_bundle()
@@ -380,16 +381,54 @@ def test_the_submission_is_audited(
     assert audit.calls[0]["fhir_practitioner_ref"] == PRACTITIONER_REF
 
 
-def test_a_request_already_submitted_is_refused_before_the_payer_is_called(
+def test_a_request_the_payer_is_holding_is_refused_before_it_is_called(
     client: TestClient, upstreams: FakeUpstreams
 ) -> None:
     upstreams.request["submitted_at"] = "2026-09-03T09:00:00Z"
+    upstreams.request["submittable"] = False
 
     response = submit(client)
 
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "PRIOR_AUTH_ALREADY_SUBMITTED"
     assert upstreams.submitted == []
+
+
+def test_a_denied_request_is_resubmitted_despite_carrying_a_submission_time(
+    client: TestClient, upstreams: FakeUpstreams
+) -> None:
+    """TASK-072's flow, and the regression TASK-061 fixed here.
+
+    This route used to refuse on ``submitted_at`` alone. A denied request
+    carries one, so every legitimate resubmission was refused before the payer
+    was ever called — and the refusal looked exactly like the accidental
+    double-submit the check is actually for. The owning service decides now;
+    this route reports its answer.
+    """
+    upstreams.request["submitted_at"] = "2026-09-03T09:00:00Z"
+    upstreams.request["status"] = "denied"
+    upstreams.request["submittable"] = True
+
+    response = submit(client)
+
+    assert response.status_code == 201
+    assert len(upstreams.submitted) == 1
+
+
+def test_a_payload_without_the_flag_is_treated_as_submittable(
+    client: TestClient, upstreams: FakeUpstreams
+) -> None:
+    """The default keeps an older owning service working rather than failing shut.
+
+    Failing open here is the right direction only because the owning service
+    re-checks atomically when it records the result — this pre-check saves a
+    pointless payer call, it is not the guarantee.
+    """
+    upstreams.request.pop("submittable", None)
+
+    response = submit(client)
+
+    assert response.status_code == 201
 
 
 def test_a_request_with_no_procedure_is_refused(

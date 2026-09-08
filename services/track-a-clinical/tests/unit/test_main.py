@@ -20,6 +20,7 @@ def test_app_exposes_the_session_note_and_prior_auth_routes() -> None:
         "/notes/{session_id}",
         "/notes/{session_id}/ehr-reference",
         "/prior-auth/{request_id}",
+        "/prior-auth/{request_id}/routing",
         "/prior-auth/{request_id}/submission",
     }
     assert set(paths["/sessions/start"]) == {"post"}
@@ -29,10 +30,13 @@ def test_app_exposes_the_session_note_and_prior_auth_routes() -> None:
     # Same again for the EHR-linkage sub-resource: a GET the write-back reads its
     # identifiers from, and the PATCH that records what it filed (TASK-053).
     assert set(paths["/notes/{session_id}/ehr-reference"]) == {"get", "patch"}
-    # The prior-auth pair is two paths rather than one for a reason worth
-    # keeping: the read is a whole request, and the PATCH is a sub-resource that
-    # records a submission, so a client cannot reach the write by guessing.
+    # The prior-auth routes are three paths rather than one for reasons worth
+    # keeping: the read is a whole request, the PATCH is a sub-resource that
+    # records a submission so a client cannot reach the write by guessing, and
+    # the routing read is separate because it is the one that carries no PHI and
+    # therefore writes no audit row (TASK-061).
     assert set(paths["/prior-auth/{request_id}"]) == {"get"}
+    assert set(paths["/prior-auth/{request_id}/routing"]) == {"get"}
     assert set(paths["/prior-auth/{request_id}/submission"]) == {"patch"}
 
 
