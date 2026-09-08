@@ -330,9 +330,11 @@ class PriorAuthEvidence(BaseModel):
     are actually evaluated — "a missing one is the usual cause of a denial", per
     ``fhir_types.claim``.
 
-    **These are transcript excerpts and they are PHI.** They are excerpts rather
-    than the whole transcript by a HIPAA minimum-necessary decision made in
-    TASK-060, not to keep the payload small; nothing downstream may widen them
+    **These are excerpts of the provider's note and they are PHI.** TASK-060
+    builds them from the stored SOAP note and the nudges fired during the
+    encounter — never from raw transcript, which this system deliberately never
+    persists. They are excerpts rather than the whole note by a HIPAA
+    minimum-necessary decision made there; nothing downstream may widen them
     back out.
 
     Attributes:

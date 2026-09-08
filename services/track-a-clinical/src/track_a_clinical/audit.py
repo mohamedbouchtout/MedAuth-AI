@@ -163,11 +163,11 @@ async def audit_prior_auth_access(
 ) -> None:
     """Record one access to a ``prior_auth_requests`` row (TASK-054).
 
-    The row holds ``clinical_evidence`` — transcript excerpts — so reading one is
-    a PHI access as surely as reading a note is, and it audits for the same
-    reason. Both callers today are ``fhir-integration`` submitting a request it
-    did not assemble: it reads the row to build what it sends, and comes back to
-    record what the payer said.
+    The row holds ``clinical_evidence`` — excerpts of the provider's note — so
+    reading one is a PHI access as surely as reading a note is, and it audits for
+    the same reason. Both callers today are ``fhir-integration`` submitting a
+    request it did not assemble: it reads the row to build what it sends, and
+    comes back to record what the payer said.
 
     **Two services write a ``SUBMIT_PRIOR_AUTH`` row for one submission, and that
     is not double counting.** That service records that a request was transmitted

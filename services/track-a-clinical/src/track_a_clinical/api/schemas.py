@@ -300,8 +300,8 @@ class PriorAuthRequestData(BaseModel):
             what decides whether each may leave the system, and the filtering
             happens in the submitter's builder rather than here.
         clinical_evidence: The documentation offered against the payer's
-            criteria. Transcript excerpts, and the most sensitive thing this
-            payload carries.
+            criteria. Excerpts of the provider's note, and the most sensitive
+            thing this payload carries.
         submission_method: How it went out, or null before it has.
         payer_reference_number: The payer's reference, when it gave one.
         submitted_at: When it was transmitted, or null. **Non-null is what makes

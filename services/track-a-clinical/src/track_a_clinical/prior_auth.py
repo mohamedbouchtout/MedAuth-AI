@@ -12,8 +12,9 @@ it has deliberately never had, and the read would then produce no
 ``READ_PRIOR_AUTH`` row anywhere. Same arrangement, and same argument, as the
 note write-back one task earlier.
 
-Everything here is PHI: ``clinical_evidence`` holds transcript excerpts. Nothing
-in this module logs a procedure, a diagnosis or an excerpt — only identifiers.
+Everything here is PHI: ``clinical_evidence`` holds excerpts of the provider's
+note. Nothing in this module logs a procedure, a diagnosis or an excerpt — only
+identifiers.
 """
 
 from __future__ import annotations

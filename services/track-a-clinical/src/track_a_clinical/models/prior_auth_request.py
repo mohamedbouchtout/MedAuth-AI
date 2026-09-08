@@ -3,7 +3,8 @@
 Migrated here and written by two services: prior-auth assembles the bundle
 (TASK-060) and routes the submission (TASK-061), and fhir-integration records
 what a FHIR PAS submission came back with (TASK-054). ``clinical_evidence``
-holds transcript excerpts, so this table carries PHI and every read of it must
+holds excerpts of the provider's note, so this table carries PHI and every
+read of it must
 be audit-logged.
 
 Like ``clinical_nudges``, there is no ``deleted_at``: a submitted authorization is
@@ -161,9 +162,14 @@ class PriorAuthRequest(Base):
         postgresql.JSONB(),
         nullable=True,
     )
-    #: Transcript excerpts tied to the flagged procedures — never the whole
-    #: transcript. Narrowing this is a HIPAA minimum-necessary decision, not a
-    #: payload-size one.
+    #: Documentation offered against the payer's criteria, tied to the flagged
+    #: procedures. Built by TASK-060 from the stored SOAP note and the nudges
+    #: fired during the encounter — **never from raw transcript**, which is held
+    #: in memory for the length of a visit and deliberately never persisted. The
+    #: note is also the better artifact: it is what the provider reviews, edits
+    #: and attests to, and a bundle asserts to a payer what the provider
+    #: documented. Narrowing it to the matching excerpts rather than the whole
+    #: note is a HIPAA minimum-necessary decision, not a payload-size one.
     clinical_evidence: Mapped[list[JsonObject] | None] = mapped_column(
         postgresql.JSONB(),
         nullable=True,

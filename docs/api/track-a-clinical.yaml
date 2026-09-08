@@ -527,7 +527,7 @@ paths:
         about it.
 
 
-        Unauthenticated in v1, as the note routes are. It returns transcript
+        Unauthenticated in v1, as the note routes are. It returns note
         excerpts and a patient identifier, so it is PHI and is recorded as
         `READ_PRIOR_AUTH` against the request.
       parameters:
@@ -749,8 +749,9 @@ components:
           items:
             type: object
           description: >-
-            The documentation offered against the payer's criteria. Transcript
-            excerpts, and the most sensitive thing this payload carries.
+            The documentation offered against the payer's criteria. Excerpts
+            of the provider's note, and the most sensitive thing this payload
+            carries.
         submission_method:
           $ref: '#/components/schemas/SubmissionMethod'
           nullable: true

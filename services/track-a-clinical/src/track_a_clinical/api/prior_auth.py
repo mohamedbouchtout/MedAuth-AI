@@ -22,9 +22,9 @@ rather than a session follows the same v1 rule" — which also settles the
 credential question these routes inherit unchanged: none in v1, and the actor
 comes from the ``encounters`` row rather than from anything the caller sent.
 
-**Everything here is PHI**, and ``clinical_evidence`` is transcript text. Both
-routes audit, and no log line in this module carries a procedure, a diagnosis or
-an excerpt.
+**Everything here is PHI**, and ``clinical_evidence`` is clinical
+documentation drawn from the provider's note. Both routes audit, and no log line
+in this module carries a procedure, a diagnosis or an excerpt.
 """
 
 from __future__ import annotations
@@ -108,7 +108,7 @@ async def read_prior_auth_request(
     The visit was started outside a SMART launch, and the caller decides what to
     do about it.
 
-    This returns transcript excerpts and a patient identifier, so it is a PHI
+    This returns note excerpts and a patient identifier, so it is a PHI
     read and writes a ``READ_PRIOR_AUTH`` row against the request.
     """
     prior_auth_request, encounter = await _load(session, request_id)
