@@ -1,0 +1,130 @@
+openapi: 3.1.0
+
+# The published contract for services/prior-auth.
+#
+# Kept in step with the FastAPI app by
+# services/prior-auth/tests/unit/api/test_openapi_contract.py, which fails if a
+# route, method or status code here drifts from the application. Update this
+# file in the same change that adds or alters a route.
+#
+# NOTE: this service's principal surface is not HTTP at all. Its work arrives on
+# a Redis subscription — it assembles one prior-authorization bundle per ended
+# encounter (TASK-060) — and OpenAPI has no way to describe a pub/sub consumer.
+# It is documented in prose under `x-redis-subscriptions` below, which is an
+# extension field rather than something a generator understands. The drift test
+# therefore covers `/health` only; what keeps the consumer honest is
+# tests/unit/test_consumer.py and tests/unit/test_consumer_loop.py.
+#
+# TASK-061 adds this service's first real route, POST
+# /prior-auth/{request_id}/submit.
+
+info:
+  title: MedAuth AI — prior-auth
+  version: 0.1.0
+  description: >-
+    Assembles a prior-authorization bundle when a clinical encounter ends
+    (TASK-060). track-a-clinical publishes `session:ended:{session_id}`; this
+    service reads that encounter's generated note, the nudges that fired during
+    it and the patient's chart context, and records one `prior_auth_requests`
+    row with status `pending`.
+
+servers:
+  - url: http://localhost:8007
+    description: Local development (see the port table in CLAUDE.md)
+
+tags:
+  - name: health
+    description: Readiness of this service's backing dependencies.
+
+x-redis-subscriptions:
+  sessions:started:
+    summary: How this service learns that an encounter exists.
+    description: >-
+      Carries `{"session_id": ...}`. Subscribed to at startup so each session's
+      end channel can then be subscribed to by name — never a pattern
+      subscription over `session:ended:*`, which is a channel family keyed on
+      live visits.
+  session:ended:{session_id}:
+    summary: The signal that starts one bundle assembly.
+    description: >-
+      Empty payload — it is a signal, not a data carrier. On receipt this
+      service unsubscribes, then rules the assembly out or completes it. An
+      encounter with no SMART launch behind it, or one that fired no nudge
+      carrying a CPT code, writes no row; the note is waited for with a bounded
+      backoff, because the SOAP generation this races is triggered by the same
+      signal. Redelivery is safe: the insert is `ON CONFLICT DO NOTHING` against
+      `uq_prior_auth_requests_encounter`.
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      operationId: health
+      summary: Service health
+      description: >-
+        Reports whether Redis answers and whether the session-end consumer is
+        running and subscribed. 200 when both are `ok`, 503 when either is not.
+        The body is the standard envelope in both cases — a 503 carries `data`,
+        not `error`, because the request itself succeeded and the flags are the
+        only diagnostic the endpoint has.
+
+        Both flags are fatal rather than advisory: this service has no HTTP
+        traffic to degrade, and a consumer that has stopped means every visit on
+        this pod files nothing while looking exactly like a quiet afternoon.
+
+        Postgres and fhir-integration are deliberately not probed. A readiness
+        probe answers "should traffic come here", and taking the pod out because
+        a peer is briefly unreachable would drop the subscription and guarantee
+        the visits ending in that window are missed entirely.
+
+        Unauthenticated and deliberately unaudited: this is what the Kubernetes
+        readiness probe calls, it exposes no patient data, and CLAUDE.md exempts
+        health endpoints from the hipaa-logger requirement.
+      responses:
+        '200':
+          description: Readiness of Redis and the session-end consumer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: At least one dependency is unavailable. The body names which.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+components:
+  schemas:
+    ComponentStatus:
+      type: string
+      enum: [ok, error]
+
+    HealthData:
+      type: object
+      required: [redis, session_end_consumer]
+      properties:
+        redis:
+          $ref: '#/components/schemas/ComponentStatus'
+          description: >-
+            Whether Redis answers. This service's entire workload arrives on a
+            subscription, so there is no degraded mode.
+        session_end_consumer:
+          $ref: '#/components/schemas/ComponentStatus'
+          description: >-
+            Whether the session-end consumer's task is running and subscribed.
+            One flag for one task: it serves two channel families on a single
+            subscription, and two flags that cannot disagree would imply
+            coverage that does not exist.
+
+    HealthResponse:
+      type: object
+      description: The standard envelope, carrying health flags.
+      required: [data, error]
+      properties:
+        data:
+          oneOf:
+            - $ref: '#/components/schemas/HealthData'
+            - type: 'null'
+        error:
+          type: 'null'

@@ -145,6 +145,10 @@ uv run uvicorn src.main:app --reload --port 8002
 8003  track-a-clinical
 8004  fhir-integration
 8005  nudge-service
+8007  prior-auth
+      Assigned in TASK-060, which gave this service its first HTTP surface —
+      a health endpoint, so a stopped bundle assembler is visible. 8006 was
+      already taken by the CRD Reference Implementation above.
 5432  PostgreSQL
 6379  Redis
 6333  Qdrant
