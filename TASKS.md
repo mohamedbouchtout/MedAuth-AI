@@ -6001,7 +6001,7 @@ logic do not change.
 
 ## Phase 6 — Prior Auth Bundle Assembly
 
-- [ ] **TASK-060:** Bundle assembler
+- [x] **TASK-060:** Bundle assembler
   - Prerequisite: TASK-006 (session:ended signal), TASK-030 (clinical_notes must
     exist before this runs), TASK-040 (clinical_nudges), TASK-052 (FHIR patient data)
   - "At most one clinical_note per encounter" is an enforced invariant, not an
@@ -6124,6 +6124,41 @@ logic do not change.
   - **Test:** an encounter with `launch_id IS NULL` writes no row and logs a
     warning naming `ENCOUNTER_NOT_LINKED_TO_EHR`, without waiting out the retry
     backoff
+  - Built (123 tests, 98% coverage). Notes on what the implementation settled
+    that this text did not:
+    - **Excerpt matching has two halves, and the second was found by a test.**
+      Matching on the procedure alone finds the sentences that *order* it and
+      misses the ones that *justify* it — a note records "six weeks of physical
+      therapy" as history and need never mention the MRI, and that sentence is
+      exactly what a payer evaluates a conservative-therapy criterion against.
+      So a sentence is carried when it names the procedure or its CPT code, or
+      when it carries at least two of the criterion's own terms. Excerpting is
+      per criterion rather than once per procedure, for the same reason: each
+      criterion is evaluated on its own, and a shared blob would offer every
+      criterion the evidence for all the others.
+    - **The evidence entry shape was already fixed by TASK-054**, which consumes
+      this column: `{"text": str, "criterion": str | None}`. Not re-invented
+      here — that task's `StoredEvidence` is what reads these rows.
+    - **A nudge with no CPT code is excluded from `procedures` and counted in
+      the log.** `PriorAuthProcedure.cpt_code` is required at the submission
+      boundary, so a keyword-only nudge (TASK-044) would fail there rather than
+      here. An encounter whose whole nudge set is uncoded produces no bundle.
+    - **A missing payer name does not block the bundle**, unlike a missing
+      launch. TASK-054's route already refuses a request it cannot make
+      conformant, with a named error a human can act on, and discarding the
+      assembled evidence would lose the encounter's findings to a gap a
+      provider can still fill. Logged at WARNING.
+    - **`services/prior-auth` moved to a named package** (`src/prior_auth/`) and
+      declares `medauth-track-a-clinical`, because it imports the shared mapped
+      classes. `.github/scripts/detect-changed-members.sh` re-runs this service
+      when `track-a-clinical/src` changes, alongside track-b-rag and
+      policy-scraper.
+    - **Port 8007, and `docs/api/prior-auth.yaml`.** The HTTP surface is
+      `GET /health` only — the work arrives on a subscription, and TASK-061 adds
+      the first real route. The spec documents the two Redis subscriptions under
+      an `x-redis-subscriptions` extension, since OpenAPI cannot express them,
+      and the drift test asserts the documented channels are the ones the
+      consumer actually holds.
 
 - [ ] **TASK-061:** Submission router
   - Service: `services/prior-auth`
