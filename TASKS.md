@@ -6016,9 +6016,97 @@ logic do not change.
     `/fhir/patient/{patient_id}/context` from TASK-052)
   - Assembles `prior_auth_bundle`: patient, provider, procedures (from nudges'
     procedure_name/cpt_code), diagnoses (from clinical_note's icd10_codes),
-    clinical evidence (relevant transcript excerpts — not the full transcript,
-    just the segments tied to flagged procedures)
+    clinical evidence (from the SOAP note and the nudges — see the next bullet,
+    which corrects what this task reads and from where)
+  - **`clinical_evidence` is built from the SOAP note text plus each nudge's
+    `nudge_message` and `missing_criteria` — never from raw transcript
+    excerpts.** An earlier draft of this task said "relevant transcript
+    excerpts ... the segments tied to flagged procedures". That is corrected
+    here, and the reasoning is written down because a future reader will
+    otherwise see only that the transcript was not used and assume it was
+    merely out of reach.
+    - **The note is the better artifact, and that is the deciding reason.** A
+      prior-auth bundle asserts to a payer what the provider documented. The
+      SOAP note is precisely that: the provider reviews it and edits it through
+      TASK-032's `PATCH /notes/{session_id}`, and attests to it explicitly with
+      `reviewed_by_provider`. A raw conversational excerpt is none of those
+      things — nobody signed it, it is not framed for a payer, and it carries
+      whatever else was said in the room. This is the same rule CLAUDE.md
+      already applies to codes leaving this system under "Writing clinical data
+      out to the EHR": nothing a machine merely surfaced goes out as though a
+      provider stated it. Evidence is held to that standard too.
+    - **A new PHI store for transcript text does not clear the bar.** Making
+      excerpts available at all would mean persisting encounter speech, which
+      TASK-030 deliberately declined to do: `TranscriptBuffer`
+      (`services/track-a-clinical/src/track_a_clinical/consumer.py:121`) is
+      in-memory by design, and that task accepts losing a visit in flight to a
+      restart rather than putting raw speech in a second place for the length
+      of every visit. Reversing a shipped, deliberate constraint to serve one
+      downstream consumer would need to buy something the alternative cannot,
+      and it does not — the alternative needs no new store at all.
+    - **The transcript is also simply unreachable here, which is the lesser
+      reason and not the one to cite.** The buffer is dropped only once the
+      note row commits (`consumer.py:489`), it lives in another service's
+      process, and no route exposes it. Since this task waits for that same
+      row, it starts looking exactly when the last copy is gone. Note the
+      ordering: even if it *were* reachable, the bullets above still decide it.
+    - **So do not "fix" this later by adding transcript persistence.** The note
+      is not a fallback for a transcript we cannot reach; it is the source this
+      task should have named in the first place.
+    - **The same `source` filter applies as to any outbound clinical data.**
+      Diagnoses are filtered to `llm-extraction` and `provider-accepted`
+      entries per CLAUDE.md's shape contract — a `comprehend-medical` entry is
+      a suggestion nobody stated, and a bundle may not claim one.
   - Stores in `prior_auth_requests` table with status = 'pending'
+  - **One bundle per encounter, enforced exactly the way TASK-030 enforces one
+    note.** Add a UNIQUE constraint on `prior_auth_requests.encounter_id` by
+    migration — authored in `track-a-clinical` per the migration-ownership rule
+    — and insert through `ON CONFLICT DO NOTHING`. Redis pub/sub redelivery, a
+    consumer reconnect, or a retry of the backoff loop below would otherwise
+    leave a second bundle for one encounter, and nothing would raise. This is
+    TASK-030's fix applied to the identical problem shape rather than a second
+    idempotency design; a duplicate prior-auth bundle deserves at least that
+    much rigour, since it can become a duplicate submission to a payer.
+    - **`DO NOTHING`, not `DO UPDATE`,** for TASK-030's reason and one stronger
+      one of its own: the first bundle assembled is the one to keep, a retry
+      has no better information than the attempt it follows, and by the time a
+      duplicate signal arrives TASK-061 may already have submitted the row —
+      overwriting `submission_method`, `payer_reference_number`, `submitted_at`
+      or `payer_outcome` would discard what a payer actually said.
+    - **A suppressed insert assembled no bundle and audits nothing**, matching
+      TASK-030's rule for a suppressed note.
+    - **TASK-090 is unaffected.** That task makes `encounter_id` nullable and
+      adds `source`; Postgres treats NULLs as distinct in a unique index, so
+      manually-submitted bundles (`encounter_id IS NULL`) never conflict with
+      each other or with this constraint.
+  - **No launch, no bundle — a NULL `encounters.launch_id` writes no row.**
+    Patient and coverage context is reachable only through
+    `GET /fhir/patient/{patient_id}/context`, which needs the EHR credential in
+    the `X-MedAuth-Launch-Id` header. A visit started outside a SMART launch has
+    none. Assemble nothing rather than a bundle without it: a row with no
+    patient or coverage context renders as an ordinary pending request on
+    TASK-072's dashboard and is unsubmittable at the payer, which is a
+    plausible-looking artifact that silently cannot be used. A visible absence
+    prompts a human; a complete-looking one does not. Same reasoning as a
+    payer's silence never being a negative determination.
+    - **It reuses TASK-053's vocabulary but cannot reuse its surface.** That
+      task raises 422 `ENCOUNTER_NOT_LINKED_TO_EHR`
+      (`services/fhir-integration/src/api/fhir.py:884`) on a synchronous route
+      with a client to answer. This is a Redis consumer with no request behind
+      it and nobody to return a status to, so the shared part is the name: log
+      at WARNING naming `ENCOUNTER_NOT_LINKED_TO_EHR` verbatim, so an operator
+      grepping either service finds one name for one situation.
+    - **The column checked is `launch_id`, not `ehr_encounter_id`, and that is
+      deliberate.** TASK-053 needs a chart entry to attach a document to, so it
+      checks `ehr_encounter_id`; this task needs a credential to fetch
+      coverage, so it checks `launch_id`. `POST /sessions/start` stores each on
+      its own and only fetches coverage when both are present, so the two are
+      independently nullable and neither is a proxy for the other. Check the
+      one this task actually needs.
+    - **This is not the retry case below and must not enter it.** A missing
+      note is "we do not know yet"; a NULL `launch_id` is a settled fact on the
+      first read. Waiting 14 seconds to re-learn it would only delay the
+      warning.
   - Note: this task has a soft race condition — if session:ended fires before
     TASK-030's SOAP generation finishes (Sonnet call can take a few seconds),
     the clinical_note won't exist yet. Handle by retrying with backoff (3
@@ -6026,6 +6114,16 @@ logic do not change.
   - **Test:** assemble bundle from test encounter data, verify all fields populated
   - **Test:** publish session:ended before clinical_notes row exists, verify retry
     behavior succeeds once the row appears
+  - **Test:** `clinical_evidence` is composed from the note's SOAP sections and
+    the nudges' `nudge_message`/`missing_criteria`, and no code path reads a
+    transcript — a regression guard on the correction above
+  - **Test:** a `comprehend-medical` ICD-10 entry on the note never reaches
+    `diagnoses`; the same code re-sourced as `provider-accepted` does
+  - **Test:** publish `session:ended:{session_id}` twice, verify exactly one
+    `prior_auth_requests` row and exactly one audit row
+  - **Test:** an encounter with `launch_id IS NULL` writes no row and logs a
+    warning naming `ENCOUNTER_NOT_LINKED_TO_EHR`, without waiting out the retry
+    backoff
 
 - [ ] **TASK-061:** Submission router
   - Service: `services/prior-auth`
