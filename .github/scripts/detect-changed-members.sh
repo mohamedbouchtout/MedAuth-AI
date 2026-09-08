@@ -109,6 +109,10 @@ main() {
       if changed_matches '^services/track-a-clinical/src/'; then
         selected+=("services/track-b-rag")
         selected+=("services/policy-scraper")
+        # prior-auth joined them in TASK-060: its assembler reads ClinicalNote
+        # and ClinicalNudge and writes PriorAuthRequest, all mapped one service
+        # over, and its ON CONFLICT names a constraint declared there.
+        selected+=("services/prior-auth")
         # fhir-integration declares it too, but for a different reason and only
         # as a dev dependency: TASK-053's note write-back reads two of this
         # service's payloads over HTTP and mirrors their shapes, and
