@@ -8,8 +8,14 @@ dependencies = [
     "fastapi>=0.115",
     "httpx>=0.28",
     "medauth-api-envelope",
+    # TASK-061 gave this service its first browser-facing route: TASK-072's
+    # dashboard resubmits a denied request through it. Per CLAUDE.md, CORS is
+    # installed when a service grows such a route, from the shared package
+    # rather than hand-rolled per service.
+    "medauth-cors-policy",
     "medauth-fhir-types",
     "medauth-hipaa-logger",
+    "medauth-payer-vocab",
     # The shared SQLAlchemy models. TASK-060 reads clinical_notes and
     # clinical_nudges and writes prior_auth_requests, and CLAUDE.md's "Where the
     # shared SQLAlchemy models live" requires importing the mapped classes from

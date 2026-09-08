@@ -21,6 +21,8 @@ from typing import Final
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from cors_policy import AllowedOrigins
+
 #: ``fhir-integration``'s base URL, from the local dev port table in CLAUDE.md.
 #: The assembler reads the patient's demographics, coverage and conditions
 #: through it. The default exists so local dev works unset; code reads the
@@ -47,6 +49,26 @@ DEFAULT_FHIR_INTEGRATION_TIMEOUT_SECONDS: Final = 15.0
 #: generations can widen it without a release.
 DEFAULT_NOTE_RETRY_DELAYS: Final = (2.0, 4.0, 8.0)
 
+#: ``track-a-clinical``'s base URL, from the local dev port table in CLAUDE.md.
+#: The router reads a request's payer and launch through it. The default exists
+#: so local dev works unset; code reads the setting and never a literal.
+DEFAULT_TRACK_A_CLINICAL_URL: Final = "http://localhost:8003"
+
+#: How long to wait for that read. Shorter than the FHIR budget above because
+#: the call behind it is one query against our own database on our own network,
+#: not three round trips to an EHR — and because a person is waiting: TASK-072's
+#: dashboard calls the router from a browser. **A round-number default, not a
+#: measurement.**
+DEFAULT_TRACK_A_CLINICAL_TIMEOUT_SECONDS: Final = 5.0
+
+#: How long to wait for ``fhir-integration`` to submit to a payer. Generous
+#: because the work behind it is a round trip to a payer's own endpoint, which is
+#: outside our network and outside our control, and because a submission that
+#: timed out here may still have been taken in — an ambiguity the submitter
+#: already refuses to resolve by retrying. **A round-number default, not a
+#: measurement**; the value to watch is a real payer's tail latency.
+DEFAULT_SUBMISSION_TIMEOUT_SECONDS: Final = 30.0
+
 
 class Settings(BaseSettings):
     """Environment-backed settings for bundle assembly."""
@@ -72,6 +94,29 @@ class Settings(BaseSettings):
     #: give up", which is a legitimate configuration rather than a broken one:
     #: the number of attempts is one more than the number of delays.
     note_retry_delays: tuple[float, ...] = DEFAULT_NOTE_RETRY_DELAYS
+
+    #: Where a request's payer and launch are read from, and where a submission
+    #: result is recorded. Over HTTP rather than by import for the reason above.
+    track_a_clinical_url: str = Field(
+        default=DEFAULT_TRACK_A_CLINICAL_URL,
+        min_length=1,
+    )
+    track_a_clinical_timeout_seconds: float = Field(
+        default=DEFAULT_TRACK_A_CLINICAL_TIMEOUT_SECONDS,
+        gt=0,
+    )
+    submission_timeout_seconds: float = Field(
+        default=DEFAULT_SUBMISSION_TIMEOUT_SECONDS,
+        gt=0,
+    )
+
+    #: Empty by default, so an unconfigured deployment answers no browser rather
+    #: than trusting one nobody chose — a localhost origin baked in as a default
+    #: would ship to production the moment the variable was forgotten. This
+    #: service grew a browser-facing route in TASK-061: TASK-072's dashboard
+    #: resubmits a denied request through it. See CLAUDE.md, "CORS and browser
+    #: reachability".
+    cors_allowed_origins: AllowedOrigins = ()
 
 
 @lru_cache(maxsize=1)
