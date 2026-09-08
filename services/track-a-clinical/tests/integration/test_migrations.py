@@ -182,6 +182,38 @@ async def test_two_nudges_with_no_code_coexist(engine: AsyncEngine) -> None:
         await connection.rollback()
 
 
+# --- one prior-auth bundle per encounter (TASK-060, migration 0008) ---------
+#
+# Asserted as behaviour for the same reason the nudge index above is: the
+# assembler's ON CONFLICT names this constraint, and a constraint that exists
+# under a different name or on a different column would let the insert raise
+# instead of quietly discarding a redelivered signal.
+
+
+def _add_bundle(connection: sa.Connection, encounter_id: str) -> None:
+    connection.execute(
+        sa.text(
+            "INSERT INTO prior_auth_requests (encounter_id, status) "
+            "VALUES (:encounter_id, 'pending')"
+        ),
+        {"encounter_id": encounter_id},
+    )
+
+
+async def test_a_second_bundle_for_the_same_encounter_is_rejected(engine: AsyncEngine) -> None:
+    """A redelivered session:ended signal cannot produce a second submission."""
+
+    def attempt(connection: sa.Connection) -> None:
+        encounter_id = _an_encounter(connection)
+        _add_bundle(connection, encounter_id)
+        with pytest.raises(sa.exc.IntegrityError):
+            _add_bundle(connection, encounter_id)
+
+    async with engine.begin() as connection:
+        await connection.run_sync(attempt)
+        await connection.rollback()
+
+
 async def test_version_table_is_namespaced_and_the_default_is_unused(
     engine: AsyncEngine,
 ) -> None:
