@@ -873,8 +873,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiResponse_NoneType_'
         '409':
-          description: 'This request has already been submitted (`PRIOR_AUTH_ALREADY_SUBMITTED`). Refused
-            before the payer is called: a payer receiving one request twice may open two reviews.'
+          description: 'This request is not in a state that may be submitted (`PRIOR_AUTH_ALREADY_SUBMITTED`)
+            — the payer is still holding it. Refused before the payer is called: a payer receiving
+            one request twice may open two reviews. A `denied` or `error` request is resubmittable
+            and is not refused here.'
           content:
             application/json:
               schema:

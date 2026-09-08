@@ -148,8 +148,13 @@ class StoredPriorAuthRequest(BaseModel):
         procedures: What is being requested. Empty is not a submittable request.
         diagnoses: The diagnoses justifying it, unfiltered — the builder filters.
         clinical_evidence: The documentation offered against the criteria.
-        submitted_at: When it was transmitted, or None. **Non-null is what makes
-            a repeat submission refusable** before a payer is ever called.
+        submitted_at: When it was transmitted, or None.
+        submittable: Whether the request may be sent to a payer now. **Computed
+            by the owning service, never re-derived here** — the rule is "never
+            submitted, or terminal and unsuccessful", and this route used to
+            reason from ``submitted_at`` alone, which refused every legitimate
+            resubmission of a denied request (TASK-061). Defaults to True so an
+            older payload without the field behaves as it did.
         payer_reference_number: The reference from a submission already made.
     """
 
@@ -166,6 +171,7 @@ class StoredPriorAuthRequest(BaseModel):
     diagnoses: list[StoredDiagnosis] | None = None
     clinical_evidence: list[StoredEvidence] | None = None
     submitted_at: str | None = None
+    submittable: bool = True
     payer_reference_number: str | None = None
 
 

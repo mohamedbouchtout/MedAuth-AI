@@ -112,6 +112,29 @@ RESUBMITTABLE_STATUSES: Final = frozenset(
 )
 
 
+def is_submittable(request: PriorAuthRequest) -> bool:
+    """Return whether this request may be sent to a payer now.
+
+    **The one definition of the rule**, so that no caller re-derives it. Before
+    TASK-061 the rule was "``submitted_at`` is NULL" and every caller could spell
+    it for itself; now it is "never submitted, or terminal and unsuccessful", and
+    a caller still checking the old way refuses every legitimate resubmission.
+    ``fhir-integration`` did exactly that, which is why its payload now carries
+    this as a computed flag rather than the raw timestamp to reason from.
+
+    It is deliberately the same predicate :func:`record_submission`'s ``WHERE``
+    clause applies. This one answers in advance and can be raced; that one is the
+    guarantee. Both come from :data:`RESUBMITTABLE_STATUSES`.
+
+    Args:
+        request: The row to judge.
+
+    Returns:
+        True when a submission may be attempted.
+    """
+    return request.submitted_at is None or request.status in RESUBMITTABLE_STATUSES
+
+
 async def record_submission(
     session: AsyncSession,
     *,

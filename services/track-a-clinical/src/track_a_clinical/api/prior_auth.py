@@ -40,7 +40,11 @@ from api_envelope import ApiHTTPException, ApiResponse, error_responses
 from hipaa_logger import AuditAction
 from track_a_clinical import audit, prior_auth
 from track_a_clinical.api.dependencies import get_db_session
-from track_a_clinical.api.schemas import PriorAuthRequestData, RecordSubmissionRequest
+from track_a_clinical.api.schemas import (
+    PriorAuthRequestData,
+    PriorAuthRoutingData,
+    RecordSubmissionRequest,
+)
 from track_a_clinical.models import Encounter, PriorAuthRequest
 
 logger = logging.getLogger(__name__)
@@ -131,6 +135,50 @@ async def read_prior_auth_request(
 
     return ApiResponse[PriorAuthRequestData](
         data=PriorAuthRequestData.from_rows(request=prior_auth_request, encounter=encounter)
+    )
+
+
+@router.get(
+    "/{request_id}/routing",
+    response_model=ApiResponse[PriorAuthRoutingData],
+    summary="Read what a submission path is chosen from",
+    response_description="The payer, the launch, and whether the request may be sent.",
+    responses=error_responses(
+        status.HTTP_404_NOT_FOUND,
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        descriptions=REQUEST_ERROR_DESCRIPTIONS,
+    ),
+)
+async def read_prior_auth_routing(
+    request_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ApiResponse[PriorAuthRoutingData]:
+    """Return the three facts a submission router chooses a path from.
+
+    Which payer, whether the request may be sent, and which SMART launch holds
+    the credential — and nothing else. TASK-061's router in ``prior-auth`` is the
+    caller.
+
+    **This route writes no audit row, and that is the rule rather than an
+    exception to it.** CLAUDE.md's constraint is an "if and only if": a route
+    audits when it touches PHI, and a route over non-clinical data must *not*,
+    because the audit table's value comes from every row in it being a PHI
+    access. The response carries no patient identifier, no procedure, no
+    diagnosis and no note excerpt. Reading it through
+    ``GET /prior-auth/{request_id}`` instead — which does audit, correctly, since
+    it returns clinical evidence — would have written a ``READ_PRIOR_AUTH`` row
+    for an access that read no clinical content, and pulled note excerpts across
+    the network for a decision that never looks at them.
+
+    **So do not add a clinical field to this payload.** The moment one appears
+    the route owes an audit row, and the two would then disagree silently. A
+    caller that needs clinical content wants the full route.
+
+    Takes no session token in v1, on the same terms as every other route here.
+    """
+    prior_auth_request, encounter = await _load(session, request_id)
+    return ApiResponse[PriorAuthRoutingData](
+        data=PriorAuthRoutingData.from_rows(request=prior_auth_request, encounter=encounter)
     )
 
 
