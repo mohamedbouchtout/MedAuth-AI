@@ -507,7 +507,7 @@ paths:
         requested, the diagnoses justifying them, the clinical evidence offered
         against the payer's criteria, the payer's own name and the member id, and
         the two EHR identifiers that say who and which visit — plus whether this
-        request has already been submitted.
+        request has already been submitted and what the payer said.
 
 
         **Server-to-server.** Its caller is `fhir-integration`'s prior-auth
@@ -623,8 +623,11 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '409':
           description: >-
-            This request has already been submitted
-            (`prior_auth_already_submitted`). Refused rather than recorded twice.
+            This request is not in a state that may be submitted
+            (`prior_auth_already_submitted`) — the payer is still holding it.
+            Refused rather than recorded twice: a payer that receives one
+            request twice may open two reviews. A `denied` or `error` request
+            may be resubmitted, and is recorded as a new attempt (TASK-061).
           content:
             application/json:
               schema:

@@ -22,6 +22,7 @@ from __future__ import annotations
 import datetime
 import logging
 import uuid
+from typing import Final
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,10 +30,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from hipaa_logger import AuditAction
 from track_a_clinical import audit
 from track_a_clinical.models import (
+    PRIOR_AUTH_STATUS_DENIED,
     PRIOR_AUTH_STATUS_ERROR,
     PRIOR_AUTH_STATUS_SUBMITTED,
     Encounter,
     PriorAuthRequest,
+    PriorAuthSubmissionAttempt,
     SubmissionMethod,
     SubmissionOutcome,
 )
@@ -95,6 +98,20 @@ async def load_request(
     return request, encounter
 
 
+#: The statuses a request may be resubmitted from. Both are terminal and
+#: unsuccessful: ``denied`` means the payer decided against it, and ``error``
+#: means the payer refused to take it in at all, so in neither case is anything
+#: pending. Deliberately **not** ``submitted`` — a request the payer is still
+#: holding must not be asked again, which is the whole point of the guard this
+#: replaces.
+RESUBMITTABLE_STATUSES: Final = frozenset(
+    {
+        PRIOR_AUTH_STATUS_DENIED,
+        PRIOR_AUTH_STATUS_ERROR,
+    }
+)
+
+
 async def record_submission(
     session: AsyncSession,
     *,
@@ -106,17 +123,30 @@ async def record_submission(
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> PriorAuthRequest | None:
-    """Record that this request was transmitted, and what came back — once.
+    """Record that this request was transmitted, and what came back.
 
-    **The guard is the ``WHERE`` clause, not a prior read**, exactly as it is for
-    the note write-back and for the same reason: a caller that checks and then
-    updates leaves a window in which a second caller does the same, and both
-    submit. A duplicate prior authorization is not untidiness — a payer receiving
-    one request twice may open two reviews, and the second reference number would
-    overwrite the first here with nothing recording that two exist.
+    Writes two things in one transaction: a new
+    ``prior_auth_submission_attempts`` row holding *this* attempt's result, and
+    the parent's own columns refreshed to the latest attempt. Both, because they
+    answer different questions — the history, and the current state — and a
+    reader of either would otherwise be told half the truth.
 
-    Returning None is this function working rather than failing: somebody else
-    submitted first, and the caller turns that into a 409.
+    **The guard is still a ``WHERE`` clause, not a prior read**, exactly as it
+    was and for the same reason: a caller that checks and then updates leaves a
+    window in which a second caller does the same, and both submit. What changed
+    is the predicate. It used to be ``submitted_at IS NULL``, which made every
+    repeat impossible including a deliberate one; it is now "never submitted, or
+    sitting in a terminal unsuccessful state", so TASK-072 can resubmit a denied
+    request while an accidental double-submit of a live one is refused exactly as
+    before.
+
+    That update is also what serialises concurrent callers: it takes the row's
+    lock, so a second caller waits and then re-evaluates the predicate against
+    what the first committed. The unique constraint on
+    ``(request_id, attempt_number)`` is the backstop beneath it.
+
+    Returning None is this function working rather than failing: the request was
+    not in a state that may be submitted, and the caller turns that into a 409.
 
     **``payer_reference_number`` may legitimately be ``None``.** A queued answer
     often carries no reference at all — ``ClaimResponse.preAuthRef`` is 0..1 and
@@ -124,7 +154,7 @@ async def record_submission(
     failed submission and must not be treated as one.
 
     Args:
-        session: The session whose transaction the update and its audit join.
+        session: The session whose transaction the writes and their audit join.
         request: The row to record against, already loaded.
         encounter: The request's encounter — its ``provider_id`` is the audit
             actor, per the rule that an actor comes from the row rather than
@@ -136,26 +166,30 @@ async def record_submission(
         user_agent: Client user agent, for the audit row.
 
     Returns:
-        The updated request, or None when it had already been submitted.
+        The updated request, or None when it was not in a submittable state.
     """
     # Read before the statement runs: ``session.rollback()`` below expires every
     # instance in the session, and touching an attribute afterwards would lazy
     # load it — which raises MissingGreenlet in an async session and would turn
     # this ordinary refusal into a 500. Same trap as ``notes.record_ehr_document_ref``.
     row_id = request.id
+    submitted_at = datetime.datetime.now(datetime.UTC)
 
     updated_id = await session.scalar(
         sa.update(PriorAuthRequest)
         .where(
             PriorAuthRequest.id == request.id,
-            PriorAuthRequest.submitted_at.is_(None),
+            sa.or_(
+                PriorAuthRequest.submitted_at.is_(None),
+                PriorAuthRequest.status.in_(RESUBMITTABLE_STATUSES),
+            ),
         )
         .values(
             status=status_for_outcome(outcome),
             submission_method=submission_method.value,
             payer_outcome=outcome.value,
             payer_reference_number=payer_reference_number,
-            submitted_at=datetime.datetime.now(datetime.UTC),
+            submitted_at=submitted_at,
         )
         .returning(PriorAuthRequest.id)
     )
@@ -167,10 +201,29 @@ async def record_submission(
         # the payer.
         await session.rollback()
         logger.info(
-            "Prior auth request %s has already been submitted; this record was refused",
+            "Prior auth request %s is not in a submittable state; this record was refused",
             row_id,
         )
         return None
+
+    # Counted after the update above, so the row lock is already held and no
+    # concurrent caller can be choosing the same number. The unique constraint
+    # is what makes that a guarantee rather than an expectation.
+    attempts_so_far = await session.scalar(
+        sa.select(sa.func.count())
+        .select_from(PriorAuthSubmissionAttempt)
+        .where(PriorAuthSubmissionAttempt.request_id == row_id)
+    )
+    session.add(
+        PriorAuthSubmissionAttempt(
+            request_id=row_id,
+            attempt_number=(attempts_so_far or 0) + 1,
+            submission_method=submission_method.value,
+            payer_outcome=outcome.value,
+            payer_reference_number=payer_reference_number,
+            submitted_at=submitted_at,
+        )
+    )
 
     await audit.audit_prior_auth_access(
         session,

@@ -26,6 +26,9 @@ from track_a_clinical.models.base import Base, JsonObject, timestamp_column, uui
 
 if TYPE_CHECKING:
     from track_a_clinical.models.encounter import Encounter
+    from track_a_clinical.models.prior_auth_submission_attempt import (
+        PriorAuthSubmissionAttempt,
+    )
 
 #: Lifecycle used by TASK-060/061. Free text rather than an enum so a payer-specific
 #: state can be added without a migration.
@@ -39,6 +42,17 @@ PRIOR_AUTH_STATUS_DENIED = "denied"
 #: comfortable value and it would be false: a caller reading it would wait for a
 #: decision on a request the payer never took in.
 PRIOR_AUTH_STATUS_ERROR = "error"
+#: No payer API can take this request, so a person submits it. Added by
+#: TASK-061, whose router asks one question — is this payer inside the
+#: CMS-0057-F mandate — and hands everything else to a human rather than
+#: pretending an automated path exists. Most commercial employer-sponsored plans
+#: land here, so it is the ordinary case and not a failure.
+#:
+#: **Not the same word as TASK-090's ``source='manual_note'``.** That says a
+#: bundle *came from* a pasted note; this says a bundle must *leave* by hand. A
+#: row can be either, both, or neither, and conflating them puts requests in the
+#: wrong queue.
+PRIOR_AUTH_STATUS_MANUAL_REQUIRED = "manual-submission-required"
 
 
 class SubmissionMethod(StrEnum):
@@ -213,6 +227,16 @@ class PriorAuthRequest(Base):
     encounter: Mapped[Encounter] = relationship(
         "Encounter",
         back_populates="prior_auth_requests",
+    )
+
+    #: Every transmission of this request, in the order they were made. The
+    #: columns above are the *latest* attempt's result; this is the history, and
+    #: it is what makes a resubmission a new fact rather than an overwrite. See
+    #: :mod:`track_a_clinical.models.prior_auth_submission_attempt` (TASK-061).
+    submission_attempts: Mapped[list[PriorAuthSubmissionAttempt]] = relationship(
+        "PriorAuthSubmissionAttempt",
+        back_populates="request",
+        order_by="PriorAuthSubmissionAttempt.attempt_number",
     )
 
     @validates("payer_outcome")

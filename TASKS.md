@@ -6163,11 +6163,226 @@ logic do not change.
 - [ ] **TASK-061:** Submission router
   - Service: `services/prior-auth`
   - `POST /prior-auth/{request_id}/submit`
-  - Checks payer capabilities: supports FHIR PAS? → calls fhir-integration's
-    `/fhir/prior-auth` (TASK-054, which itself routes to the right adapter).
-    Otherwise → CoverMyMeds API directly from this service.
-  - Updates `prior_auth_requests.status` and `submission_method`
-  - **Test:** mock both submission paths, verify correct one chosen per payer config
+  - Prerequisite: TASK-060 (which writes the rows this submits) and TASK-054
+    (the route this calls). Both are built.
+
+  - **This task's substance is the routing model, not the route.** The endpoint
+    is thin; what it decides is which of three outcomes a request gets, and that
+    decision was previously spread across this task's own text, TASK-054's
+    shipped adapter layer, and a payer-capability set living in another
+    service's private module. It is settled here, once, and cited rather than
+    re-derived.
+
+  - **Routing is on payer capability only. This service never speaks
+    CoverMyMeds.** An earlier draft of this task said "otherwise → CoverMyMeds
+    API directly from this service", written before TASK-054 existed. TASK-054
+    shipped CoverMyMeds *inside* `fhir-integration`, as `AthenaAdapter`'s
+    override of `submit_prior_auth()`, with `COVERMYMEDS_BASE_URL` and
+    `COVERMYMEDS_API_KEY` bound into that service's `Settings`. Building the old
+    wording would put a second CoverMyMeds client and a second copy of a vendor
+    credential in a second service — the duplication CLAUDE.md's shared-code rule
+    exists to prevent, with a credential's blast radius attached to it.
+    The two tasks were also routing on **two different axes**, which is what made
+    them look compatible: TASK-054 routes by *EHR* (Athenahealth publishes no
+    FHIR PAS, so its adapter delivers by CoverMyMeds instead), and this task
+    routes by *payer* (this payer publishes no PAS endpoint at all). They
+    compose, and the composition is one-directional:
+    - **This service asks one question: does this payer support PAS?** If yes,
+      it always calls `POST /fhir/prior-auth` and stops thinking. Which
+      *transport* that becomes — FHIR PAS against the payer's endpoint, or the
+      EHR's CoverMyMeds fallback — is the adapter's business, already built, and
+      is deliberately invisible here.
+    - **`submission_method` is therefore not this router's to predict.** It is
+      whatever the adapter reports and `PATCH /prior-auth/{request_id}/submission`
+      records. A router that guessed `fhir-pas` up front and was answered
+      `covermymeds` would be asserting a transport it did not choose.
+
+  - **Payer PAS capability comes from `packages/payer-vocab`, promoted there in
+    this task.** `track_b_rag.crd.CRD_SUPPORTED_PAYERS` is the right shape — a
+    literal frozenset of canonical slugs, not a configuration file, for the
+    reason its own comment gives — but it is a private module of another
+    service, and this task is its second consumer. That is the same trigger
+    already applied to `api-envelope`, `session-auth` and `payer-vocab` itself:
+    extract on the second consumer, in the task that becomes it, rather than
+    copying the literal into a second private module where the two spellings
+    then drift.
+    - Move the set into `packages/payer-vocab`, and have `track_b_rag.crd`
+      import it rather than defining its own. One definition, not two agreeing
+      ones — CLAUDE.md's "prefer collapsing a duplication to detecting its
+      drift", which is what `AuditAction` already did to the action vocabulary.
+    - **CMS-0057-F is the same fact for both readers, and that is why one set
+      serves both.** A payer covered by the mandate must expose CRD *and* PAS;
+      track-b-rag asks it to decide whether to consult a CRD endpoint mid-visit,
+      this task asks it to decide whether a submission has an automated path.
+      Same predicate, two questions. If a payer is ever found to publish one and
+      not the other, that is the moment to split the set in two — and the split
+      is then a real observation rather than a speculative generality, exactly
+      as the vocabulary's own alias-table rule requires.
+    - The set keeps its slug discipline: canonical `payer_vocab` slugs, never
+      display names. The router normalises `prior_auth_requests.payer_name`
+      (which is deliberately a display name, since it is what goes to the payer)
+      through `normalize_payer()` before asking.
+
+  - **A payer with no PAS capability is flagged for manual submission, not
+    automated by another route.** This is the third outcome, and naming it is
+    the point of routing on capability alone:
+    - Payer supports PAS → call `POST /fhir/prior-auth`; relay what it says.
+    - Payer does not → the request is recorded as needing manual submission and
+      nothing is transmitted. It is not an error, and it must not read as one:
+      the great majority of commercial employer-sponsored plans are outside the
+      mandate, which is the same population CLAUDE.md's two-tier policy lookup
+      already says takes the RAG path alone.
+    - **422 `PRIOR_AUTH_PATH_NOT_CONFIGURED` from TASK-054's route is the same
+      outcome arriving one layer down** — the payer takes PAS but this EHR
+      delivers by CoverMyMeds and nothing configured it. Map it onto the manual
+      case rather than onto a generic failure, and never onto a retry: no amount
+      of retrying configures a credential.
+    - **Silence is never "submitted".** The failure direction this whole
+      repository refuses — a payer's silence read as "no authorization
+      required", a `validation: null` read as "checked and rejected" — is the
+      same one here: a request nobody transmitted must never be
+      indistinguishable from one a payer is holding.
+
+  - **The router never writes a submission result.** An earlier draft of this
+    task said it updates `status` and `submission_method`; that was written
+    before TASK-054, whose route already calls back into
+    `PATCH /prior-auth/{request_id}/submission` on `track-a-clinical` —
+    documented there as *the only writer* of `submission_method`,
+    `payer_outcome` and `payer_reference_number`, write-once by its own `WHERE`
+    clause. A second writer would defeat the constraint that makes a duplicate
+    submission refusable. On the PAS path this task chooses a route and relays
+    what came back; recording it is already owned.
+    - **The one thing it does record is its own routing outcome**, and only in
+      the manual case: a payer with no automated path leaves `status` at
+      `manual-submission-required` (a new value in the free-text status
+      vocabulary, which exists to be extended without a migration). That is not
+      the payer's answer to a submission — it is our answer to "can this be
+      submitted automatically at all" — so it is a different fact from the
+      columns above, written by the only code that knows it, and it touches
+      none of them. `submission_method` stays NULL, because nothing transmitted
+      anything.
+    - **It writes that directly, through the shared mapped classes**, exactly as
+      TASK-060 writes the row in the first place. `fhir-integration` goes over
+      HTTP because it deliberately holds no database connection; this service
+      holds one, and CLAUDE.md's migration-ownership rule is explicit that
+      shared write access is normal and only migration authorship is
+      centralised.
+    - **`manual-submission-required` is not TASK-090's `source='manual_note'`,
+      and the two words must not be collapsed.** That task's `source` says where
+      a bundle *came from* — a pasted note rather than a live encounter — and is
+      set at assembly. This status says how a bundle must *leave*: no payer API
+      can take it, so a person submits it. A bundle can be any combination of
+      the two, and a reader who assumes one implies the other will show a
+      provider the wrong queue.
+    - **A TASK-090 bundle has no encounter, so it has no launch, so it always
+      takes the manual path.** That task says this router is "unchanged" for
+      manually-sourced bundles, and it is — but only because the launch lookup
+      below resolves nothing for a NULL `encounter_id` and the manual outcome
+      is already the answer for anything with no automated route. Written down
+      because "unchanged" is otherwise an easy claim to read as "already
+      works", and the reason it works is this bullet rather than luck.
+
+  - **`launch_id` is read off the `encounters` row this service already
+    queries**, and is not added to `PriorAuthRequestData`.
+    `POST /fhir/prior-auth` requires it in `X-MedAuth-Launch-Id`, and the
+    encounter is where it lives — putting a second path to one value through a
+    payload that does not need it would give the router two sources to disagree
+    about. Note this is *not* a new failure mode to handle: TASK-060 already
+    declines to assemble a bundle for an encounter with a NULL `launch_id`,
+    logging `ENCOUNTER_NOT_LINKED_TO_EHR`, so no submittable row can exist
+    without one. Surface a NULL here as the broken invariant it would be, rather
+    than absorbing it as an ordinary branch — for an encounter-sourced row. When
+    TASK-090 lands, a row with a NULL `encounter_id` has no encounter to read a
+    launch from at all; that is not the broken invariant but the manual case,
+    and it is distinguished by which of the two is missing rather than by
+    guessing.
+
+  - **A resubmission is a new attempt row, never a second write to the first
+    one.** TASK-072's denied-request flow calls this endpoint again, and nothing
+    supports that today: `submitted_at` non-null is what makes a repeat
+    refusable, and relaxing it would reopen exactly the duplicate-submission
+    risk that `uq_prior_auth_requests_encounter` and TASK-054's pre-check exist
+    to close. Settled here because this is the endpoint TASK-072 calls, and a
+    dashboard built against a capability this task does not provide is a feature
+    that fails at the payer.
+    - **New table `prior_auth_submission_attempts`**, one row per transmission
+      attempt, child of `prior_auth_requests`. Migrated by `track-a-clinical`,
+      which owns the parent table, per CLAUDE.md's migration-ownership rule.
+
+```sql
+    CREATE TABLE prior_auth_submission_attempts (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        request_id UUID NOT NULL REFERENCES prior_auth_requests(id),
+        attempt_number INTEGER NOT NULL,
+        submission_method VARCHAR(50),
+        payer_outcome VARCHAR(20),
+        payer_reference_number VARCHAR(200),
+        submitted_at TIMESTAMPTZ,
+        denial_reason TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (request_id, attempt_number)
+    );
+    CREATE INDEX idx_pa_attempts_request ON prior_auth_submission_attempts(request_id);
+```
+
+    - **Each attempt row is itself write-once**, on the same terms and for the
+      same reason as the parent's columns are today. What changes is that a
+      *second attempt* is a new row rather than a mutation, so "how many times
+      was this payer asked, and what did it say each time" stays answerable —
+      which a mutating column can never answer, and which is precisely what a
+      resubmission dashboard is for.
+    - **`UNIQUE (request_id, attempt_number)` is what makes a duplicate
+      impossible**, replacing `submitted_at`'s single-shot guard with one that
+      admits deliberate retries and still refuses accidental ones. A racing
+      double-submit loses on the constraint rather than on a read-then-write.
+    - **The parent row keeps its columns and they keep their meaning: the
+      latest attempt's result.** They are not deprecated and nothing migrates
+      off them — `GET /prior-auth?status=` (TASK-072) and every existing reader
+      want the current state, not a history, and making them join for it would
+      be churn with no buyer. What changes is that
+      `PATCH /prior-auth/{request_id}/submission` writes an attempt row *and*
+      refreshes the parent, in one transaction.
+    - **A resubmission is only permitted from a terminal, unsuccessful state** —
+      `denied`, or `error` (the payer refused to take the request in). Never
+      from `submitted`: a request the payer is still holding must not be asked
+      again, which is the original constraint's whole point and is unchanged.
+      A repeat against a non-resubmittable state is a 409, exactly as now.
+    - Backfill: existing rows get attempt 1 synthesised from their own columns
+      where `submitted_at` is non-null, so the history is complete from the
+      first attempt rather than starting at the second.
+
+  - **A narrower read for the routing decision, fixing an over-fetch in
+    TASK-054's route.** The router needs `payer_name`, `status` and the
+    encounter's `launch_id` to choose a path. Reading them through
+    `GET /prior-auth/{request_id}` would return `clinical_evidence` — note
+    excerpts, the most sensitive thing that payload carries — and write a
+    `READ_PRIOR_AUTH` row for a read that touched no clinical content. That is
+    an over-fetch in the existing route, not merely a question about this one,
+    and it is fixed at the source: add a routing-scoped read that returns the
+    decision fields only and audits nothing, leaving the full route unchanged
+    for the submitter that genuinely needs the evidence. Per CLAUDE.md's audit
+    rule this is not a carve-out — a read with no PHI in it must *not* write to
+    `audit_log`, or "who accessed patient X" stops being a query you can just
+    run.
+
+  - **Test:** a payer in the PAS-capable set routes to `POST /fhir/prior-auth`;
+    one outside it is flagged for manual submission and nothing is transmitted
+  - **Test:** the payer name is normalised through `payer_vocab` before the
+    capability check — a display name that slugs to a capable payer still routes
+    to PAS, which is the failure `packages/payer-vocab` exists to prevent
+  - **Test:** 422 `PRIOR_AUTH_PATH_NOT_CONFIGURED` from TASK-054 is reported as
+    manual submission needed, not as a transient failure and not as submitted
+  - **Test:** on the PAS path this service writes none of `submission_method`,
+    `payer_outcome`, `payer_reference_number` or `status` — a regression guard
+    on the single-writer rule above; the manual path writes `status` alone and
+    leaves the other three NULL
+  - **Test:** `track_b_rag.crd` and this router resolve payer capability through
+    the same `payer_vocab` symbol, with no second definition of the set
+  - **Test:** resubmitting a `denied` request writes attempt 2 and leaves
+    attempt 1 intact; resubmitting a `submitted` one is a 409 and writes no
+    attempt
+  - **Test:** two concurrent submissions of one request produce one attempt row,
+    the loser learning it lost
 
 ---
 
@@ -6242,10 +6457,33 @@ logic do not change.
     with status (pending, submitted, approved, denied)
   - Denial reason display (`prior_auth_requests.denial_reason`)
   - Resubmission flow for denied requests: calls `POST /prior-auth/{request_id}/submit`
-    again (TASK-061) — same endpoint, submission_method may differ if the first
-    attempt's method is known to have failed
+    again (TASK-061). **What that endpoint does on a repeat is settled in
+    TASK-061, not here** — a resubmission writes a new
+    `prior_auth_submission_attempts` row rather than overwriting the first
+    attempt's result, and is permitted only from `denied` or `error`. Do not
+    build this screen against the older assumption that a second call mutates
+    the original row's outcome fields: it does not, and the endpoint answers 409
+    for a request the payer is still holding.
+    - **The button is offered for `denied` and `error`, and for nothing else.**
+      `error` means the payer refused to take the request in, so there is
+      genuinely nothing pending and asking again is the right move — it is not
+      an "already submitted" state despite `submitted_at` being set.
+    - **`submission_method` is not something this screen chooses or predicts.**
+      It is whatever path actually transmitted the attempt, reported back by the
+      adapter. An earlier draft said the method "may differ if the first
+      attempt's method is known to have failed", which read as though the client
+      picked it; routing is TASK-061's, on payer capability, and the transport
+      below it is the adapter's.
+    - **A request needing manual submission is a distinct state, not a
+      failure.** TASK-061 flags a payer with no automated path rather than
+      transmitting anything, and the dashboard must show that as work for a
+      person rather than as an error or as a pending payer decision — the
+      distinction the whole routing model exists to preserve.
   - **Test:** render list with mixed statuses, verify denial reason shown only
-    for denied items, verify resubmit button only shown for denied items
+    for denied items, verify the resubmit button shown for `denied` and `error`
+    and for no other status
+  - **Test:** a request flagged for manual submission renders as work for a
+    person, distinct from both a failure and a pending payer decision
 
 ---
 
