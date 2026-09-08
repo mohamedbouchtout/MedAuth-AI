@@ -56,6 +56,7 @@ from redis.asyncio import Redis
 from starlette.concurrency import run_in_threadpool
 
 from bedrock_client import first_json_object
+from payer_vocab import supports_crd
 from track_b_rag import bedrock, cache, crd, retrieval
 from track_b_rag.config import get_settings
 
@@ -277,7 +278,7 @@ async def _crd_determination(
     not configured, and for any call that failed or decided nothing. The tier
     can only add an answer, never remove one.
     """
-    if not crd.is_crd_supported(payer):
+    if not supports_crd(payer):
         return None
     base_url = get_settings().crd_base_url
     if not base_url:

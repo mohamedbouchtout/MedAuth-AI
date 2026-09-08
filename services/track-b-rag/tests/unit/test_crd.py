@@ -25,7 +25,8 @@ from typing import Any
 import httpx
 import pytest
 
-from track_b_rag import crd
+from payer_vocab import supports_crd
+from track_b_rag import crd, policy_rules
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "crd"
 
@@ -35,32 +36,24 @@ def load(name: str) -> dict[str, Any]:
     return json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
 
 
-class TestIsCrdSupported:
-    """Which payers the tier is tried for."""
+class TestCrdTierPayerSelection:
+    """Which payers the tier is tried for.
 
-    def test_mandated_payers_are_supported(self) -> None:
-        assert crd.is_crd_supported("medicare-advantage")
-        assert crd.is_crd_supported("medicaid")
+    The membership cases live in ``packages/payer-vocab``'s
+    ``test_capabilities.py`` since TASK-061, which made that package the one
+    definition of the CMS-0057-F set. What is worth asserting *here* is that
+    this service reads that definition rather than carrying its own — the
+    regression the extraction exists to prevent.
+    """
 
-    def test_commercial_payers_are_not(self) -> None:
-        """The bulk of what private practices see stays on the RAG path."""
-        for payer in ("aetna", "bcbs-ma", "cigna", "unitedhealthcare", "anthem-bcbs"):
-            assert not crd.is_crd_supported(payer)
+    def test_this_module_defines_no_payer_set_of_its_own(self) -> None:
+        assert not hasattr(crd, "CRD_SUPPORTED_PAYERS")
+        assert not hasattr(crd, "is_crd_supported")
 
-    def test_traditional_medicare_is_not_medicare_advantage(self) -> None:
-        """The distinction payer-vocab preserves specifically for this decision.
-
-        Traditional Medicare's rules come from CMS policy text we ingest;
-        Advantage plans set their own and answer over CRD. Collapsing the two
-        slugs would route one down the other's path.
-        """
-        assert not crd.is_crd_supported("cms-medicare")
-        assert crd.is_crd_supported("medicare-advantage")
-
-    def test_a_display_name_does_not_match(self) -> None:
-        """Only canonical slugs, for the reason packages/payer-vocab exists."""
-        assert not crd.is_crd_supported("Medicare Advantage")
-        assert not crd.is_crd_supported("MEDICAID")
+    def test_the_tier_is_selected_through_payer_vocab(self) -> None:
+        assert policy_rules.supports_crd is supports_crd
+        assert supports_crd("medicare-advantage")
+        assert not supports_crd("bcbs-ma")
 
 
 class TestCodeSystem:

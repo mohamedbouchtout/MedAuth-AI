@@ -51,6 +51,13 @@ fhir-integration will have in Phase 5.
 that it is live and authoritative at the moment of the order; storing it for a
 day would leave a slower, more complex way to get a stale answer. See CLAUDE.md,
 "A CRD answer is never cached; a RAG answer is."
+
+**Which payers this is tried for is not decided here.** The set of slugs
+CMS-0057-F covers lives in :mod:`payer_vocab.capabilities`, and callers ask
+``supports_crd()``. It was defined in this module until TASK-061 became its
+second consumer — ``prior-auth`` asks the same mandate question to decide
+whether a submission has an automated path — and a literal set copied into a
+second private module is how two spellings of one vocabulary begin.
 """
 
 from __future__ import annotations
@@ -65,25 +72,6 @@ from typing import Any, Final
 import httpx
 
 logger = logging.getLogger(__name__)
-
-#: Payer slugs whose plans CMS-0057-F covers, as canonical slugs from
-#: ``packages/payer-vocab`` — never display names, for the reason the whole
-#: vocabulary exists. Deliberately a literal set and not a configuration file:
-#: it is two entries today and becomes real payer capability data once payers
-#: publish endpoints, which is a later task and not something to build a
-#: framework for now.
-#:
-#: The mandate also covers CHIP and ACA marketplace plans. Neither has a slug
-#: yet, because no `Coverage.payor.display` observed so far has produced one —
-#: adding speculative slugs here would be the "extend the alias table from
-#: plausible spellings" mistake the vocabulary's own notes rule out. Add each
-#: when a real payer name resolves to it.
-CRD_SUPPORTED_PAYERS: Final[frozenset[str]] = frozenset(
-    {
-        "medicare-advantage",
-        "medicaid",
-    }
-)
 
 #: The CRD services this asks. ``order-sign`` is the hook fired as an order is
 #: signed, which is the closest thing to what a nudge is reacting to.
@@ -140,20 +128,6 @@ class CrdDetermination:
 
     requires_auth: bool
     signal: str
-
-
-def is_crd_supported(payer: str) -> bool:
-    """Return whether this payer is expected to answer over Da Vinci CRD.
-
-    Args:
-        payer: The canonical payer slug from ``packages/payer-vocab``. A display
-            name will not match, which is the same failure the vocabulary exists
-            to prevent — callers normalise before Stage 1, not here.
-
-    Returns:
-        True for a payer covered by the CMS-0057-F mandate.
-    """
-    return payer in CRD_SUPPORTED_PAYERS
 
 
 def code_system(cpt_code: str) -> str:

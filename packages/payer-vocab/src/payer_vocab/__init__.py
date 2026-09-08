@@ -31,6 +31,11 @@ ever produce and that does not fit the ``CHAR(2)`` column besides.
 See CLAUDE.md, "Payer and jurisdiction identity — one canonical vocabulary".
 """
 
+from payer_vocab.capabilities import (
+    CMS_0057_PAYERS,
+    supports_crd,
+    supports_prior_auth_api,
+)
 from payer_vocab.payers import (
     KNOWN_PAYERS,
     PAYER_ALIASES,
@@ -46,6 +51,7 @@ from payer_vocab.states import (
 )
 
 __all__ = [
+    "CMS_0057_PAYERS",
     "CMS_JURISDICTION_CODES",
     "KNOWN_PAYERS",
     "PAYER_ALIASES",
@@ -55,4 +61,6 @@ __all__ = [
     "normalize_state",
     "normalize_states",
     "slugify_payer",
+    "supports_crd",
+    "supports_prior_auth_api",
 ]
