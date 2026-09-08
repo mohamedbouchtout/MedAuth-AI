@@ -15,8 +15,9 @@ openapi: 3.1.0
 # therefore covers `/health` only; what keeps the consumer honest is
 # tests/unit/test_consumer.py and tests/unit/test_consumer_loop.py.
 #
-# TASK-061 adds this service's first real route, POST
-# /prior-auth/{request_id}/submit.
+# TASK-061 added this service's first real route, POST
+# /prior-auth/{request_id}/submit — the submission router. Bundle assembly is
+# still a consumer and still outside the drift comparison.
 
 info:
   title: MedAuth AI — prior-auth
@@ -28,6 +29,13 @@ info:
     it and the patient's chart context, and records one `prior_auth_requests`
     row with status `pending`.
 
+
+    It then routes each request (TASK-061): a payer inside the CMS-0057-F
+    mandate is asked over Da Vinci PAS through `fhir-integration`, and everything
+    else is recorded as needing manual submission. This service never speaks
+    CoverMyMeds — the EHR-level fallback to it lives behind the adapter layer in
+    `fhir-integration`, which holds that credential.
+
 servers:
   - url: http://localhost:8007
     description: Local development (see the port table in CLAUDE.md)
@@ -35,6 +43,10 @@ servers:
 tags:
   - name: health
     description: Readiness of this service's backing dependencies.
+  - name: prior-auth
+    description: >-
+      Routing an assembled request to the payer's API, or to a person when no
+      automated path exists.
 
 x-redis-subscriptions:
   sessions:started:
@@ -94,6 +106,118 @@ paths:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
 
+  /prior-auth/{request_id}/submit:
+    post:
+      tags: [prior-auth]
+      operationId: submitPriorAuth
+      summary: Submit a prior authorization down whichever path its payer supports
+      description: >-
+        Routes one assembled prior-authorization request. **One question decides
+        it: does this payer support the Da Vinci PAS API?** If it does, this
+        calls `fhir-integration`'s `POST /fhir/prior-auth` and relays what the
+        payer said. If it does not, the request is recorded as needing a person
+        and nothing is transmitted.
+
+
+        **Which transport a submission becomes is deliberately not decided
+        here.** The adapter layer in `fhir-integration` chooses between the
+        payer's own FHIR endpoint and an EHR's CoverMyMeds fallback, and has
+        since TASK-054. This service never speaks CoverMyMeds and holds no
+        credential for it. The two routing questions are on different axes —
+        that one is about the EHR, this one about the payer — and they compose in
+        one direction only.
+
+
+        **`manual-submission-required` is an ordinary outcome, not an error.**
+        Most commercial employer-sponsored plans are outside the CMS-0057-F
+        mandate. A client must render it as work for a person, distinct from both
+        a failure and a pending payer decision. `PRIOR_AUTH_PATH_NOT_CONFIGURED`
+        from the submitter maps onto the same outcome: the payer takes PAS, but
+        this EHR delivers through CoverMyMeds and nothing configured it, and no
+        amount of retrying configures a credential.
+
+
+        **The body is empty and the path names the request.** Everything the
+        submission needs is resolved server-side, exactly as the routes it calls
+        require: a client posting the bundle back would put a payer submission's
+        payload under the control of the least trusted participant in it.
+
+
+        **200 rather than 201** — nothing is created. The request already exists,
+        assembled from the encounter's end signal; this transmits it. The attempt
+        row recording that transmission is written by `track-a-clinical`, which
+        owns the table and is the only writer of the outcome columns.
+
+
+        Unauthenticated in v1, on the same terms as every other browser-facing
+        route in this repository. It writes no audit row of its own: it reads no
+        clinical content, and the PHI accesses a submission does involve are
+        audited where they happen — `SUBMIT_PRIOR_AUTH` in `fhir-integration` for
+        the disclosure to the payer, and its own row in `track-a-clinical` for
+        the record it mutates.
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          description: The prior-authorization request to submit.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: What the router did, and what the payer said if it was asked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmissionRoutedResponse'
+        '404':
+          description: >-
+            No such prior-authorization request
+            (`prior_auth_request_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: >-
+            The payer is still holding this request
+            (`prior_auth_not_submittable`). A `denied` or `error` request may be
+            resubmitted and is recorded as a new attempt; one already with a
+            payer may not, because a payer that receives one request twice may
+            open two reviews of it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: >-
+            The path parameter is not a UUID, or the submitter refused the
+            request (`prior_auth_submission_refused`) — it could not be made
+            conformant, or the launch is no longer valid. Nothing is with the
+            payer, and this needs a person rather than a retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: >-
+            An upstream could not be reached
+            (`prior_auth_upstream_unavailable`). Nothing was transmitted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '504':
+          description: >-
+            An upstream did not answer in time. **A timed-out submission is
+            ambiguous** — the payer may have taken the request in — so it is
+            never retried automatically, and should not be retried blindly. The
+            message says which of the two upstreams was slow.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   schemas:
     ComponentStatus:
@@ -128,3 +252,99 @@ components:
             - type: 'null'
         error:
           type: 'null'
+
+    RoutingOutcome:
+      type: string
+      description: >-
+        What the router did. `submitted` means it was transmitted and a payer
+        answered — what the payer *said* is `payer_outcome`, a different fact.
+        `manual-submission-required` means no automated path exists, so a person
+        submits it; that is an ordinary answer rather than a failure.
+      enum: [submitted, manual-submission-required]
+
+    SubmissionRoutedData:
+      type: object
+      description: What the router did with one prior-authorization request.
+      required: [request_id, outcome]
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          description: The request that was routed.
+        outcome:
+          $ref: '#/components/schemas/RoutingOutcome'
+        payer_outcome:
+          type: string
+          nullable: true
+          description: >-
+            What the payer said — `complete`, `queued`, `partial` or `error`.
+            Null on the manual path, because no payer was asked. Distinct from
+            `outcome`: this is the payer's answer, that one is ours.
+        submission_method:
+          type: string
+          nullable: true
+          description: >-
+            Which path transmitted it, as the adapter reported. Null on the
+            manual path, because nothing transmitted anything. Never predicted
+            by this service — a router that guessed `fhir-pas` and was answered
+            `covermymeds` would assert a transport it did not choose.
+        payer_reference_number:
+          type: string
+          nullable: true
+          description: >-
+            The payer's reference, when it gave one. Legitimately absent on a
+            queued answer.
+        reason:
+          type: string
+          nullable: true
+          description: >-
+            Why a person has to submit this, on the manual path — a fixed label
+            rather than prose, so a client can branch on it.
+            `payer-has-no-prior-auth-api`, `no-payer-recorded`,
+            `encounter-not-linked-to-ehr` or `submission-path-not-configured`.
+          enum:
+            - payer-has-no-prior-auth-api
+            - no-payer-recorded
+            - encounter-not-linked-to-ehr
+            - submission-path-not-configured
+
+    SubmissionRoutedResponse:
+      type: object
+      description: The standard envelope, carrying one routing outcome.
+      required: [data, error]
+      properties:
+        data:
+          oneOf:
+            - $ref: '#/components/schemas/SubmissionRoutedData'
+            - type: 'null'
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/Error'
+            - type: 'null'
+
+    Error:
+      type: object
+      description: The error half of the envelope.
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - prior_auth_request_not_found
+            - prior_auth_not_submittable
+            - prior_auth_submission_refused
+            - prior_auth_upstream_unavailable
+            - validation_error
+            - http_error
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      description: The standard envelope, carrying an error.
+      required: [data, error]
+      properties:
+        data:
+          type: 'null'
+        error:
+          $ref: '#/components/schemas/Error'

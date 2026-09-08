@@ -6,15 +6,16 @@ service::
     cd services/prior-auth
     uv run uvicorn prior_auth.main:app --reload --port 8007
 
-**The HTTP surface is deliberately just ``/health``.** This service's work
-arrives on a Redis subscription, not on a request — TASK-061 adds the first real
-route. The application exists so the consumer has a lifespan to run in and a
-readiness probe to be observed through, which is what stops a dead consumer
-looking like a quiet afternoon.
+**Most of this service's work arrives on a Redis subscription rather than on a
+request.** TASK-060's assembly is a consumer; the one real route is TASK-061's
+submission router. The application also exists so that consumer has a lifespan
+to run in and a readiness probe to be observed through, which is what stops a
+dead consumer looking like a quiet afternoon.
 
-No CORS middleware: nothing here answers a browser. Per CLAUDE.md's "CORS and
-browser reachability", it is installed when a service grows a browser-facing
-HTTP route, not pre-emptively.
+CORS is installed because TASK-072's dashboard resubmits a denied request
+through the router from a browser. Per CLAUDE.md's "CORS and browser
+reachability", it comes from the shared package and is added when a service
+grows a browser-facing HTTP route — which this one now has.
 
 The module sits inside the ``prior_auth`` package rather than at
 ``src/main.py``: this service imports track-a-clinical's mapped classes, and a
@@ -29,8 +30,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from api_envelope import install_error_handlers
+from cors_policy import install_cors
 from prior_auth.api.dependencies import close_redis, get_redis
 from prior_auth.api.health import router as health_router
+from prior_auth.api.submission import router as submission_router
+from prior_auth.config import get_settings
 from prior_auth.consumer import SessionEndConsumer
 from prior_auth.db import dispose_engine
 
@@ -64,15 +68,18 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="MedAuth AI — prior-auth",
         description=(
-            "Prior authorization bundle assembly. Subscribes to session-end "
-            "signals and records one request per encounter that flagged a "
-            "coded procedure."
+            "Prior authorization bundle assembly and submission routing. "
+            "Subscribes to session-end signals and records one request per "
+            "encounter that flagged a coded procedure, then routes each "
+            "request to the payer's API or to a person."
         ),
         version="0.1.0",
         lifespan=lifespan,
     )
     install_error_handlers(app)
+    install_cors(app, get_settings().cors_allowed_origins)
     app.include_router(health_router)
+    app.include_router(submission_router)
     return app
 
 
