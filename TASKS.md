@@ -2871,6 +2871,61 @@ The insurance policy RAG is the technical core. Build and validate before other 
     falls through to search
   - **Test:** a launch the provider cancels leaves the app with no `launch_id`
     and the start-visit action refusing, never a partially-configured state
+  - **Built in code, with one verification outstanding — see the last bullet.**
+    Three commits: configuration and dependency, the launch exchange, the
+    screens that use it.
+    - **The flow is three screens now**, not two: `LaunchScreen` obtains the
+      launch, `PatientPickerScreen` decides who the visit is about, and
+      `SessionScreen` records it. `LaunchFlow` holds the launch in memory and
+      renders the second only once it has one, so nothing downstream can be
+      called with a handle naming no EHR credential.
+    - **`App.tsx` lost its `LAUNCH_ID` constant**, which was null in every build
+      and was the single remaining reason this app could identify nobody.
+      `patientSelectionUnavailable` went with it: TASK-025's seam has no caller
+      any more, and the honest refusal it stood for now lives on the screen that
+      knows why a launch is missing.
+    - **An EHR launch starts itself; a standalone one waits for a tap.** The
+      provider expressed their intent by opening MedAuth from the chart, and
+      asking them to tap again asks twice. It is guarded on the inbound request
+      rather than on a render count — a second deep link genuinely is a second
+      launch, and without the guard an inline callback opens a browser window
+      per render, which is the defect TASK-025b's picker hit one layer down.
+    - **The EHR launch arrives through React Native's own `Linking`**, from
+      `getInitialURL` *and* the `url` event. `expo-linking` was not added: the
+      framework already has both primitives. The cold-start half is the one a
+      provider hits first — the EHR opens the app when no process exists, so no
+      event ever fires — and handling only the listener fails exactly there.
+    - **A cancellation is not a failure, and the screen renders them
+      differently.** `cancel` and `dismiss` leave the app as it was and say so
+      with the button still present; `locked`, a thrown browser error, a
+      redirect with no claim code, and a refused redemption are failures. Every
+      one of them leaves this app holding nothing at all.
+    - **A redirect carrying no claim code is reported, never retried**, and its
+      message is administrator-facing: the likeliest cause is a return URI the
+      app and the service disagree about, which no provider can act on.
+    - **The query parser is hand-rolled and shared by both readers of a
+      custom-scheme URI.** React Native's `URL` handles a hostless
+      `medauth://launch?...` unpredictably, and what that produces is a launch
+      that completed and delivered nothing — the failure this whole handoff
+      exists to make visible.
+    - **`openAuthSessionAsync`, asserted by a test on the one-line binding.**
+      Swapping it for `openBrowserAsync` compiles, runs, and never comes back,
+      because only the auth session returns the redirect to the app that opened
+      it.
+    - Nothing logs the claim code or the `launch_id`, and neither a thrown fetch
+      error nor a thrown browser error is surfaced: both can name a URL carrying
+      a credential or the EHR's launch context.
+    - 220 mobile tests at 93% coverage against the 80% gate. Each commit
+      typechecks, lints and passes its own suite — the launch exchange was
+      verified in isolation before the screens were added.
+    - **Outstanding: the custom scheme has not been verified against a real
+      OS.** Nothing in Jest routes a URL, so what is proven here is that
+      `SMART_RETURN_URI` and `app.json` agree with each other, not that the
+      device hands the redirect back. Verify on a simulator or device — an EHR
+      launch and a standalone one — before this task is closed. A mismatch
+      presents as `openAuthSessionAsync` never returning a redirect, which is
+      indistinguishable from a provider abandoning the login, so it will not
+      surface on its own.
 
 ---
 
