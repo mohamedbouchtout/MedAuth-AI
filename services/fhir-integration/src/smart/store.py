@@ -8,6 +8,13 @@ Both key patterns are fixed in CLAUDE.md's canonical Redis key list:
     and the callback that consumes it. Deleted by that callback — see
     ``claim_launch()``.
 
+``fhir_launch_claim:{claim}``
+    Transient, and written only when the launch declared a client delivery. The
+    single-use code that carries a completed launch back to the app that started
+    it, so a redirect can name a launch without carrying the ``launch_id``
+    itself — which is a capability handle and never goes in a URL. Consumed by
+    ``POST /fhir/launch/claim`` — see ``claim_handoff()``.
+
 ``fhir_token:{launch_id}``
     The EHR access token, the refresh token that renews it, the token endpoint
     to renew it against, its FHIR base URL and its ``ehr_type``.
@@ -31,8 +38,10 @@ and TASK-070 also cite. Nothing here should grow a ``session_id``.
 
 from __future__ import annotations
 
+import base64
 import logging
 import math
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Final
@@ -41,11 +50,13 @@ from pydantic import BaseModel, ValidationError
 from redis.asyncio import Redis
 
 from src.adapters.factory import EHRType
+from src.smart.delivery import LaunchDelivery
 
 logger = logging.getLogger(__name__)
 
 #: Key prefixes, from CLAUDE.md's canonical list.
 LAUNCH_KEY_PREFIX: Final = "fhir_launch:"
+LAUNCH_CLAIM_KEY_PREFIX: Final = "fhir_launch_claim:"
 TOKEN_KEY_PREFIX: Final = "fhir_token:"
 
 #: How long a record lingers after its refresh grant has been refused. Long
@@ -64,6 +75,11 @@ def launch_key(state: str) -> str:
 def token_key(launch_id: str) -> str:
     """Return the Redis key holding one launch's EHR access token."""
     return f"{TOKEN_KEY_PREFIX}{launch_id}"
+
+
+def launch_claim_key(claim: str) -> str:
+    """Return the Redis key holding one pending client handoff."""
+    return f"{LAUNCH_CLAIM_KEY_PREFIX}{claim}"
 
 
 class PendingLaunch(BaseModel):
@@ -90,6 +106,15 @@ class PendingLaunch(BaseModel):
     #: scope string sent to the authorization endpoint depends on it, and the
     #: token exchange must not have to guess which launch type it is completing.
     ehr_launch: bool
+    #: How the completed launch is handed back — declared by whoever started it,
+    #: on ``GET /fhir/launch``, and carried here so the callback reads it off
+    #: this record rather than inferring anything from its own request. Defaults
+    #: to ``JSON`` because a launch that declared nothing has no client waiting
+    #: on it: an EHR-initiated launch is opened by the EHR, not by one of our
+    #: apps. That is the unchanged behaviour of the only caller that existed
+    #: before TASK-051f, not a winner picked between two candidates. See
+    #: CLAUDE.md, "Handing a completed SMART launch back to a client".
+    delivery: LaunchDelivery = LaunchDelivery.JSON
     #: What TASK-051c verifies the ``id_token`` against, from the same discovery
     #: document that supplied the endpoints above — carried forward for that
     #: field's own reason, so the key set a signature is checked against and the
@@ -211,6 +236,93 @@ async def claim_launch(redis: Redis, state: str) -> PendingLaunch | None:
     if raw is None:
         return None
     return PendingLaunch.model_validate_json(raw)
+
+
+class LaunchClaim(BaseModel):
+    """A completed launch waiting to be collected by the app that started it.
+
+    Holds exactly what the JSON delivery already returns and nothing more: no
+    access token, no refresh token, no scope, and no patient identifier. The
+    handoff is a way for a client to learn its ``launch_id``, not a second route
+    to the credential that ``launch_id`` resolves to.
+    """
+
+    launch_id: str
+    ehr_type: EHRType
+    #: Seconds the EHR access token had left when the launch completed. Stored
+    #: rather than recomputed because it is what the JSON delivery reported, and
+    #: the two deliveries must answer identically — a client should not be able
+    #: to tell which one it went through.
+    expires_in: int
+
+
+def new_claim_code() -> str:
+    """Return a fresh single-use handoff code.
+
+    ``secrets`` and not ``uuid4``, unlike ``state`` and ``launch_id`` above.
+    Those two are opaque identifiers whose safety rests on being unguessable
+    within their own flow; this one is carried on a redirect into a client and
+    is redeemable for a launch, so it is minted the way the PKCE verifier beside
+    it is — 32 bytes of ``secrets``, base64url, no padding.
+
+    Returns:
+        A 43-character base64url string, held under ``fhir_launch_claim:{claim}``
+        until it is redeemed or expires.
+    """
+    return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii").rstrip("=")
+
+
+async def save_launch_claim(
+    redis: Redis,
+    claim: str,
+    launch_claim: LaunchClaim,
+    *,
+    ttl_seconds: int,
+) -> None:
+    """Record a completed launch against the code that collects it.
+
+    Args:
+        redis: The Redis client.
+        claim: The code the redirect carries back to the client.
+        launch_claim: What redeeming it returns.
+        ttl_seconds: How long the code stays redeemable. Bounds a browser
+            redirect reaching an app, not anything a human does, so it is far
+            shorter than the launch TTL beside it.
+    """
+    await redis.set(launch_claim_key(claim), launch_claim.model_dump_json(), ex=ttl_seconds)
+
+
+async def claim_handoff(redis: Redis, claim: str) -> LaunchClaim | None:
+    """Consume one handoff code, atomically.
+
+    The same ``GETDEL`` as ``claim_launch()`` above, for the same reason and
+    against the same threat: a code is single-use, and reading and deleting in
+    one round trip is what makes that true under concurrency. Two redemptions of
+    one code cannot both find a record, so an intercepted code that the real
+    client has already redeemed buys nothing — and the interception surfaces as
+    a failed launch rather than as two working ones.
+
+    Args:
+        redis: The Redis client.
+        claim: The code presented for redemption.
+
+    Returns:
+        The completed launch, or ``None`` when no record answers — unknown,
+        expired and already-redeemed are one answer, exactly as they are for an
+        unknown ``state``, so a caller probing codes learns nothing about which
+        ones were real.
+    """
+    raw = await redis.getdel(launch_claim_key(claim))
+    if raw is None:
+        return None
+    try:
+        return LaunchClaim.model_validate_json(raw)
+    except ValidationError:
+        # Treated as absent rather than raised on, as an unreadable launch token
+        # record is. The truthful answer for a record this service cannot read is
+        # the same 404 as for one that is not there.
+        logger.warning("Discarding an unreadable launch claim record.")
+        return None
 
 
 def access_token_expiry(ttl_seconds: int, *, now: datetime | None = None) -> datetime:

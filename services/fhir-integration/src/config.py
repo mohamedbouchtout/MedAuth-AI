@@ -23,6 +23,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from cors_policy import AllowedOrigins
 from src.adapters.factory import EHRType
+from src.smart.delivery import (
+    validate_mobile_return_uri,
+    validate_web_return_url,
+)
 
 
 class ClientCredentials(BaseModel):
@@ -123,6 +127,30 @@ class Settings(BaseSettings):
     #: the EHR as a 401 and ends the launch, which CLAUDE.md states as the named
     #: limit of proactive renewal rather than leaving it to be discovered.
     smart_token_refresh_skew_seconds: int = Field(default=120, ge=0)
+
+    #: Where a completed launch sends the browser, per client platform
+    #: (TASK-051f). **Two settings rather than one with an assumed format**: a
+    #: web HTTPS URL and a mobile custom-scheme URI are different shapes, and
+    #: one field holding either would be a value whose validity depends on which
+    #: client happens to use it.
+    #:
+    #: Neither is validated here, on the field. They are validated at **startup**
+    #: by ``validate_return_targets()``, so a missing or malformed one refuses to
+    #: boot rather than surfacing at the end of an OAuth redirect chain — after
+    #: discovery, after a human has logged in, after a token exchange has spent a
+    #: real credential, with nothing in the browser saying why. Keeping the rule
+    #: out of the field is what lets a test construct ``Settings`` freely and
+    #: assert on the startup check itself.
+    smart_web_return_url: str = ""
+    smart_mobile_return_uri: str = ""
+
+    #: How long a handoff code stays redeemable. It bounds a browser redirect
+    #: reaching an app — a network hop and an OS scheme handoff — rather than
+    #: anything a human does, which is why it is two minutes against the launch
+    #: record's ten. A round default, not a measurement: no real vendor redirect
+    #: has been timed against it. Shortening the window is the cheapest lever on
+    #: how long an intercepted code stays useful, so raise it only with a reason.
+    smart_launch_claim_ttl_seconds: int = Field(default=120, gt=0)
 
     #: Where ``track-a-clinical`` answers, for the note write-back (TASK-053).
     #: ``POST /fhir/notes`` reads the note and its EHR linkage from there and
@@ -241,6 +269,31 @@ class MissingClientCredentialsError(RuntimeError):
             f"No SMART client registered for EHR {ehr_type.value!r}: set {variable}. "
             "An unrecognised issuer uses the GENERIC_* pair."
         )
+
+
+def validate_return_targets(settings: Settings) -> None:
+    """Refuse to start when a client return target is missing or malformed.
+
+    Called from ``create_app()``, so the process dies at boot naming the
+    variable. The alternative is a launch that completes — discovery, a human
+    logging in, a token exchange spending a real credential — and only then has
+    nowhere to send the browser, which is the worst place in this system to find
+    a configuration error: there is nothing left to do but start over, and
+    nothing on the page saying why.
+
+    **Both are required, even in a deployment serving one platform.** A return
+    target is a deployment-wide constant rather than a per-launch one, and the
+    cost of setting the unused one is a single line — cheaper than a service that
+    boots happily and strands the first launch from the other app.
+
+    Args:
+        settings: The settings to check.
+
+    Raises:
+        ReturnTargetError: Naming the offending variable and what it expects.
+    """
+    validate_web_return_url(settings.smart_web_return_url)
+    validate_mobile_return_uri(settings.smart_mobile_return_uri)
 
 
 @lru_cache(maxsize=1)

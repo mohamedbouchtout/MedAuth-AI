@@ -25,6 +25,7 @@ def test_every_router_is_mounted() -> None:
     assert {
         "/health",
         "/fhir/launch",
+        "/fhir/launch/claim",
         "/fhir/callback",
         "/fhir/patient/{patient_id}/context",
         "/fhir/encounter/{encounter_id}",

@@ -20,6 +20,12 @@ to ``/fhir/launch`` and the authorization server redirects it to
 ``/fhir/callback`` — and a browser applies no CORS to a top-level navigation,
 exactly as it applies none to a WebSocket upgrade.
 
+**A completed launch reaches a client through TASK-051f's handoff**, not through
+the callback's JSON body, which a browser renders and no app can read.
+``POST /fhir/launch/claim`` is a real cross-origin fetch from ``apps/web`` and is
+covered by the policy installed below; the launch and callback routes remain
+navigations that no CORS applies to.
+
 The ``X-MedAuth-Launch-Id`` header the FHIR routes read is a custom request
 header, so a browser preflights it; it is allowed in ``packages/cors-policy``
 rather than here, because that package fixes the header list for the whole
@@ -40,7 +46,7 @@ from src.api.dependencies import close_clients
 from src.api.fhir import router as fhir_router
 from src.api.health import router as health_router
 from src.api.smart import router as smart_router
-from src.config import get_settings
+from src.config import get_settings, validate_return_targets
 
 
 @asynccontextmanager
@@ -67,6 +73,12 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    # Refuse to boot on a missing or malformed client return target (TASK-051f).
+    # Before anything else, because the alternative surfaces at the far end of an
+    # OAuth redirect chain — after a human has logged in and a real credential
+    # has been spent — where there is nothing to do but start over. See CLAUDE.md,
+    # "Handing a completed SMART launch back to a client".
+    validate_return_targets(get_settings())
     install_error_handlers(app)
     # Origins are per environment; the policy itself — methods, headers,
     # credentials — is settled repo-wide in CLAUDE.md, "CORS and browser

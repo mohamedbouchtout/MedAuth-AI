@@ -36,7 +36,7 @@ import logging
 from typing import Annotated, Final
 
 import httpx
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Body, Depends, Query, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
@@ -51,6 +51,11 @@ from src.api.dependencies import (
 )
 from src.config import Settings
 from src.smart import store
+from src.smart.delivery import (
+    LaunchDelivery,
+    append_claim,
+    redirect_target_for,
+)
 from src.smart.discovery import DiscoveryError, fetch_smart_configuration
 from src.smart.identity import resolve_launch_actor
 from src.smart.issuer import issuer_host, normalize_fhir_base_url
@@ -60,7 +65,7 @@ from src.smart.oauth import (
     exchange_code_for_token,
 )
 from src.smart.pkce import generate_code_verifier
-from src.smart.store import LaunchToken, PendingLaunch
+from src.smart.store import LaunchClaim, LaunchToken, PendingLaunch
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +75,7 @@ ERROR_CODE_DISCOVERY_FAILED: Final = "SMART_DISCOVERY_FAILED"
 ERROR_CODE_UNKNOWN_STATE: Final = "SMART_UNKNOWN_STATE"
 ERROR_CODE_AUTHORIZATION_DENIED: Final = "SMART_AUTHORIZATION_DENIED"
 ERROR_CODE_TOKEN_EXCHANGE_FAILED: Final = "SMART_TOKEN_EXCHANGE_FAILED"
+ERROR_CODE_UNKNOWN_CLAIM: Final = "SMART_UNKNOWN_CLAIM"
 
 #: Wording for the two statuses api-envelope has no generic text for. A launch
 #: fails in two distinguishable ways and they are not the caller's fault in the
@@ -146,12 +152,30 @@ async def smart_launch(
             ),
         ),
     ] = None,
+    delivery: Annotated[
+        LaunchDelivery,
+        Query(
+            description=(
+                "How the completed launch should be handed back. `json` answers "
+                "in the callback's response body, which is what a "
+                "service-to-service caller reads. `web` and `mobile` redirect to "
+                "that platform's configured return target with a single-use "
+                "claim code. Absent means no client is waiting — an EHR-initiated "
+                "launch, or a service-to-service caller — and answers `json`."
+            ),
+        ),
+    ] = LaunchDelivery.JSON,
 ) -> RedirectResponse:
     """Start a SMART launch and redirect the browser to the EHR.
 
     Resolves the vendor from ``iss``, reads that EHR's authorization and token
     endpoints from its `.well-known/smart-configuration` document, records the
     launch under `fhir_launch:{state}` with a fresh PKCE verifier, and redirects.
+
+    ``delivery`` says how the completed launch reaches whoever started it, and is
+    the only thing that decides it — see ``smart/delivery.py``. It is recorded on
+    the pending launch here so the callback reads it back rather than inferring a
+    caller's kind from its own request.
 
     Supports both launch types. An EHR launch arrives with ``launch`` and asks
     for the ``launch`` scope; a standalone launch arrives without one and asks
@@ -194,6 +218,11 @@ async def smart_launch(
             code_verifier=code_verifier,
             token_endpoint=configuration.token_endpoint,
             ehr_launch=is_ehr_launch,
+            # Declared by whoever started this launch and carried to the
+            # callback on the callback's own request, through `state`. The
+            # callback reads it off this record and never infers it from
+            # anything about the request it receives (TASK-051f).
+            delivery=delivery,
             # From the same document as the endpoints above, for the same reason
             # the token endpoint is carried rather than rediscovered: the key
             # set an id_token is checked against must come from the document
@@ -216,10 +245,11 @@ async def smart_launch(
     )
 
     logger.info(
-        "SMART %s launch started for %s (vendor %s)",
+        "SMART %s launch started for %s (vendor %s), delivery %s",
         "EHR" if is_ehr_launch else "standalone",
         host,
         ehr_type.value,
+        delivery.value,
     )
     # 302 rather than FastAPI's default 307: this is a browser navigation to an
     # authorization endpoint, and the method must not be preserved across it.
@@ -231,19 +261,28 @@ async def smart_launch(
     response_model=ApiResponse[LaunchSessionData],
     summary="Complete a SMART on FHIR launch",
     response_description="The launch_id naming this launch and its EHR access token.",
-    responses=error_responses(
-        status.HTTP_400_BAD_REQUEST,
-        status.HTTP_422_UNPROCESSABLE_CONTENT,
-        status.HTTP_500_INTERNAL_SERVER_ERROR,
-        status.HTTP_502_BAD_GATEWAY,
-        descriptions={
-            status.HTTP_400_BAD_REQUEST: (
-                "The `state` is unknown, expired or already consumed, or the "
-                "authorization server reported that the provider declined."
+    responses={
+        status.HTTP_302_FOUND: {
+            "description": (
+                "The launch declared `delivery=web` or `delivery=mobile`: a "
+                "redirect to that platform's return target, carrying a "
+                "single-use `claim` code and never the launch_id."
             ),
-            **_ERROR_DESCRIPTIONS,
         },
-    ),
+        **error_responses(
+            status.HTTP_400_BAD_REQUEST,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status.HTTP_502_BAD_GATEWAY,
+            descriptions={
+                status.HTTP_400_BAD_REQUEST: (
+                    "The `state` is unknown, expired or already consumed, or the "
+                    "authorization server reported that the provider declined."
+                ),
+                **_ERROR_DESCRIPTIONS,
+            },
+        ),
+    },
 )
 async def callback(
     redis: Annotated[Redis, Depends(get_redis)],
@@ -258,7 +297,7 @@ async def callback(
         str | None,
         Query(description="An OAuth error code, when the authorization server refused."),
     ] = None,
-) -> ApiResponse[LaunchSessionData]:
+) -> ApiResponse[LaunchSessionData] | RedirectResponse:
     """Exchange the authorization code for an EHR access token.
 
     Claims the launch record for this ``state`` — atomically, so a replayed
@@ -272,6 +311,14 @@ async def callback(
     launch: an EHR that sends no ``id_token``, publishes no keys, or sends one
     that does not verify leaves the actor unknown, which a null honestly
     records — and an *unverified* claim is never written in its place.
+
+    **Answers in whichever way the launch declared** (TASK-051f). A launch that
+    declared nothing, or ``delivery=json``, gets the response body this route has
+    always returned — the service-to-service caller, unchanged. A launch that
+    declared ``web`` or ``mobile`` gets a redirect to that platform's return
+    target carrying a single-use claim code, because JSON rendered in the browser
+    the EHR redirected reaches no application. The decision is read off the
+    claimed launch record and is never inferred from this request.
 
     Returns the ``launch_id``. It does not return the SMART launch context the
     token response carried, nor the resolved actor: those identifiers are stored
@@ -370,15 +417,129 @@ async def callback(
     )
 
     logger.info(
-        "SMART launch completed for %s (vendor %s), token held for %ds",
+        "SMART launch completed for %s (vendor %s), token held for %ds, delivery %s",
         host,
         pending.ehr_type.value,
         token.ttl_seconds,
+        pending.delivery.value,
     )
+
+    session = LaunchSessionData(
+        launch_id=pending.launch_id,
+        ehr_type=pending.ehr_type,
+        expires_in=token.ttl_seconds,
+    )
+
+    target = redirect_target_for(
+        pending.delivery,
+        web_return_url=settings.smart_web_return_url,
+        mobile_return_uri=settings.smart_mobile_return_uri,
+    )
+    if target is None:
+        return ApiResponse[LaunchSessionData](data=session)
+
+    claim = store.new_claim_code()
+    await store.save_launch_claim(
+        redis,
+        claim,
+        LaunchClaim(
+            launch_id=session.launch_id,
+            ehr_type=session.ehr_type,
+            expires_in=session.expires_in,
+        ),
+        ttl_seconds=settings.smart_launch_claim_ttl_seconds,
+    )
+    # The claim code goes in the URL and the launch_id never does. The code
+    # names this launch for two minutes and dies on first use; the launch_id
+    # resolves to an EHR access token for as long as the launch lives, which is
+    # what makes one safe to carry here and the other not. Neither the code nor
+    # the launch_id is logged.
+    logger.info("Handing the completed launch to a %s client.", pending.delivery.value)
+    # 302 rather than 307 for the reason the launch redirect gives: this is a
+    # browser navigation and the method must not be preserved across it.
+    return RedirectResponse(append_claim(target, claim), status_code=status.HTTP_302_FOUND)
+
+
+class LaunchClaimRequest(BaseModel):
+    """The code a client presents to collect the launch it started."""
+
+    claim: str = Field(
+        min_length=1,
+        description=(
+            "The single-use code from the `claim` query parameter on the "
+            "redirect. Presented in a request body, never in a URL."
+        ),
+    )
+
+
+@router.post(
+    "/launch/claim",
+    response_model=ApiResponse[LaunchSessionData],
+    summary="Redeem a completed launch",
+    response_description="The launch_id naming the launch this code was minted for.",
+    responses=error_responses(
+        status.HTTP_404_NOT_FOUND,
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        descriptions={
+            status.HTTP_404_NOT_FOUND: (
+                "No such claim. It was never issued, has expired, or has already "
+                "been redeemed — one answer, deliberately."
+            ),
+        },
+    ),
+)
+async def redeem_launch_claim(
+    redis: Annotated[Redis, Depends(get_redis)],
+    body: Annotated[LaunchClaimRequest, Body()],
+) -> ApiResponse[LaunchSessionData]:
+    """Exchange a handoff code for the launch it names.
+
+    The other half of TASK-051f. ``GET /fhir/callback`` redirects a
+    ``delivery=web`` or ``delivery=mobile`` launch to the client's return target
+    carrying this code; the client posts it here and learns its ``launch_id``.
+
+    **A POST, and the code travels in the body.** The whole reason the redirect
+    carries a claim code rather than the ``launch_id`` is that a URL is where a
+    credential gets logged by intermediaries — so redeeming through a URL would
+    give back what the indirection was for.
+
+    **Single-use, and enforced atomically.** ``claim_handoff()`` reads and
+    deletes in one round trip, so a second redemption finds nothing and gets a
+    404 rather than a second working handle. Unknown, expired and
+    already-redeemed are one answer for the same reason an unknown ``state`` is:
+    telling them apart would tell a caller probing codes which ones were real.
+
+    **No audit row.** This returns a ``launch_id``, a vendor name and a number of
+    seconds — no patient data — and CLAUDE.md's rule is an if-and-only-if in both
+    directions: operational writes in ``audit_log`` make "who accessed patient X"
+    a query you have to filter rather than one you can just run. It logs at INFO,
+    the same answer ``GET /fhir/callback`` and ``POST /policies/ingest`` got. The
+    PHI reads made under the resulting launch audit as they already do.
+
+    Returns:
+        The same ``{launch_id, ehr_type, expires_in}`` body the JSON delivery
+        returns. A client cannot tell which delivery it went through, and
+        nothing here discloses the access token, the refresh token, the scope or
+        the launch's patient context.
+    """
+    claimed = await store.claim_handoff(redis, body.claim)
+    if claimed is None:
+        # The presented code is not logged: it is short-lived, but a credential
+        # in a log line is a credential in a log line.
+        logger.info("Rejected a launch claim: no pending handoff for the presented code.")
+        raise ApiHTTPException(
+            status.HTTP_404_NOT_FOUND,
+            ERROR_CODE_UNKNOWN_CLAIM,
+            "No such launch claim. It may have expired or already been redeemed.",
+        )
+
+    # Neither the claim code nor the launch_id reaches this line. The vendor is
+    # the useful half operationally and is not a credential.
+    logger.info("Launch claim redeemed for a %s launch.", claimed.ehr_type.value)
     return ApiResponse[LaunchSessionData](
         data=LaunchSessionData(
-            launch_id=pending.launch_id,
-            ehr_type=pending.ehr_type,
-            expires_in=token.ttl_seconds,
+            launch_id=claimed.launch_id,
+            ehr_type=claimed.ehr_type,
+            expires_in=claimed.expires_in,
         )
     )

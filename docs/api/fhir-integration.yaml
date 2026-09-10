@@ -152,6 +152,24 @@ paths:
             title: Launch
           description: The EHR's opaque launch context. Present on an EHR launch and absent
             on a standalone launch, which is the only thing that distinguishes the two.
+        - name: delivery
+          in: query
+          required: false
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/LaunchDelivery'
+            description: How the completed launch should be handed back. `json` answers in
+              the callback's response body, which is what a service-to-service caller reads.
+              `web` and `mobile` redirect to that platform's configured return target with
+              a single-use claim code. Absent means no client is waiting — an EHR-initiated
+              launch, or a service-to-service caller — and answers `json`.
+            default: json
+            title: Delivery
+          description: How the completed launch should be handed back. `json` answers in the
+            callback's response body, which is what a service-to-service caller reads. `web`
+            and `mobile` redirect to that platform's configured return target with a single-use
+            claim code. Absent means no client is waiting — an EHR-initiated launch, or a
+            service-to-service caller — and answers `json`.
       responses:
         '302':
           description: Redirect to the EHR's authorization endpoint.
@@ -242,6 +260,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse_LaunchSessionData_'
+        '302':
+          description: 'The launch declared `delivery=web` or `delivery=mobile`: a redirect
+            to that platform''s return target, carrying a single-use `claim` code and never
+            the launch_id.'
         '400':
           description: The `state` is unknown, expired or already consumed, or the authorization
             server reported that the provider declined.
@@ -265,6 +287,71 @@ paths:
         '502':
           description: The EHR's authorization server could not be reached, or answered in
             a way this service cannot use.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+  /fhir/launch/claim:
+    post:
+      tags:
+        - smart
+      summary: Redeem a completed launch
+      description: 'Exchange a handoff code for the launch it names.
+
+
+        The other half of TASK-051f. ``GET /fhir/callback`` redirects a
+
+        ``delivery=web`` or ``delivery=mobile`` launch to the client''s return target
+
+        carrying this code; the client posts it here and learns its ``launch_id``.
+
+
+        **A POST, and the code travels in the body.** The whole reason the redirect
+
+        carries a claim code rather than the ``launch_id`` is that a URL is where a
+
+        credential gets logged by intermediaries — so redeeming through a URL would
+
+        give back what the indirection was for.
+
+
+        **Single-use, and enforced atomically.** A second redemption finds nothing
+
+        and gets a 404 rather than a second working handle. Unknown, expired and
+
+        already-redeemed are one answer, so a caller probing codes learns nothing
+
+        about which ones were real.
+
+
+        **No audit row.** This returns a launch_id, a vendor name and a number of
+
+        seconds — no patient data. It logs at INFO, the same answer
+
+        ``GET /fhir/callback`` and ``POST /policies/ingest`` got.'
+      operationId: redeem_launch_claim_fhir_launch_claim_post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LaunchClaimRequest'
+      responses:
+        '200':
+          description: The launch_id naming the launch this code was minted for.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_LaunchSessionData_'
+        '404':
+          description: No such claim. It was never issued, has expired, or has already been
+            redeemed — one answer, deliberately.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse_NoneType_'
+        '422':
+          description: The request body or path parameter is invalid.
           content:
             application/json:
               schema:
@@ -1966,6 +2053,29 @@ components:
         keeps out of URLs and logs. There is no reason to put a capability handle in
 
         one more place.'
+    LaunchClaimRequest:
+      properties:
+        claim:
+          type: string
+          minLength: 1
+          title: Claim
+          description: The single-use code from the `claim` query parameter on the redirect.
+            Presented in a request body, never in a URL.
+      type: object
+      required:
+        - claim
+      title: LaunchClaimRequest
+      description: The code a client presents to collect the launch it started.
+    LaunchDelivery:
+      type: string
+      enum:
+        - json
+        - web
+        - mobile
+      title: LaunchDelivery
+      description: How the completed launch reaches whoever started it. A closed vocabulary,
+        and a StrEnum because the value round-trips through Redis — written onto the pending
+        launch at the redirect and read back at the callback.
     LaunchSessionData:
       properties:
         launch_id:
