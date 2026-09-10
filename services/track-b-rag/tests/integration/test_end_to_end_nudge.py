@@ -337,6 +337,15 @@ def fhir_integration(hapi: str) -> Iterator[str]:
         **os.environ,
         "REDIS_URL": os.environ["REDIS_URL"],
         "DATABASE_URL": os.environ["DATABASE_URL"],
+        # fhir-integration validates its client return targets at startup and
+        # refuses to boot without them (TASK-051f), so a subprocess that starts
+        # it owes them the same as it owes the two above. Their values are
+        # irrelevant to this test — nothing here completes a SMART launch — but
+        # their presence is not: without them uvicorn dies during import and the
+        # failure arrives as "exited before serving" rather than as anything
+        # naming a setting.
+        "SMART_WEB_RETURN_URL": "https://app.medauth.test/launch",
+        "SMART_MOBILE_RETURN_URI": "medauth://launch",
     }
     process = subprocess.Popen(  # noqa: S603 - a fixed command, no shell
         [

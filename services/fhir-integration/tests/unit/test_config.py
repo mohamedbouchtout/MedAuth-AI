@@ -202,3 +202,39 @@ class TestCoverMyMedsIsBound:
 
         assert "cmm-key-value" not in repr(settings)
         assert "cmm-key-value" not in str(settings)
+
+
+class TestTheClientReturnTargetsAreBound:
+    """The variables are read, not merely present in ``.env.example`` (TASK-051f).
+
+    The same check ``TestCoverMyMedsIsBound`` makes, for the same reason: a
+    setting that looks configured and is not is the failure this repository has
+    now found several times, and the binding is the part a later refactor can
+    silently drop. It matters more here than usual because the values are also
+    validated at startup, so an unbound one would refuse to boot a deployment
+    that had configured it correctly.
+    """
+
+    def test_the_web_return_url_is_read_from_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SMART_WEB_RETURN_URL", "https://app.medauth.example/launch")
+
+        assert Settings().smart_web_return_url == "https://app.medauth.example/launch"
+
+    def test_the_mobile_return_uri_is_read_from_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SMART_MOBILE_RETURN_URI", "medauth-test://launch")
+
+        assert Settings().smart_mobile_return_uri == "medauth-test://launch"
+
+    def test_the_claim_ttl_is_read_from_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SMART_LAUNCH_CLAIM_TTL_SECONDS", "45")
+
+        assert Settings().smart_launch_claim_ttl_seconds == 45
+
+    def test_the_claim_ttl_default_is_the_documented_two_minutes(self) -> None:
+        assert Settings().smart_launch_claim_ttl_seconds == 120
