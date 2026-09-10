@@ -686,6 +686,139 @@ What follows, for the tasks that depend on this:
   encounter; an `ehr_encounter_id` keys nothing of ours at all — it is a value
   we store and hand back to the EHR, never a key we look anything up by.
 
+### Handing a completed SMART launch back to a client (cross-cutting)
+Settled by TASK-051f, and settled here rather than inside it because both client
+apps consume the result — TASK-025c on mobile and TASK-070 on web — and the rule
+for that case applies: two apps each deciding one cross-cutting question
+separately is how they come to disagree. Both cite this section; neither
+re-derives it.
+
+**The gap.** `GET /fhir/callback` answers with `{launch_id, ehr_type,
+expires_in}` as JSON, rendered in whatever browser the EHR redirected. That is a
+correct answer for a service-to-service caller and no answer at all for an
+application: the browser displays the JSON and the app that started the launch
+never sees it. So no client could obtain a `launch_id`, and every launch-keyed
+route — the TASK-052 reads, TASK-051d's launch context, TASK-025b's patient
+search — was unreachable from both apps.
+
+**What the obvious fix would have cost.** Redirecting to the client with
+`?launch_id=...` puts a capability handle in a URL. A `launch_id` resolves to an
+EHR access token, so holding one is enough to read a chart, and this document
+already refuses that class of value in a query string — "the one place a
+credential is certain to be logged by intermediaries". A fragment is not an
+answer either: it survives a browser but not a native `WebBrowser` result, and
+it still lands in history.
+
+#### The callback keeps its JSON answer and gains a second delivery
+**The callback has two genuinely different callers, not one caller needing a
+different shape.** The service-to-service caller is already served correctly
+today, so the JSON answer is supplemented rather than replaced. Replacing it
+would break a working consumer in order to serve a new one.
+
+**Which answer a launch gets is declared by whoever initiated it — never
+inferred, and never chosen as a default.** `GET /fhir/launch` takes an explicit
+`delivery` parameter naming how the completed launch should be handed back. It
+is recorded on the `fhir_launch:{state}` record, and so it reaches the callback
+on the callback's own request, through the `state` the authorization server
+sends back. The callback reads it off the claimed record and answers
+accordingly.
+
+- **The vocabulary is closed** — `LaunchDelivery`, a `StrEnum`, for the third
+  reason this repository has already made one: the value round-trips through
+  Redis, so a free-form string would put the write side and the read side in two
+  modules with nothing holding them in step. Same argument as `EHRType`,
+  `AuditAction` and the payer slugs.
+- **`delivery=json`** is the existing answer, unchanged.
+- **`delivery=web`** and **`delivery=mobile`** redirect the browser to that
+  platform's configured return target, carrying a claim code rather than the
+  `launch_id`.
+- **An absent `delivery` means no client is waiting for this launch**, which is
+  exactly true of an EHR-initiated launch — where the EHR, not one of our apps,
+  opens the launch URL — and of a service-to-service caller. It answers JSON.
+  That is not a default chosen between two candidates; it is the unchanged
+  behaviour of the only caller that existed before this section, and it is why
+  an EHR launch nobody's app started does not redirect into an app that is not
+  running.
+- **Nothing sniffs the request to decide.** Not `Accept`, not `User-Agent`, not
+  the presence of some other parameter. A caller that cannot see how its
+  response shape was chosen cannot tell a wrong guess from a correct answer.
+
+#### The handoff is a single-use claim code, exchanged over POST
+The shape is the one this flow already uses for the launch itself, because the
+threat model is identical: `fhir_launch:{state}` is minted server-side, held
+briefly, and consumed atomically by the callback so a replay finds nothing.
+
+- **`fhir_launch_claim:{claim}`** holds `launch_id`, `ehr_type` and the access
+  token's expiry, under a short TTL bounding a browser redirect reaching an app
+  rather than anything a human does.
+- **`POST /fhir/launch/claim`** exchanges the code for the same
+  `{launch_id, ehr_type, expires_in}` body the JSON delivery returns. A POST,
+  never a GET: the code is redeemed in a request body, not a URL.
+- **Redemption is atomic and single-use**, through the same `GETDEL` that
+  `claim_launch()` uses. A redeemed code is gone, so a second attempt is a 404 —
+  never a second working handle. Unknown, expired and already-redeemed are one
+  answer, as they already are for an unknown `state`, so a caller probing codes
+  learns nothing about which ones were real.
+- **The claim code is not the capability handle.** It names one launch for a few
+  seconds and dies on first use, which is what makes it safe to carry in a
+  redirect where a `launch_id` is not. This is the same distinction OAuth itself
+  draws between the authorization `code` already arriving in this service's own
+  callback query string and the access token that code buys.
+- **Everything TASK-051 protects stays protected.** No access token, refresh
+  token or scope reaches the client; the response carries only what the JSON
+  delivery already carried. Nothing logs the `launch_id`, and nothing logs the
+  claim code either — a short-lived credential is still a credential.
+
+**What this does not defend against, stated rather than left to be found.** A
+claim code intercepted between the redirect and the app — a hostile app
+registering the same custom URI scheme on Android is the real case — could be
+redeemed by the interceptor within the TTL. What makes that narrow rather than
+open: the window is seconds, the code dies on first use so a race is visible as
+a failed launch rather than a silent one, and `openAuthSessionAsync` returns the
+redirect to the app that opened the session. The upgrade path if that stops
+being enough is to bind the claim to a client-generated verifier the way PKCE
+already binds the authorization code, reusing `src/smart/pkce.py` unchanged. It
+is deliberately not built now, and the condition to revisit it is a real vendor
+or platform where scheme interception is demonstrated, not a hypothetical.
+
+#### Two return targets, two settings, both bound and both validated
+**A mobile app URI scheme and a web HTTPS URL are not one setting with an
+assumed format**, and modelling them as one would mean a value whose validity
+depends on which client happens to use it. They are separate, explicitly named,
+and read from a config class rather than sitting in `.env.example` with no
+reader — the failure this repository has already found three times.
+
+- **`SMART_WEB_RETURN_URL`** — an absolute `https://` URL. `http://` is accepted
+  only for `localhost` and `127.0.0.1`, which is what local development and CI
+  actually run; TLS everywhere applies to everything else.
+- **`SMART_MOBILE_RETURN_URI`** — a custom scheme URI such as
+  `medauth://launch`. `http`/`https` is refused here: a scheme the OS routes
+  back to the app that opened the auth session is the whole point, and an https
+  URL in this setting would open a web page instead of returning to the app.
+- **Neither may carry a query string or a fragment**, because the claim code is
+  appended as one and a target that already has a query would silently produce
+  two.
+
+**Both are validated at startup and a bad or missing one refuses to boot.** The
+alternative surfaces as a dead-end at the end of an OAuth redirect chain — after
+discovery, after a human has logged in, after a token exchange — which is the
+single worst place in this system to discover a configuration error, because the
+launch has already spent a real credential and the browser is sitting on a page
+nobody can act on. A startup failure names the variable instead. This does mean
+a deployment that serves only one platform still configures both; that is
+accepted deliberately, because a return target is a deployment-wide constant
+rather than a per-launch one and the cost of setting it is one line.
+
+#### This route touches no PHI, so it logs and does not audit
+`POST /fhir/launch/claim` returns a `launch_id`, a vendor name and a number of
+seconds. None of it is patient data, and Known Constraints #6 is an
+if-and-only-if in both directions: an operational write in `audit_log` makes
+"who accessed patient X" a query you have to filter rather than one you can just
+run. It logs at INFO through `logging.getLogger(__name__)`, exactly as
+`GET /fhir/callback` already does for the same reason and as
+`POST /policies/ingest` does for its own. The PHI reads made *under* the
+resulting launch audit as they already do.
+
 ### Writing clinical data out to the EHR (cross-cutting)
 Everything in this document before this section describes data coming *in* from
 an EHR, or moving between our own services. TASK-053 is the first write in the
@@ -970,6 +1103,20 @@ fhir_token:{launch_id}           cache, TTL = the refresh grant's lifetime, NOT
                                   lifetimes, and at callback time no encounter
                                   exists yet. See "A SMART launch is not an
                                   encounter session" above.
+fhir_launch_claim:{claim}        cache, short TTL (~2 min) — the single-use
+                                  handoff code that carries a completed launch
+                                  back to the app that started it: launch_id,
+                                  ehr_type and the access token's expiry.
+                                  Written by the callback only when the launch
+                                  declared delivery=web or delivery=mobile,
+                                  and consumed atomically by
+                                  POST /fhir/launch/claim, which deletes it —
+                                  a code is single-use exactly as a state is.
+                                  It exists so a redirect can name a launch
+                                  without carrying the launch_id itself, which
+                                  is a capability handle and never goes in a
+                                  URL (TASK-051f — see "Handing a completed
+                                  SMART launch back to a client" above).
 ```
 Lowercase, colon-separated, most-specific segment last. If a task needs a new
 Redis key pattern not listed here, add it to this list in the same PR.

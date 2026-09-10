@@ -4957,20 +4957,65 @@ logic do not change.
     credential is certain to be logged by intermediaries". A fragment is not an
     answer either — it survives the browser but not a native `WebBrowser`
     result, and it still lands in history.
-  - **So the handoff needs a design, and it is a cross-cutting one.** Both apps
-    consume it and the CLAUDE.md rule for that case applies: settle it once in
-    that document and have TASK-025c and TASK-070 cite it. The shape to start
-    from is the one this codebase already uses for the launch itself — a
-    single-use, short-TTL handle exchanged for the real value over a POST, the
-    way `fhir_launch:{state}` is single-use and consumed by the callback. Decide
-    it against a real vendor redirect rather than in the abstract.
+  - **The design is settled in CLAUDE.md**, under "Handing a completed SMART
+    launch back to a client", because both apps consume it and the cross-cutting
+    rule applies. TASK-025c and TASK-070 cite that section. This task builds it;
+    it does not re-derive it. What follows is what that section fixes, restated
+    only as far as this task's own acceptance needs it.
+  - **The callback keeps its JSON answer and gains a second delivery.** Two
+    genuinely different callers — a service-to-service caller already served
+    correctly, and a browser-mediated app flow — rather than one caller needing
+    a different shape universally. Supplement, never replace.
+  - **The deciding signal is an explicit `delivery` parameter on
+    `GET /fhir/launch`**, set by whichever flow initiated the launch, recorded
+    on the `fhir_launch:{state}` record, and reaching the callback on the
+    callback's own request through `state`. `LaunchDelivery` is a `StrEnum`
+    because the value round-trips through Redis. `json` is the existing answer;
+    `web` and `mobile` redirect to that platform's return target. **Absent means
+    no client is waiting** — true of an EHR-initiated launch and of a
+    service-to-service caller — and answers JSON. Nothing infers the caller's
+    kind from `Accept`, `User-Agent`, or any other part of the request.
+  - **The handoff itself is `fhir_launch_claim:{claim}`** — a single-use,
+    short-TTL code carried on the redirect, exchanged for
+    `{launch_id, ehr_type, expires_in}` by `POST /fhir/launch/claim`. Consumed
+    with the same `GETDEL` as `claim_launch()`, for the same reason: a replay
+    must find nothing. Add the key to CLAUDE.md's canonical list in this change.
+  - **Two return targets, two settings.** `SMART_WEB_RETURN_URL` (absolute
+    `https://`, with `http://` allowed only for `localhost`/`127.0.0.1`) and
+    `SMART_MOBILE_RETURN_URI` (a custom scheme, never `http`/`https`), neither
+    carrying a query string or fragment. **Not one setting with an assumed
+    format.** Both are bound in `Settings` and **validated at startup, refusing
+    to boot when missing or malformed** — the alternative surfaces as a dead end
+    at the end of an OAuth redirect chain, after a human has logged in and a
+    real credential has been spent, which is the worst place in this system to
+    find a configuration error.
   - **Whatever is chosen must keep TASK-051's own properties.** No access token,
     refresh token or scope reaches the client; nothing is logged that names the
-    launch; and a handle that has been redeemed cannot be redeemed twice.
+    launch; and a handle that has been redeemed cannot be redeemed twice. The
+    claim code is logged nowhere either — a short-lived credential is still a
+    credential.
+  - **`POST /fhir/launch/claim` writes no audit row, and that is the rule rather
+    than an omission.** It returns a `launch_id`, a vendor name and a number of
+    seconds; none of it is patient data, and Known Constraints #6 is an
+    if-and-only-if in both directions. It logs at INFO, the same answer
+    `GET /fhir/callback` and `POST /policies/ingest` already got. Stated here so
+    a later reader finds a decision rather than a gap.
+  - **CORS is tested, not assumed.** This service already calls `install_cors()`
+    (TASK-052), but a middleware being installed is not evidence that this route
+    and method are covered by its allowed-methods and allowed-headers tuples.
+    The preflight for `POST /fhir/launch/claim` gets its own test.
+  - Update `docs/api/fhir-integration.yaml` in the same change —
+    `tests/unit/api/test_openapi_contract.py` guards it.
   - **Test:** a completed launch is redeemable exactly once, and the second
     attempt is a 404 rather than a second working handle
   - **Test:** no log line and no redirect URL emitted by the flow contains the
     `launch_id`
+  - **Test:** a launch that declared no `delivery` still answers JSON, and a
+    launch that declared `web` or `mobile` redirects to that platform's target
+  - **Test:** startup refuses a missing or malformed return target, naming the
+    variable
+  - **Test:** the `POST /fhir/launch/claim` preflight is answered for a
+    configured browser origin
 
 - [x] **TASK-052:** Base FHIR resource fetching (implements base.py methods)
   - Service: `services/fhir-integration`
