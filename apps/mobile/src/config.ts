@@ -97,6 +97,51 @@ export const FHIR_INTEGRATION_URL =
   process.env.EXPO_PUBLIC_FHIR_BASE_URL ?? 'http://localhost:8004';
 
 /**
+ * The EHR a standalone SMART launch targets — its FHIR base URL, the `iss` in
+ * SMART's own vocabulary.
+ *
+ * **Only a standalone launch needs this.** An EHR-initiated launch arrives
+ * carrying its own `iss`, because the EHR is the party naming itself; a provider
+ * opening MedAuth directly has told us nothing, so the app supplies it.
+ *
+ * **Empty is a real state and the app says so.** With this unset there is no
+ * standalone launch to offer, and reporting that is the honest version of it —
+ * the same posture as `patientSelectionUnavailable` reporting that no patient
+ * can be identified. Launching against an empty issuer would fail at SMART
+ * discovery instead, which reads as the EHR being down.
+ *
+ * **One configured issuer is a scope limit, not a design.** Unlike the five
+ * origins above, which genuinely are deployment-wide constants, an issuer is
+ * per-practice as well as per-vendor. There is one pilot-relevant EHR target
+ * today, so one value serves every real caller; the moment a second
+ * EHR-or-practice combination is onboarded this becomes a provider-facing
+ * selection made at launch time rather than a build variable. See CLAUDE.md,
+ * "Which EHR a client-initiated standalone launch targets", for what changes
+ * then — and do not read the single value as having decided against it.
+ *
+ * Not a credential: an `iss` is a public FHIR base URL and the `aud` the
+ * authorization request is bound to, so Expo inlining it costs nothing.
+ */
+export const SMART_ISS = process.env.EXPO_PUBLIC_SMART_ISS ?? '';
+
+/**
+ * Where a completed launch is redirected back to — this app's own URI scheme.
+ *
+ * **It must equal fhir-integration's `SMART_MOBILE_RETURN_URI` exactly**, and
+ * the scheme must be the one registered in `app.json`. The app needs its own
+ * copy because `openAuthSessionAsync` is told which redirect ends the session;
+ * a mismatch against either the service or the manifest fails silently, leaving
+ * the browser on a URL nothing handles and this app unable to tell that from a
+ * provider closing the window.
+ *
+ * A custom scheme rather than `https://`: the point is that the OS routes it
+ * back to the app that opened the auth session. The default matches
+ * `.env.example`, and the redirect carries a single-use claim code — never a
+ * `launch_id`, which is a capability handle and never goes in a URL.
+ */
+export const SMART_RETURN_URI = process.env.EXPO_PUBLIC_SMART_RETURN_URI ?? 'medauth://launch';
+
+/**
  * True when the configured origin is not TLS-protected.
  *
  * Covers both schemes this app configures — `ws://` for the two WebSocket

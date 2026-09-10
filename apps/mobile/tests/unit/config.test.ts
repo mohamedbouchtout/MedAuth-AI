@@ -2,9 +2,13 @@ import {
   API_BASE_URL,
   AUDIO_INGESTION_WS_URL,
   NUDGE_SERVICE_WS_URL,
+  SMART_ISS,
+  SMART_RETURN_URI,
   TRACK_B_RAG_URL,
   isInsecureOrigin,
 } from '../../src/config';
+
+import appManifest from '../../app.json';
 
 describe('AUDIO_INGESTION_WS_URL', () => {
   it('defaults to the local audio-ingestion port from CLAUDE.md', () => {
@@ -77,5 +81,61 @@ describe('isInsecureOrigin', () => {
 
   it('accepts an HTTPS origin', () => {
     expect(isInsecureOrigin('https://api.example')).toBe(false);
+  });
+});
+
+describe('SMART_ISS', () => {
+  /**
+   * Empty is the honest default. There is no issuer a build could assume: an
+   * `iss` is per-practice as well as per-vendor, so a plausible-looking default
+   * would launch every unconfigured deployment at somebody else's EHR.
+   */
+  it('is empty until a deployment names an EHR', () => {
+    expect(SMART_ISS).toBe('');
+  });
+});
+
+describe('SMART_RETURN_URI', () => {
+  it('defaults to the scheme this app registers', () => {
+    expect(SMART_RETURN_URI).toBe('medauth://launch');
+  });
+
+  /**
+   * The drift this guards is silent in both directions. `openAuthSessionAsync`
+   * is told which redirect ends the session, and the OS routes a URL back only
+   * to an app that registered its scheme — so a scheme here that `app.json` does
+   * not declare leaves the browser on a page nothing handles, which the app
+   * cannot tell from a provider closing the login window.
+   *
+   * It does not prove the OS actually routes it: nothing in Jest exercises that,
+   * and it is verified by hand per TASK-025c. What it does prove is that the two
+   * files this repository controls still agree.
+   */
+  it('uses the scheme registered in app.json', () => {
+    const scheme = appManifest.expo.scheme;
+    expect(scheme).toBeTruthy();
+    expect(SMART_RETURN_URI.startsWith(`${scheme}://`)).toBe(true);
+  });
+
+  /**
+   * The claim code is appended as this target's query string, and
+   * fhir-integration validates the same property on its own copy — a target
+   * that already carried a query would silently produce two.
+   */
+  it('carries no query string or fragment', () => {
+    expect(SMART_RETURN_URI).not.toContain('?');
+    expect(SMART_RETURN_URI).not.toContain('#');
+  });
+
+  /**
+   * `isInsecureOrigin` deliberately does not answer for this one. It is a custom
+   * scheme rather than a network origin — the OS routes it back to this app and
+   * nothing is transmitted — so measuring it against TLS would be a category
+   * error, and an `https://` value here would open a web page instead of
+   * returning to the app.
+   */
+  it('is a custom scheme rather than an HTTP origin', () => {
+    expect(SMART_RETURN_URI.startsWith('http://')).toBe(false);
+    expect(SMART_RETURN_URI.startsWith('https://')).toBe(false);
   });
 });
