@@ -2823,8 +2823,13 @@ The insurance policy RAG is the technical core. Build and validate before other 
     TASK-025b filled everything downstream of it.
   - Drive `GET /fhir/launch` in a system browser (Expo's `WebBrowser`
     `openAuthSessionAsync`, not an in-app `WebView` — an OAuth password should
-    never be typed into a screen the app can read), and take the completed
-    launch back through whatever TASK-051f settles.
+    never be typed into a screen the app can read) **with
+    `?delivery=mobile`**, and collect the completed launch from the redirect to
+    `SMART_MOBILE_RETURN_URI`: read the `claim` query parameter off the
+    `openAuthSessionAsync` result and POST it to `/fhir/launch/claim`, which
+    answers `{launch_id, ehr_type, expires_in}`. TASK-051f built that; see
+    CLAUDE.md, "Handing a completed SMART launch back to a client". The code is
+    single-use and short-lived, so redeem it immediately and never persist it.
   - **Both launch types, because TASK-025b's two paths depend on which one
     happened.** An EHR launch carries `iss` and `launch` and yields a patient;
     a standalone launch carries `iss` alone and yields none, which is what makes
@@ -4939,7 +4944,7 @@ logic do not change.
     `TestScopesAreSmartV2` in `tests/unit/test_config.py` is the guard, and it
     fails on any `.read`/`.write`/`.*` literal reaching a requested scope.
 
-- [ ] **TASK-051f:** Hand a completed launch back to a client
+- [x] **TASK-051f:** Hand a completed launch back to a client
   - Prerequisite: TASK-051 (the callback this changes)
   - Service: `services/fhir-integration`; unblocks **TASK-025c** and **TASK-070**
   - **The gap, found while building TASK-025b.** `GET /fhir/callback` answers
@@ -5016,6 +5021,50 @@ logic do not change.
     variable
   - **Test:** the `POST /fhir/launch/claim` preflight is answered for a
     configured browser origin
+  - **Built.** Two commits, and the design is in CLAUDE.md under "Handing a
+    completed SMART launch back to a client" rather than here.
+    - **`delivery` is a `LaunchDelivery` StrEnum on `GET /fhir/launch`**, stored
+      on the `fhir_launch:{state}` record and read back off the claimed record
+      at callback time. A value nobody defined is a 422 rather than a silent
+      fall back to `json` — the closed vocabulary earning its keep at the point
+      it would otherwise have to guess.
+    - **The JSON answer is untouched.** Both the absent-`delivery` case and an
+      explicit `delivery=json` return exactly what TASK-051 returned, and both
+      have their own test, because "supplement, not replace" is a claim about
+      the caller that already worked.
+    - **`POST /fhir/launch/claim` redeems through `store.claim_handoff()`**,
+      which is `claim_launch()`'s `GETDEL` against a second key. The code is 32
+      bytes of `secrets`, base64url, like the PKCE verifier beside it rather
+      than like the `uuid4` identifiers — it is carried into a client and
+      redeemable, which those are not.
+    - **The whole flow was tested for what it must not emit**, not only for what
+      it returns: one test drives launch → callback → redemption at `DEBUG` and
+      asserts neither the `launch_id` nor the claim code appears in any log
+      record, and another asserts a rejected code is not echoed either.
+    - **`create_app()` validates both return targets and refuses to boot.** That
+      broke every existing test, which is the honest evidence the check is real:
+      `src/main.py` builds its app at module scope, so importing it during
+      collection already runs it. `tests/conftest.py` sets the two variables at
+      import time as well as per test — a fixture cannot be early enough.
+    - **A test asserts the claim's TTL is the configured short one**, because a
+      claim written under the launch record's TTL instead would be a silent
+      widening of the only window an intercepted code is useful in, and nothing
+      else would have noticed.
+    - **`test_cors.py` is new, and this service had none.** TASK-052 installed
+      the policy and added no service-level test, so "the route is covered"
+      rested on the installation site — which says nothing about whether the
+      policy's fixed methods and headers admit a POST on a new path. The
+      preflight passes, but it now passes provably. The complementary case is
+      there too: an unconfigured deployment answers no browser, which is what
+      stops the first test from also passing against a permissive default.
+    - **What is deliberately not built is the claim-to-verifier binding.** A
+      code intercepted between the redirect and the app could be redeemed inside
+      the TTL; the window is seconds, the code dies on first use, and
+      `openAuthSessionAsync` returns the redirect to the app that opened the
+      session. The PKCE-shaped upgrade path and the condition that would trigger
+      it are recorded in CLAUDE.md rather than left as an unexamined omission.
+    - 533 tests in fhir-integration at 96%, against the 80% gate. Each commit
+      lints, typechecks and passes its own suite.
 
 - [x] **TASK-052:** Base FHIR resource fetching (implements base.py methods)
   - Service: `services/fhir-integration`
@@ -6873,9 +6922,13 @@ logic do not change.
     `src/session/patientSource.ts` — mirror that order rather than re-deriving
     it). `provider_id` comes back from the launch-context call already resolved,
     so this app never handles a practitioner reference. **Obtaining the
-    `launch_id` in the first place is TASK-051f plus this app's own half of
-    it** — the same gap TASK-025c closes on mobile, and this task cannot start a
-    session without it. Then `POST /sessions/start` (TASK-006) with the selected
+    `launch_id` in the first place is this app's half of TASK-051f**, which is
+    built: drive `GET /fhir/launch?delivery=web`, then read the `claim` query
+    parameter off the redirect to `SMART_WEB_RETURN_URL` and POST it to
+    `/fhir/launch/claim`. Redeem it immediately — it is single-use and
+    short-lived — and never put a `launch_id` in a URL of this app's own. See
+    CLAUDE.md, "Handing a completed SMART launch back to a client"; TASK-025c
+    does the same thing on mobile and neither app re-derives it. Then `POST /sessions/start` (TASK-006) with the selected
     patient — passing `launch_id` and `ehr_encounter_id` too, which is what
     fills the payer columns (TASK-052b) — and begin audio capture (TASK-023)
     once session_id + jwt are returned
