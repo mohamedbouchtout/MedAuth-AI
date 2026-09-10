@@ -2,7 +2,7 @@
   "name": "@medauth/mobile",
   "version": "0.1.0",
   "private": true,
-  "description": "MedAuth AI mobile app \u2014 Expo. Captures encounter audio and streams it to the audio-ingestion service.",
+  "description": "MedAuth AI mobile app — Expo. Captures encounter audio and streams it to the audio-ingestion service.",
   "main": "index.ts",
   "scripts": {
     "start": "expo start",
@@ -20,6 +20,7 @@
     "expo-audio": "~57.0.4",
     "expo-haptics": "~57.0.2",
     "expo-status-bar": "~57.0.1",
+    "expo-web-browser": "~57.0.2",
     "react": "19.2.8",
     "react-native": "0.86.2"
   },
