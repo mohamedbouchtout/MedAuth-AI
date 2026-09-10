@@ -126,8 +126,10 @@ it('never reaches the session screen when no launch is held', async () => {
 
   const view = await render(<VisitFlow launchId={null} fhir={fhir} sessions={sessions} />);
 
-  // This is every build until TASK-025c, and it is deliberate: a visit started
-  // against an invented identifier is silent at every layer below this.
+  // `LaunchFlow` reaches this component only with a real launch since TASK-025c,
+  // so this is the defensive case rather than a build's normal state — and it
+  // stays deliberate: a visit started against an invented identifier is silent
+  // at every layer below this.
   expect(view.getByTestId('picker-error')).toBeTruthy();
   expect(view.queryByTestId('start-visit')).toBeNull();
   expect(sessions.started).toHaveLength(0);

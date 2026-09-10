@@ -33,7 +33,7 @@ import {
 } from '../session/patientSource';
 
 export const NO_LAUNCH_MESSAGE =
-  'MedAuth AI cannot start a visit yet: this build cannot obtain a SMART launch, so it has no way to identify the patient. Launching from the EHR arrives in TASK-025c.';
+  'MedAuth AI is not signed in to an EHR, so it has no way to identify the patient. Sign in to the EHR and try again.';
 
 export const NO_PROVIDER_MESSAGE =
   'This launch did not identify the provider, so a visit cannot be started. Launch MedAuth AI again from the EHR; if it keeps happening, the EHR is not supplying a verifiable practitioner.';
@@ -65,8 +65,10 @@ export interface PatientPickerScreenProps {
   /**
    * The SMART launch this app holds, or null when it holds none.
    *
-   * Null is every build until TASK-025c: both routes behind this screen are
-   * keyed on a launch because both need its EHR access token.
+   * `LaunchFlow` reaches this screen only with a real launch, since TASK-025c;
+   * null is kept as a state rather than made impossible because both routes
+   * behind this screen are keyed on a launch, and a caller that has none should
+   * be told so rather than issue a request that cannot identify anybody.
    */
   launchId: string | null;
   /** Called once the subject is decided. The visit starts after this. */

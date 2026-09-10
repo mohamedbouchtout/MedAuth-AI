@@ -48,17 +48,6 @@ export interface VisitSubject {
 export type PatientSource = () => Promise<VisitSubject | null>;
 
 /**
- * The production source before a launch exists: there isn't one.
- *
- * Still wired in `App.tsx` when the app holds no `launch_id`, which is every
- * build until **TASK-025c** performs a SMART launch from this platform. Both
- * routes below are keyed on a launch, because both need its EHR access token,
- * so without one this app genuinely cannot identify anybody — and showing a
- * provider that a visit cannot start is the honest version of that.
- */
-export const patientSelectionUnavailable: PatientSource = async () => null;
-
-/**
  * Turn a launch context into a subject, or null when it named no patient.
  *
  * Null here is not an error and does not mean the launch is bad: a standalone
