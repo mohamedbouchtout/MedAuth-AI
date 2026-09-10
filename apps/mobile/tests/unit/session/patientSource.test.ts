@@ -2,7 +2,6 @@ import type { ApiResult } from '@medauth/session-client';
 
 import type { FhirApi, LaunchContext, PatientSearchResults } from '../../../src/api/fhir';
 import {
-  patientSelectionUnavailable,
   resolveLaunch,
   subjectFromLaunch,
   subjectFromMatch,
@@ -130,11 +129,5 @@ describe('subjectFromMatch', () => {
       launchId: LAUNCH_ID,
     });
     expect(subject.ehrEncounterId).toBeUndefined();
-  });
-});
-
-describe('patientSelectionUnavailable', () => {
-  it('still resolves to nothing, because a build with no launch identifies nobody', async () => {
-    await expect(patientSelectionUnavailable()).resolves.toBeNull();
   });
 });

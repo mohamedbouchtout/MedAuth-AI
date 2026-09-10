@@ -105,10 +105,9 @@ export const FHIR_INTEGRATION_URL =
  * opening MedAuth directly has told us nothing, so the app supplies it.
  *
  * **Empty is a real state and the app says so.** With this unset there is no
- * standalone launch to offer, and reporting that is the honest version of it —
- * the same posture as `patientSelectionUnavailable` reporting that no patient
- * can be identified. Launching against an empty issuer would fail at SMART
- * discovery instead, which reads as the EHR being down.
+ * standalone launch to offer, and `LaunchScreen` reports exactly that rather
+ * than showing a button that cannot work. Launching against an empty issuer
+ * would fail at SMART discovery instead, which reads as the EHR being down.
  *
  * **One configured issuer is a scope limit, not a design.** Unlike the five
  * origins above, which genuinely are deployment-wide constants, an issuer is

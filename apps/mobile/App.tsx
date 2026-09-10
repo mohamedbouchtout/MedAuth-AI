@@ -1,35 +1,28 @@
 import { StatusBar } from 'expo-status-bar';
 import { View, StyleSheet } from 'react-native';
 
-import { VisitFlow } from './src/screens/VisitFlow';
-
-/**
- * The SMART launch this app holds.
- *
- * `null` in every build, because **nothing here performs a SMART launch yet** —
- * that is TASK-025c, and the handoff it depends on is TASK-051f. Both routes
- * that identify a patient are keyed on a `launch_id`, because both spend the
- * launch's EHR access token, so without one this app can identify nobody, and
- * the picker says so rather than starting a visit against an invented
- * identifier.
- *
- * It is one named constant so that the remaining gap is a single value: when
- * TASK-025c lands, what replaces it is the launch that task obtains, and nothing
- * else on this path changes.
- */
-const LAUNCH_ID: string | null = null;
+import { useInboundLaunch } from './src/launch/useInboundLaunch';
+import { LaunchFlow } from './src/screens/LaunchFlow';
 
 /**
  * Root.
  *
- * Everything about the flow lives in `VisitFlow`, which is a component rather
- * than inline here so the whole path — launch context, search, selection, start
- * visit — can be driven in a test with a launch injected.
+ * The whole flow lives in `LaunchFlow`, which is a component rather than inline
+ * here so it can be driven in a test with a fake browser and a fake service.
+ * What is genuinely this file's is the one thing a test cannot supply: whether
+ * the operating system handed this app an EHR-initiated launch when it opened.
+ *
+ * The named `LAUNCH_ID` constant that stood here until TASK-025c is gone. It
+ * was null in every build, and it was the single remaining reason this app
+ * could identify nobody; the launch it stood in for is now obtained rather than
+ * configured.
  */
 export default function App() {
+  const inbound = useInboundLaunch();
+
   return (
     <View style={styles.root}>
-      <VisitFlow launchId={LAUNCH_ID} />
+      <LaunchFlow inbound={inbound} />
       <StatusBar style="auto" />
     </View>
   );

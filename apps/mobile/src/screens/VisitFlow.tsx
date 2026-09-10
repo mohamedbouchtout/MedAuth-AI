@@ -8,8 +8,9 @@
  * neither identifier had a source, and this is the source.
  *
  * It is a component rather than inline in `App.tsx` so the whole path can be
- * driven in a test with a launch injected. `App` holds the one thing this cannot
- * supply — a real `launch_id` — and that is still null until TASK-025c.
+ * driven in a test with a launch injected. The launch itself comes from
+ * `LaunchFlow`, which obtains one before this component is rendered at all
+ * (TASK-025c); until then nothing on this platform could produce one.
  */
 
 import { useCallback, useState } from 'react';
