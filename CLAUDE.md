@@ -819,6 +819,45 @@ run. It logs at INFO through `logging.getLogger(__name__)`, exactly as
 `POST /policies/ingest` does for its own. The PHI reads made *under* the
 resulting launch audit as they already do.
 
+### Which EHR a client-initiated standalone launch targets (cross-cutting)
+Settled by TASK-025c, and settled here rather than inside it because TASK-070
+performs the same launch from `apps/web` and the cross-cutting rule applies: two
+apps each deciding one question separately is how they come to disagree.
+
+**The question only exists for a standalone launch.** An EHR-initiated launch
+reaches `GET /fhir/launch` carrying `iss` — the EHR names itself and no client
+chooses anything. A standalone launch is a provider opening MedAuth directly, so
+the app itself has to say which EHR it is launching against, and neither app has
+ever held that value.
+
+**`iss` is read from configuration — `EXPO_PUBLIC_SMART_ISS` on mobile,
+`VITE_SMART_ISS` on web when TASK-070 lands — never a literal in source.** It is
+not a credential: an `iss` is a public FHIR base URL, and it is the `aud` an
+authorization request is bound to rather than anything that authorises access,
+so Expo inlining it into the shipped bundle costs nothing. An app whose variable
+is unset offers no standalone launch and says so, on the same terms as
+`patientSelectionUnavailable` reporting that no patient can be identified —
+never a launch against an empty issuer, which fails at SMART discovery in a way
+that reads as the EHR being down.
+
+**One configured `iss` per deployment is a deliberate scope limit tied to the
+current pilot stage. It is not an architectural choice, and must not be read as
+one.** Unlike `FHIR_INTEGRATION_URL` or `SMART_MOBILE_RETURN_URI`, which
+genuinely are deployment-wide constants, an issuer is per-practice as well as
+per-vendor: two practices on the same EHR have two different FHIR base URLs, and
+the EHR priority order above anticipates five vendors. Today there is one
+pilot-relevant target — Athenahealth, first in that order — so a single
+configured value serves every real caller, and building a selection mechanism
+now would be guessing at a shape nobody has yet.
+
+**The trigger to revisit is the second EHR-or-practice combination being
+onboarded, and at that point this stops being configuration at all.** Which
+practice a provider is launching against becomes a provider-facing choice made
+at launch time rather than a deployment-wide constant, so the value moves out of
+the build's environment and into a selection the app presents — and both apps
+take it from wherever that selection is recorded. Nothing here decides against
+that; the single-value arrangement is what one target costs today.
+
 ### Writing clinical data out to the EHR (cross-cutting)
 Everything in this document before this section describes data coming *in* from
 an EHR, or moving between our own services. TASK-053 is the first write in the

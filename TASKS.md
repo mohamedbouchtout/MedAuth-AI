@@ -2835,11 +2835,36 @@ The insurance policy RAG is the technical core. Build and validate before other 
     a standalone launch carries `iss` alone and yields none, which is what makes
     the search path reachable. Do not build only the EHR case: the search half
     of TASK-025b would then be untestable against a real launch.
+  - **Which EHR a standalone launch targets is configuration, and that is a
+    scope limit rather than a design.** An EHR launch carries `iss` from the EHR
+    itself; a standalone launch has to supply it, and nothing in this app holds
+    it. It comes from `EXPO_PUBLIC_SMART_ISS`, exported from
+    `apps/mobile/src/config.ts` like every other origin this app reads — a
+    variable sitting in `.env.example` that no module exports is a setting that
+    looks configured and is not. With it unset the app offers no standalone
+    launch and says so, never a launch against an empty issuer. **One configured
+    issuer per deployment is deliberate, tied to there being one pilot-relevant
+    EHR target today, and it stops being adequate the moment a second
+    EHR-or-practice combination is onboarded** — at which point the value becomes
+    a provider-facing selection rather than a build variable. The reasoning, and
+    what changes when that trigger fires, is in CLAUDE.md under "Which EHR a
+    client-initiated standalone launch targets"; TASK-070 cites that section
+    rather than deciding it again.
   - **`launch_id` is stored in memory for the life of the app process, never on
     disk.** It resolves to an EHR access token, so it is a credential by the
     definition this repository already applies to it — `expo-secure-store` would
     be the floor if it ever needed to persist, and it does not, because a launch
     outlives neither the working day nor `SMART_LAUNCH_RECORD_TTL_SECONDS`.
+  - **The custom scheme is registered in `app.json` and verified against a real
+    OS, not merely compiled.** `expo-web-browser` is a new dependency here, and
+    the scheme registered in `app.json` must match `SMART_MOBILE_RETURN_URI`
+    exactly. A mismatch fails silently: the browser lands on a URL nothing
+    handles, `openAuthSessionAsync` never returns a redirect, and the app sees
+    something indistinguishable from a provider abandoning the login — the
+    failure mode this task's third test asserts is the *legitimate* one. Nothing
+    in Jest exercises OS URL routing, so the automated tests fake the
+    `WebBrowser` result and the routing itself is checked by hand on a simulator
+    or device, with the outcome recorded in this task's Built note.
   - **Test:** an EHR launch yields a `launch_id` and the patient source takes the
     launch context path
   - **Test:** a standalone launch yields a `launch_id` and the patient source
