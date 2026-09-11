@@ -3891,7 +3891,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
     - **No OpenAPI change.** CORS middleware adds no routes, so the committed
       specs and their drift tests are untouched.
 
-- [ ] **TASK-041d:** Transcript WebSocket relay
+- [x] **TASK-041d:** Transcript WebSocket relay
   - Service: `services/nudge-service`
   - Prerequisite: TASK-020 (which publishes `transcription:{session_id}`),
     TASK-041 (the relay pattern and `packages/session-auth`), TASK-041c (the
@@ -4016,6 +4016,92 @@ The insurance policy RAG is the technical core. Build and validate before other 
     unaltered — the property "verbatim" actually means
   - **Test:** one audit row per accepted connection, as `RELAY_TRANSCRIPT`, and
     not one per relayed segment
+  - Built (117 tests, 100% coverage against the 80% gate). Decisions worth
+    knowing before touching this:
+    - **The lifecycle was factored before the second route was written, and that
+      was the whole shape of the work.** `serve_stream()` in
+      `src/api/websocket.py` holds the origin check, the pre-handshake refusal,
+      the accept, the audit, the task group, the close codes and the teardown;
+      a `RelayedStream` names the only three things that differ between streams
+      — a label for logs, a canonical channel template, and the audit function.
+      The transcript route is then four lines. Writing it standalone would have
+      produced a near-verbatim copy of a working route, which is what TASK-041
+      itself refused when it extracted `packages/session-auth`.
+    - **`relay.py`'s helpers lost their nudge-specific names in the same
+      change.** `is_nudge_message` became `is_published_message`, and
+      `decode_payload` takes the channel so a dropped payload is logged against
+      the stream it came from. A factored function with misleading
+      nudge-specific naming would have been a half-measure — the next reader
+      would have to check whether "nudge" in the name meant anything.
+    - **Two test fixtures moved their patch target, and one of them proved why
+      it mattered.** The audit function is now reached through the stream
+      description, so `monkeypatch.setattr(websocket_module,
+      "audit_nudge_stream", ...)` replaces a reference nothing reads. The unit
+      fixture would simply have recorded nothing. The *integration* fixture
+      failed loudly instead — the real `audit_nudge_stream` ran and
+      `hipaa_logger` rejected `TestClient`'s `testclient` host as not an IP
+      address — which is the only reason the stale target was visible at all.
+      Both now `dataclasses.replace` the frozen description, which fails
+      loudly if the field is ever renamed.
+    - **Two OpenAPI guard tests were passing by coincidence and were rewritten
+      deliberately.** `test_the_documented_path_is_the_one_the_app_serves` read
+      `next(iter(published["x-websocket-endpoints"]))` and compared the *first*
+      documented entry against the nudge route. With one endpoint that was
+      equivalent; with two it would have gone on passing while asserting
+      nothing about the second, because the nudge entry is still written first.
+      The close-code test had the same shape, keyed on one path constant. Both
+      now compare documented against served in both directions, parameterised
+      over every stream, and a third test asserts each stream's spec prose names
+      the audit action it actually writes. Verified by deleting the transcript
+      entry from the spec and watching four guards fail, then restoring it — a
+      test that confirms its own name by coincidence is worse than no test.
+    - **The `Origin` tests are parameterised over both paths**, even though the
+      check now lives in one shared function. The shared path covers the logic;
+      what it does not cover is a *route* that fails to go through that
+      lifecycle, which is exactly what a future third stream might do. A third
+      stream is now one entry in `STREAMS` away from being covered.
+    - **The integration suite's sharpest test is the one the unit suite cannot
+      write.** It publishes a real nudge to `nudges:{session_id}` for the same
+      session while a transcript socket is open: a route that kept the nudge
+      channel template would authenticate, accept, audit as a transcript
+      access and then relay nudges — green on every other assertion in the
+      file. Only the segment may arrive.
+    - **The transcript segment payload is now canonicalised in CLAUDE.md**,
+      under "The transcript segment payload — one shape". It had one writer and
+      two readers each hand-rolling `json.loads(payload)["text"]`, and TASK-070
+      is about to be the fourth participant and the first in TypeScript. Written
+      now rather than deferred, because a deferred contract lands after the
+      divergence it was meant to prevent — which is exactly how TASK-070 came to
+      assume this relay already existed.
+    - **This relay is not bound by that section.** It forwards the raw string
+      and parses nothing, so the contract binds the writer and the readers that
+      parse, with the relay between them deliberately ignorant. A test asserts
+      on the exact string rather than on decoded JSON for that reason.
+    - **The router's tag changed from `nudges` to `streams`**, and the service
+      description with it. The service relays two channel families now; a tag
+      naming one of them would have made the spec read as though the transcript
+      endpoint were a kind of nudge.
+    - **No new environment variable.** The relay sits on the same port 8005, so
+      `VITE_NUDGE_WS_URL` already reaches it with a different path.
+      `CORS_ALLOWED_ORIGINS` and `JWT_SIGNING_KEY` are the ones it reads and
+      both predate it.
+    - **`audio-ingestion`'s socket docstring was corrected here**, as its own
+      commit. It read "encounter audio in, transcript out", which implies
+      segments return down that connection; they never have, and that module
+      calls no `send_*` method at all. `docs/api/audio-ingestion.yaml` was
+      already right, so the docstring was the only carrier of the older claim.
+    - CI needed no change: the `nudge-service` job already covers
+      `services/nudge-service/**`, the `hipaa-logger` change re-runs every
+      service through the `packages/**` rule, and
+      `docs/api/nudge-service.yaml` selects this service by the filename
+      convention. Each commit in the series typechecks, lints and passes its own
+      suite; the factoring commit passes the pre-existing suite with no
+      assertion altered, which is what makes it evidence that behaviour was
+      preserved.
+    - **Still not reachable end to end**, on the same terms TASK-041 recorded:
+      nothing in `apps/web` opens this socket until TASK-070, and the
+      integration suite publishes to Redis directly. What it proves is that a
+      real publisher on the canonical channel reaches a real subscriber here.
 
 - [x] **TASK-042:** Nudge UI component (web)
   - App: `apps/web`

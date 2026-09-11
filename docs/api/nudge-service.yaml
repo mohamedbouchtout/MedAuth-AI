@@ -11,17 +11,24 @@ openapi: 3.1.0
 # way to describe one — there is no `websocket:` operation and no place to put a
 # close code. It is documented in prose under `x-websocket-endpoints` below,
 # which is an extension field rather than something a generator understands.
-# The drift test therefore covers `/health` only; what keeps the WebSocket
-# honest is tests/unit/api/test_websocket.py.
+# The drift test therefore covers `/health` only; what keeps the WebSockets
+# honest is tests/unit/api/test_websocket.py and
+# tests/unit/api/test_transcript_websocket.py. The contract test does check that
+# every endpoint documented below is one the app actually serves, and that every
+# served one is documented - in both directions, so neither a stale entry nor a
+# missing one passes.
 
 info:
   title: MedAuth AI — nudge-service
   version: 0.1.0
   description: >-
-    Relays clinical nudges from the Redis bus to connected clients in real time
-    (TASK-041). track-b-rag publishes a nudge to `nudges:{session_id}`
-    (TASK-040); this service subscribes on behalf of one client and forwards
-    each message unaltered to the web (TASK-042) and mobile (TASK-043) apps.
+    Relays one encounter's live streams from the Redis bus to connected clients:
+    clinical nudges (TASK-041) and transcript segments (TASK-041d). A publisher
+    writes to the channel - track-b-rag for nudges (TASK-040), audio-ingestion
+    for transcripts (TASK-020) - and this service subscribes on behalf of one
+    client and forwards each message unaltered to the web (TASK-042, TASK-070)
+    and mobile (TASK-043) apps. It parses no payload and holds no database
+    connection.
 
 servers:
   - url: http://localhost:8005
@@ -30,8 +37,8 @@ servers:
 tags:
   - name: health
     description: Readiness of this service's backing dependencies.
-  - name: nudges
-    description: The live nudge stream for one encounter.
+  - name: streams
+    description: The live streams for one encounter - nudges and transcript.
 
 x-websocket-endpoints:
   /ws/nudges/{session_id}:
@@ -79,6 +86,65 @@ x-websocket-endpoints:
       is relayed. A refused connection writes none — no PHI was reached.
       `actor_id` is the `provider_id` claim from the validated token; this
       service reads no tables.
+  /ws/transcript/{session_id}:
+    summary: One encounter's transcript segments, relayed live from the Redis bus.
+    description: >-
+      Server to client only, on exactly the same terms as the nudge stream above
+      (TASK-041d). Each message is the segment payload published by
+      audio-ingestion to `transcription:{session_id}` (TASK-020), forwarded as
+      the exact string it was published as — this service never parses,
+      reshapes, filters or enriches it. The payload's shape is fixed in
+      CLAUDE.md, "The transcript segment payload — one shape", which has one
+      writer and several readers including one in TypeScript; a relay that
+      edited it would be a second definition of it, free to drift from the one
+      that writes it.
+
+      `is_partial` is always false on this channel: audio-ingestion drops
+      partial results before they reach the bus, so one message arrives per
+      stabilized utterance rather than several per sentence. The field still
+      travels, and a reader must not drop it or assume its value — it is what
+      lets a later task widen the publisher without changing this contract.
+
+      Frames sent by the client are read only to notice the disconnect and are
+      otherwise discarded, deliberately unlike the audio socket, where an
+      unexpected frame type means a broken client and closes with 1003.
+    history: >-
+      **A client sees only what is said after it connects.** Redis pub/sub keeps
+      no history, so a socket opened late in a visit, or reopened after a drop,
+      starts from silence, and the earlier segments are not recoverable from
+      this service — the accumulated transcript lives in track-a-clinical's
+      in-memory buffer (TASK-030) and no route exposes it. A client must
+      therefore not present what it received as a complete transcript, and must
+      render "connected, nothing said yet" differently from "not connected": an
+      empty transcript that reads as "nobody is speaking" is the one thing this
+      stream must not be mistaken for. Replaying the buffer on connect is
+      deliberately out of scope for TASK-041d.
+    authentication: >-
+      Identical to the nudge stream above, through the same
+      packages/session-auth validation — both carriers, either sufficient, and
+      the server echoes `medauth.session.v1` and never the token entry.
+    validation: >-
+      Identical to the nudge stream above: signature against `JWT_SIGNING_KEY`,
+      `exp` in the future, and the token's `session_id` claim equal to the path
+      parameter, all checked before the handshake is accepted. The session id
+      subscribed to comes from the validated token, so a client can only ever
+      watch the encounter its token names — never a pattern across the channel
+      family that carries speech.
+    close-codes:
+      4401: >-
+        The session token is missing, malformed, expired, signed with another
+        key, or was minted for a different session; or the `Origin` is not in
+        `CORS_ALLOWED_ORIGINS`. Because the refusal happens before the handshake
+        completes, a browser observes a failed upgrade rather than an onclose
+        carrying this code.
+      1011: The Redis subscription failed after the handshake was accepted.
+    audit: >-
+      One `RELAY_TRANSCRIPT` row per accepted connection, written before any
+      segment is relayed, and never one per segment — an encounter is hundreds.
+      A refused connection writes none. Deliberately a different action from
+      `RELAY_NUDGES`: speech and alerts are different disclosures, and one
+      action for both would make "was this encounter's speech ever streamed to a
+      client" unanswerable from the audit trail.
 
 paths:
   /health:

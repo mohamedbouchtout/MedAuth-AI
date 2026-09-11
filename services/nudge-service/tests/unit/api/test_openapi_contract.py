@@ -5,10 +5,12 @@ alone drifts: this compares the committed YAML against the app's own generated
 schema on the parts a client depends on — routes, methods, status codes — without
 asserting on wording, so editing a description does not fail the build.
 
-The WebSocket route is outside this comparison by necessity: OpenAPI 3.1 cannot
-describe one, so the spec documents it under an `x-websocket-endpoints`
-extension. The last tests here check that the prose at least still names the
-things the code does, since nothing else can.
+This service's WebSocket routes are outside that comparison by necessity:
+OpenAPI 3.1 cannot describe one, so the spec documents them under an
+`x-websocket-endpoints` extension. The last tests here check that the prose at
+least still names the things the code does, since nothing else can — and they
+compare the documented set against the served set in both directions, so neither
+a stale entry nor an undocumented route slips through.
 """
 
 from __future__ import annotations
@@ -19,12 +21,27 @@ from typing import Any
 import pytest
 import yaml
 
+from hipaa_logger import AuditAction
 from src.api.websocket import WS_CLOSE_INTERNAL_ERROR, WS_CLOSE_UNAUTHORIZED
 from src.main import create_app
 
 SPEC_PATH = Path(__file__).resolve().parents[5] / "docs" / "api" / "nudge-service.yaml"
 
-WEBSOCKET_PATH = "/ws/nudges/{session_id}"
+#: Every WebSocket this service serves, by route function name, mapped to the
+#: path the spec is expected to document it under. Keyed on the function name so
+#: the served path is resolved from the app rather than restated here — a
+#: constant asserted against itself proves nothing.
+WEBSOCKET_PATHS = {
+    "nudge_stream": "/ws/nudges/{session_id}",
+    "transcript_stream": "/ws/transcript/{session_id}",
+}
+
+#: The audit action each stream writes. Held here so the spec's prose can be
+#: checked against the vocabulary rather than against a hardcoded string.
+EXPECTED_AUDIT_ACTIONS = {
+    "nudge_stream": AuditAction.RELAY_NUDGES,
+    "transcript_stream": AuditAction.RELAY_TRANSCRIPT,
+}
 
 
 @pytest.fixture(scope="module")
@@ -76,23 +93,59 @@ def test_documented_port_matches_the_local_dev_table(published: dict[str, Any]) 
     assert published["servers"][0]["url"].endswith(":8005")
 
 
-def test_the_websocket_route_is_documented_as_an_extension(published: dict[str, Any]) -> None:
-    """OpenAPI cannot express it, so it must not silently go undocumented."""
-    assert WEBSOCKET_PATH in published["x-websocket-endpoints"]
+def test_every_websocket_route_is_documented_as_an_extension(published: dict[str, Any]) -> None:
+    """OpenAPI cannot express them, so they must not silently go undocumented."""
+    documented = set(published["x-websocket-endpoints"])
+
+    assert documented == set(WEBSOCKET_PATHS.values())
 
 
-def test_the_documented_path_is_the_one_the_app_serves(published: dict[str, Any]) -> None:
-    """The prose is the only description this route has; it must name the real path."""
-    documented = next(iter(published["x-websocket-endpoints"]))
-    served = create_app().url_path_for("nudge_stream", session_id="{session_id}")
+def test_the_documented_paths_are_the_ones_the_app_serves(published: dict[str, Any]) -> None:
+    """The prose is the only description these routes have; it must name the real paths.
 
-    assert documented == served
+    **Compared as sets, in both directions, and that is a deliberate fix.** This
+    test used to read ``next(iter(...))`` and compare the *first* documented
+    entry against the nudge route's path. With one endpoint that was equivalent;
+    with two it would have gone on passing while asserting nothing whatever
+    about the second, because the nudge entry is still written first. A test
+    that confirms its own name by coincidence rather than by assertion is worse
+    than no test, so it now fails if a documented endpoint is not served or a
+    served one is not documented.
+    """
+    app = create_app()
+    served = {app.url_path_for(name, session_id="{session_id}") for name in WEBSOCKET_PATHS}
+
+    assert set(published["x-websocket-endpoints"]) == served
 
 
-def test_documented_close_codes_match_the_ones_the_route_sends(
-    published: dict[str, Any],
+@pytest.mark.parametrize("route_name", sorted(WEBSOCKET_PATHS))
+def test_documented_close_codes_match_the_ones_each_route_sends(
+    published: dict[str, Any], route_name: str
 ) -> None:
-    """The one part of the WebSocket contract a client actually branches on."""
-    documented = set(published["x-websocket-endpoints"][WEBSOCKET_PATH]["close-codes"])
+    """The one part of the WebSocket contract a client actually branches on.
 
-    assert documented == {WS_CLOSE_UNAUTHORIZED, WS_CLOSE_INTERNAL_ERROR}
+    Parameterised over every stream rather than keyed on a single path constant,
+    for the same reason as the test above: both routes go through one
+    ``serve_stream`` and send the same two codes, so an entry documenting only
+    one of them would have looked complete.
+    """
+    endpoint = published["x-websocket-endpoints"][WEBSOCKET_PATHS[route_name]]
+
+    assert set(endpoint["close-codes"]) == {WS_CLOSE_UNAUTHORIZED, WS_CLOSE_INTERNAL_ERROR}
+
+
+@pytest.mark.parametrize("route_name", sorted(WEBSOCKET_PATHS))
+def test_every_stream_documents_the_audit_action_it_writes(
+    published: dict[str, Any], route_name: str
+) -> None:
+    """Each stream audits under its own action, and the spec has to say which.
+
+    The two are different disclosures — an encounter's alerts against its speech
+    — so a spec that described one stream's audit row and left the other's to be
+    inferred would invite exactly the collapse ``RELAY_TRANSCRIPT`` exists to
+    prevent.
+    """
+    endpoint = published["x-websocket-endpoints"][WEBSOCKET_PATHS[route_name]]
+    expected_action = EXPECTED_AUDIT_ACTIONS[route_name]
+
+    assert expected_action.value in endpoint["audit"]
