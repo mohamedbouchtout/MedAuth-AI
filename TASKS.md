@@ -3970,6 +3970,19 @@ The insurance policy RAG is the technical core. Build and validate before other 
     what crosses this socket is one message per stabilized utterance. The field
     is still in the payload, which is what lets a later task widen the publisher
     without touching the relay or its consumers.
+  - **The transcript segment payload is canonicalised in CLAUDE.md as part of
+    this task**, under "The transcript segment payload — one shape", and that
+    placement is deliberate rather than tidy scoping. The shape had one writer
+    (`encode_segment`) and two readers that each hand-rolled their own
+    `json.loads(payload)["text"]`, and TASK-070's hook was about to be the
+    fourth participant and the first in TypeScript, in a browser, in another
+    directory of this repository — the same condition that justified writing the
+    nudge payload down once. Splitting it into a follow-up task would risk the
+    sequencing failure this task exists to correct: a deferred document lands
+    after the divergent implementation it was meant to prevent. Note that this
+    relay is not itself bound by that section — it forwards the raw string and
+    parses nothing — so the section binds the writer and the readers that parse,
+    with the relay between them deliberately ignorant.
   - **Two documents become stale the moment this ships, and both are fixed in the
     same change.** CLAUDE.md's canonical Redis key list names
     `transcription:{session_id}`'s consumers as track-a-clinical and track-b-rag;
