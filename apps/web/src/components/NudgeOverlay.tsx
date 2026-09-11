@@ -29,7 +29,7 @@
  * onto `document.body` by a node disappearing.
  */
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { nudgesApi, type NudgesApi } from '../api/nudges';
 import { useNudgeStream } from '../hooks/useNudgeStream';
@@ -48,6 +48,21 @@ export interface NudgeOverlayProps {
   sessions?: NonNullable<Parameters<typeof useNudgeStream>[0]['sessions']>;
   /** Injected in tests, so "near expiry" does not depend on the wall clock. */
   now?: () => number;
+  /**
+   * Reports the alerts this stream has delivered, whenever that list changes.
+   *
+   * Added by TASK-070 so the session screen can keep its checklist of flagged
+   * procedures without opening a second nudge socket — which would mean a second
+   * `RELAY_NUDGES` audit row per encounter and two connections competing to
+   * acknowledge the same alert. The overlay owns the stream; anything else that
+   * needs to know what arrived is told.
+   *
+   * It reports the *current* list, so an acknowledged nudge disappears from it.
+   * A caller keeping a running record must accumulate by `nudgeId` rather than
+   * mirroring the list — dismissing a banner means the provider has seen the
+   * alert, never that the documentation gap it named has been filled.
+   */
+  onNudges?: (nudges: Nudge[]) => void;
 }
 
 /**
@@ -139,6 +154,7 @@ export function NudgeOverlay({
   nudges: nudgesApiOverride = nudgesApi,
   sessions,
   now,
+  onNudges,
 }: NudgeOverlayProps) {
   const stream = useNudgeStream({
     sessionId,
@@ -166,6 +182,22 @@ export function NudgeOverlay({
   );
 
   const { nudges, remove } = stream;
+
+  /*
+    Held in a ref so the effect below depends on the nudge list alone. An inline
+    callback from a caller changes identity on every render, and an effect
+    depending on it would report on every render instead of on every change —
+    the same defect TASK-025b's patient picker hit, where it produced one HTTP
+    request per keystroke.
+  */
+  const onNudgesRef = useRef(onNudges);
+  useEffect(() => {
+    onNudgesRef.current = onNudges;
+  }, [onNudges]);
+
+  useEffect(() => {
+    onNudgesRef.current?.(nudges);
+  }, [nudges]);
 
   const onDismiss = useCallback(
     async (nudge: Nudge) => {

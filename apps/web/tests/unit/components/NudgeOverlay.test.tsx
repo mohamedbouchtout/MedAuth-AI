@@ -58,6 +58,7 @@ function renderOverlay(props: Partial<ComponentProps<typeof NudgeOverlay>> = {})
       sessions={sessions}
       nudges={nudges}
       now={() => NOW}
+      {...(props.onNudges === undefined ? {} : { onNudges: props.onNudges })}
     />,
   );
   return { ...view, sessions, nudges };
@@ -322,5 +323,80 @@ describe('a stream that drops', () => {
     });
 
     await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
+  });
+});
+
+describe('reporting what arrived', () => {
+  /**
+   * Added by TASK-070 so the session screen can keep a checklist of flagged
+   * procedures without opening a second nudge socket — which would mean a second
+   * `RELAY_NUDGES` audit row per encounter and two connections competing to
+   * acknowledge the same alert.
+   */
+  it('reports each nudge to a caller that asked', async () => {
+    const onNudges = vi.fn();
+    renderOverlay({ onNudges });
+
+    await receive(nudgePayload({ nudge_id: 'n-1' }));
+
+    await waitFor(() =>
+      expect(onNudges).toHaveBeenLastCalledWith([expect.objectContaining({ nudgeId: 'n-1' })]),
+    );
+  });
+
+  /**
+   * It reports the *live* list, so an acknowledged nudge leaves it. That is what
+   * obliges a caller keeping a running record to accumulate rather than mirror:
+   * dismissing a banner means the provider saw the alert, never that the
+   * documentation gap it named has been filled.
+   */
+  it('drops an acknowledged nudge from what it reports', async () => {
+    const onNudges = vi.fn();
+    renderOverlay({ onNudges });
+    await receive(nudgePayload({ nudge_id: 'n-1' }));
+    await waitFor(() => expect(onNudges).toHaveBeenCalled());
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    });
+
+    await waitFor(() => expect(onNudges).toHaveBeenLastCalledWith([]));
+  });
+
+  /**
+   * The defect TASK-025b's patient picker shipped, one component over: with the
+   * callback in the effect's dependency array, an inline function from a caller
+   * would report on every render rather than on every change.
+   */
+  it('does not report again when only the callback identity changes', async () => {
+    const onNudges = vi.fn();
+    const view = render(
+      <NudgeOverlay
+        sessionId={SESSION_ID}
+        jwt={FRESH}
+        baseUrl={BASE_URL}
+        sessions={sessionsThatMint(FRESH)}
+        nudges={nudgesThatAcknowledge()}
+        now={() => NOW}
+        onNudges={onNudges}
+      />,
+    );
+    await receive(nudgePayload({ nudge_id: 'n-1' }));
+    await waitFor(() => expect(onNudges).toHaveBeenCalled());
+    const before = onNudges.mock.calls.length;
+
+    view.rerender(
+      <NudgeOverlay
+        sessionId={SESSION_ID}
+        jwt={FRESH}
+        baseUrl={BASE_URL}
+        sessions={sessionsThatMint(FRESH)}
+        nudges={nudgesThatAcknowledge()}
+        now={() => NOW}
+        onNudges={(...args) => onNudges(...args)}
+      />,
+    );
+
+    expect(onNudges.mock.calls.length).toBe(before);
   });
 });

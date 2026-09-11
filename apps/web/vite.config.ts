@@ -8,9 +8,11 @@ import { defineConfig } from 'vitest/config';
  * source rather than a build, and it must be transpiled the same way whether
  * Vite is serving the app or Vitest is running a suite.
  *
- * The coverage gate is the 80% CLAUDE.md applies across the repo. `main.tsx`
- * and `App.tsx` are excluded because they are the entry point and a placeholder
- * screen — TASK-070 builds the real session UI and brings its own tests.
+ * The coverage gate is the 80% CLAUDE.md applies across the repo. `main.tsx` is
+ * excluded because it is the entry point — it mounts the app and holds no
+ * decision. `App.tsx` used to be excluded alongside it as "a placeholder screen"
+ * that TASK-070 would replace; it now holds the launch redemption, so it is
+ * covered like everything else.
  */
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -31,7 +33,7 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       include: ['src/**/*.{ts,tsx}'],
-      exclude: ['src/main.tsx', 'src/App.tsx', 'src/audio/pcm-capture-processor.js'],
+      exclude: ['src/main.tsx', 'src/audio/pcm-capture-processor.js'],
       thresholds: { branches: 80, functions: 80, lines: 80, statements: 80 },
     },
   },
