@@ -825,6 +825,92 @@ run. It logs at INFO through `logging.getLogger(__name__)`, exactly as
 `POST /policies/ingest` does for its own. The PHI reads made *under* the
 resulting launch audit as they already do.
 
+#### A failed launch is delivered the same way, and carries no claim code
+Settled by TASK-051g, which found the gap while building TASK-070. Everything
+above this subsection describes a launch that *completed*. A launch that does
+not complete was left raising `ApiHTTPException` identically whatever `delivery`
+its record declared, which means a `delivery=web` launch the provider declines
+renders a JSON error document on `fhir-integration`'s own origin. The provider
+is left looking at a page that is not MedAuth, with no link back to it, and the
+app that started the launch never learns the launch ended.
+
+**It is worse on web than on mobile, which is why it surfaced there.**
+`openAuthSessionAsync` hands control back to `apps/mobile` whatever the browser
+did, so mobile observes a cancellation as `cancel` and reports it. A browser
+launch navigates the page away entirely: no observer is left in the tab, and
+nothing `apps/web` can do from its own side closes the gap. Without a failure
+delivery that app cannot distinguish "the provider declined at the EHR" from
+"the provider is still signing in" from "the launch failed" — all three look
+like a load that carried no claim code.
+
+- **The failure follows the success delivery's shape and does not invent a
+  second mechanism.** A failure on a launch whose record declared `web` or
+  `mobile` redirects to that platform's configured return target, exactly as a
+  completed one does, carrying a fixed error code instead of a claim code.
+- **`delivery=json`, and an absent `delivery`, keep raising unchanged.** That is
+  the service-to-service caller, which is served correctly today and must not be
+  broken to serve a new consumer — the same "supplement, never replace" argument
+  this section already makes for the JSON success answer.
+- **A failure carries no claim code and writes no `fhir_launch_claim:` record.**
+  There is no launch to name, and issuing a code that resolves to nothing would
+  put a credential-shaped value in a redirect with no credential behind it.
+- **The error vocabulary is closed — `LaunchFailure`, a `StrEnum` — and is not a
+  diagnostic channel.** It is closed for the reason this repository has now
+  reached four times, after `payer-vocab`'s slugs, `AuditAction`, `EHRType` and
+  `LaunchDelivery` beside it: the value is matched by string equality, and here
+  it crosses into another language, where `apps/web` narrows it. What it carries
+  is enough to say "the launch did not complete, start again" and no more. The
+  operational detail stays in this service's log, where it already is.
+- **The EHR's own refusal reason is dropped at this boundary, deliberately.** An
+  OAuth `error` code is a string from a third party, and rendering it in our UI
+  puts it somewhere a provider reads as ours. It is logged and not forwarded.
+- **Two members rather than one, and the second is not a diagnostic.**
+  `declined` means the authorization server reported that the launch was
+  refused; `failed` means it did not complete for any other reason. They are
+  kept apart because a provider who cancelled deliberately and a provider whose
+  token exchange broke are in genuinely different situations, and telling the
+  first that something went wrong is as misleading as telling the second that
+  they cancelled. Both still end in "launch again", which is why there is no
+  third member: a distinction the provider cannot act on differently does not
+  earn a value here.
+- **Note what this does *not* copy from `POST /fhir/launch/claim`.** Unknown,
+  expired and already-redeemed are one answer there because telling them apart
+  would tell a caller probing codes which ones were real. That reasoning does
+  not transfer: the person at this browser already knows whether they clicked
+  "deny", so collapsing the two here would be taking the mechanism without the
+  justification for it.
+
+**One failure structurally cannot redirect, and no code may be added that makes
+it.** `GET /fhir/callback` claims the launch record through `claim_launch()`
+before it reaches any other failure, so when that returns `None` — an unknown,
+expired or replayed `state` — there is no record, and `delivery` is not merely
+unread but *unknowable*. That path keeps raising for every launch, `web` and
+`mobile` included. The wrong fix is to take `delivery` off the callback's own
+request instead: that is precisely the inference this section refuses for the
+success answer, and it would let anyone who can reach the callback choose where
+this service redirects a browser. The three failures that *can* be delivered are
+the ones after the record is in hand — the authorization server refused, no
+authorization code arrived, and the token exchange failed.
+
+**Both apps render an error delivery as a failed launch**, distinct from what
+each of them previously showed. On web those two were the same screen — the
+sign-in screen with no message — and the whole point of this delivery is that
+they stop being the same thing. On mobile the shape a failure arrives in, a
+redirect carrying no claim code, already meant something else: a return URI the
+app and the service disagree about. So the failure must be read *before* that
+message, or the first provider the EHR refuses is told to contact an
+administrator about configuration.
+
+**The vocabulary is shared through `packages/fhir-client`; the URL parsing and
+the wording are not.** Both apps narrow the same value, and narrowing it twice
+is how they come to disagree about what an unrecognised member means — which is
+the one case where getting it wrong restores the original silence. What stays
+per-app is how a URL is read, because a browser's `location.search` and a
+custom-scheme URI React Native's partial `URL` mis-splits are genuinely
+different reads, and what the provider is told, because that package holds no
+UI. Same split, and the same trigger — a second consumer — as the three
+TypeScript packages that already exist.
+
 ### Which EHR a client-initiated standalone launch targets (cross-cutting)
 Settled by TASK-025c, and settled here rather than inside it because TASK-070
 performs the same launch from `apps/web` and the cross-cutting rule applies: two
