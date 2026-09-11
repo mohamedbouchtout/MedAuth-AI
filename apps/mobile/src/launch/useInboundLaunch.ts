@@ -15,7 +15,7 @@
 import { useEffect, useState } from 'react';
 import { Linking } from 'react-native';
 
-import type { LaunchRequest } from '../api/launch';
+import type { LaunchRequest } from '@medauth/fhir-client';
 
 import { launchRequestFromUrl } from './inbound';
 

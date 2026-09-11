@@ -1,6 +1,6 @@
 import type { ApiResult } from '@medauth/session-client';
 
-import type { LaunchApi, LaunchSession } from '../../../src/api/launch';
+import type { LaunchApi, LaunchSession } from '@medauth/fhir-client';
 import {
   BROWSER_UNAVAILABLE_MESSAGE,
   NO_CLAIM_MESSAGE,

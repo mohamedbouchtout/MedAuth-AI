@@ -1,8 +1,12 @@
 /**
  * Where the patient and provider for a visit come from.
  *
- * TASK-025 built this as a seam returning null, because nothing on this platform
- * could identify either. TASK-025b fills it, and the shape of the answer is two
+ * **This is the order TASK-070 was told to mirror rather than re-derive**, which
+ * is why it is in the package rather than copied into a second app. Two apps
+ * each deciding when a search is the right question is how one of them ends up
+ * offering it after an EHR has already named the patient. TASK-025 built it as a
+ * seam returning null, because nothing on either platform could identify a
+ * patient or a provider; TASK-025b filled it, and the shape of the answer is two
  * paths that must not be confused:
  *
  * - **An EHR launch already named the patient.** `GET /fhir/launch-context`
@@ -14,8 +18,9 @@
  *   what it returns.
  *
  * The type is still a plain thunk, which is what keeps the search interaction
- * out of `SessionScreen`: by the time that screen calls this, the subject is
- * decided. `PatientPickerScreen` is what decides it in the standalone case.
+ * out of the session screen on either platform: by the time that screen calls
+ * this, the subject is decided. A patient picker is what decides it in the
+ * standalone case — `PatientPickerScreen` on mobile, `PatientPicker` on web.
  *
  * **A hardcoded patient id would still be wrong**, for the reason TASK-025 gave:
  * it is indistinguishable from a real one at runtime, and the failure it
@@ -25,7 +30,7 @@
 
 import type { ApiFailure, ApiResult } from '@medauth/session-client';
 
-import type { FhirApi, LaunchContext, PatientMatch } from '../api/fhir';
+import type { FhirApi, LaunchContext, PatientMatch } from './fhir';
 
 export interface VisitSubject {
   /** FHIR patient id; the wire field is `patient_id` (see CLAUDE.md). */

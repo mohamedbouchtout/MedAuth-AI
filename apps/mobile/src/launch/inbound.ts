@@ -25,7 +25,7 @@
  * natural hardening once more than one issuer exists.
  */
 
-import type { LaunchRequest } from '../api/launch';
+import type { LaunchRequest } from '@medauth/fhir-client';
 
 import { queryParam } from './uri';
 

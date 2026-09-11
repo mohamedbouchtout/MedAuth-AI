@@ -32,7 +32,7 @@ import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { sessionsApi, type ApiFailure, type SessionsApi } from '../api/sessions';
 import { AUDIO_INGESTION_WS_URL } from '../config';
 import { useAudioCapture } from '../hooks/useAudioCapture';
-import type { PatientSource } from '../session/patientSource';
+import type { PatientSource } from '@medauth/fhir-client';
 import { recoveryFor } from '../session/recovery';
 import { visitPhase, type SessionStatus } from '../session/visitPhase';
 

@@ -1,8 +1,8 @@
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
 
 import type { ApiResult, Session, SessionsApi, StartVisitInput } from '../../../src/api/sessions';
-import type { FhirApi, LaunchContext, PatientSearchResults } from '../../../src/api/fhir';
-import type { LaunchApi, LaunchSession } from '../../../src/api/launch';
+import type { FhirApi, LaunchContext, PatientSearchResults , LaunchApi, LaunchSession } from '@medauth/fhir-client';
+
 import type { AuthSessionOpener, AuthSessionResult } from '../../../src/launch/smartLaunch';
 import { LaunchFlow } from '../../../src/screens/LaunchFlow';
 

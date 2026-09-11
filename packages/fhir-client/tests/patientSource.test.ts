@@ -1,11 +1,13 @@
+import { describe, expect, it } from 'vitest';
+
 import type { ApiResult } from '@medauth/session-client';
 
-import type { FhirApi, LaunchContext, PatientSearchResults } from '../../../src/api/fhir';
+import type { FhirApi, LaunchContext, PatientSearchResults } from '../src/fhir';
 import {
   resolveLaunch,
   subjectFromLaunch,
   subjectFromMatch,
-} from '../../../src/session/patientSource';
+} from '../src/patientSource';
 
 /**
  * Which of the two paths a launch takes, and what each produces (TASK-025b).

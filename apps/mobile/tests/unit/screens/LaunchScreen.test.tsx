@@ -2,7 +2,7 @@ import { fireEvent, render, waitFor } from '@testing-library/react-native';
 
 import type { ApiResult } from '@medauth/session-client';
 
-import type { LaunchApi, LaunchRequest, LaunchSession } from '../../../src/api/launch';
+import type { LaunchApi, LaunchRequest, LaunchSession } from '@medauth/fhir-client';
 import type { AuthSessionOpener, AuthSessionResult } from '../../../src/launch/smartLaunch';
 import {
   CANCELLED_MESSAGE,

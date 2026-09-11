@@ -15,9 +15,9 @@
 
 import { useCallback, useState } from 'react';
 
-import type { FhirApi } from '../api/fhir';
+import { fixedSource, type FhirApi, type VisitSubject } from '@medauth/fhir-client';
 import type { SessionsApi } from '../api/sessions';
-import { fixedSource, type VisitSubject } from '../session/patientSource';
+
 
 import { PatientPickerScreen } from './PatientPickerScreen';
 import { SessionScreen } from './SessionScreen';

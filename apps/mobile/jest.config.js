@@ -22,6 +22,7 @@ module.exports = {
   testMatch: ['**/*.test.ts', '**/*.test.tsx'],
   moduleNameMapper: {
     '^@medauth/audio-wire$': '<rootDir>/../../packages/audio-wire/src/index.ts',
+    '^@medauth/fhir-client$': '<rootDir>/../../packages/fhir-client/src/index.ts',
     '^@medauth/session-client$': '<rootDir>/../../packages/session-client/src/index.ts',
     '^@medauth/nudge-client$': '<rootDir>/../../packages/nudge-client/src/index.ts',
     '^@medauth/nudge-client/testing$': '<rootDir>/../../packages/nudge-client/src/testing.ts',

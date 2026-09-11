@@ -1,7 +1,7 @@
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
 
 import type { ApiResult, Session, SessionsApi, StartVisitInput } from '../../../src/api/sessions';
-import type { FhirApi, LaunchContext, PatientSearchResults } from '../../../src/api/fhir';
+import type { FhirApi, LaunchContext, PatientSearchResults } from '@medauth/fhir-client';
 import { VisitFlow } from '../../../src/screens/VisitFlow';
 
 /**

@@ -22,8 +22,8 @@
 
 import { useCallback, useState } from 'react';
 
-import type { FhirApi } from '../api/fhir';
-import type { LaunchApi, LaunchRequest, LaunchSession } from '../api/launch';
+import type { FhirApi , LaunchApi, LaunchRequest, LaunchSession } from '@medauth/fhir-client';
+
 import type { SessionsApi } from '../api/sessions';
 import type { AuthSessionOpener } from '../launch/smartLaunch';
 

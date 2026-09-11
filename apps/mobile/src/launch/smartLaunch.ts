@@ -23,7 +23,7 @@
  * credential in a log line is a credential in a log line either way.
  */
 
-import type { LaunchApi, LaunchRequest, LaunchSession } from '../api/launch';
+import type { LaunchApi, LaunchRequest, LaunchSession } from '@medauth/fhir-client';
 
 import { queryParam } from './uri';
 

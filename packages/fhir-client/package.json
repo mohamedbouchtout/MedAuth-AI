@@ -1,0 +1,27 @@
+{
+  "name": "@medauth/fhir-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The fhir-integration client shared by apps/web and apps/mobile — obtaining a SMART launch, and the two routes keyed on one that say which patient a visit is about.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.11",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  },
+  "dependencies": {
+    "@medauth/session-client": "*"
+  }
+}

@@ -1,6 +1,8 @@
+import { describe, expect, it, vi } from 'vitest';
+
 import type { FetchLike } from '@medauth/session-client';
 
-import { LAUNCH_ID_HEADER, createFhirApi } from '../../../src/api/fhir';
+import { LAUNCH_ID_HEADER, createFhirApi } from '../src/fhir';
 
 /**
  * The fhir-integration client (TASK-025b).
@@ -38,7 +40,7 @@ function apiWith(fetchImpl: FetchLike) {
 
 describe('getLaunchContext', () => {
   it('carries the launch in the header and never the query string', async () => {
-    const fetchImpl = jest.fn<Promise<Response>, Parameters<FetchLike>>(async () =>
+    const fetchImpl = vi.fn<FetchLike>(async () =>
       jsonResponse(200, envelope({ patient_id: 'p1', encounter_id: 'e1', provider_id: PROVIDER_ID })),
     );
 
@@ -128,7 +130,7 @@ describe('searchPatients', () => {
   };
 
   it('sends the query, and the birth date only when there is one', async () => {
-    const fetchImpl = jest.fn<Promise<Response>, Parameters<FetchLike>>(async () =>
+    const fetchImpl = vi.fn<FetchLike>(async () =>
       jsonResponse(200, envelope({ matches: [match], truncated: false })),
     );
     const api = apiWith(fetchImpl);
@@ -145,7 +147,7 @@ describe('searchPatients', () => {
   it('treats an empty birth date as absent', async () => {
     // The picker's text input starts empty, and sending `birth_date=` would be
     // a 422 from the route's date pattern rather than an unfiltered search.
-    const fetchImpl = jest.fn<Promise<Response>, Parameters<FetchLike>>(async () =>
+    const fetchImpl = vi.fn<FetchLike>(async () =>
       jsonResponse(200, envelope({ matches: [], truncated: false })),
     );
 

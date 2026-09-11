@@ -1,14 +1,18 @@
+import { describe, expect, it, vi } from 'vitest';
+
 import type { FetchLike } from '@medauth/session-client';
 
-import { MOBILE_DELIVERY, createLaunchApi } from '../../../src/api/launch';
+import { createLaunchApi, type LaunchDelivery } from '../src/launch';
 
 /**
- * The launch client (TASK-025c).
+ * The launch client (TASK-025c, shared with `apps/web` by TASK-070).
  *
- * Three things matter beyond parsing. The authorize URL must declare
- * `delivery=mobile`, or the callback answers JSON into a browser and this app
- * never sees the launch at all. The presence of `launch` must survive exactly as
- * given, because it is the only thing distinguishing an EHR launch from a
+ * Three things matter beyond parsing. The authorize URL must declare the
+ * platform's own `delivery`, or the callback answers JSON into a browser and the
+ * app that started the launch never sees it at all — asserted for both
+ * deliveries, because the parameter is the client's half of TASK-051f and each
+ * app supplies a different value. The presence of `launch` must survive exactly
+ * as given, because it is the only thing distinguishing an EHR launch from a
  * standalone one and therefore whether the launch names a patient. And the claim
  * code must travel in the POST body, since carrying it in a URL would give back
  * precisely what the claim indirection exists to avoid.
@@ -30,17 +34,23 @@ function envelope(data: unknown): unknown {
   return { data, error: null };
 }
 
-function apiWith(fetchImpl: FetchLike) {
-  return createLaunchApi(BASE, fetchImpl);
+function apiWith(fetchImpl: FetchLike, delivery: LaunchDelivery = 'mobile') {
+  return createLaunchApi(BASE, delivery, fetchImpl);
 }
 
 describe('authorizeUrl', () => {
-  it('declares delivery=mobile', () => {
-    const url = apiWith(async () => jsonResponse(200, envelope({}))).authorizeUrl({ iss: ISS });
+  it.each(['web', 'mobile'] as const)('declares delivery=%s', (delivery) => {
+    const url = apiWith(
+      async () => jsonResponse(200, envelope({})),
+      delivery,
+    ).authorizeUrl({ iss: ISS });
 
     // Without this the callback renders JSON in the browser the EHR redirected
-    // and the app that started the launch never learns its launch_id.
-    expect(new URLSearchParams(url.split('?')[1]).get('delivery')).toBe(MOBILE_DELIVERY);
+    // and the app that started the launch never learns its launch_id. Both
+    // values are asserted rather than one: a package serving two platforms that
+    // only ever proved the platform it came from would leave the newer consumer
+    // resting on an untested branch.
+    expect(new URLSearchParams(url.split('?')[1]).get('delivery')).toBe(delivery);
   });
 
   it('sends the EHR launch context when there is one', () => {
@@ -70,7 +80,7 @@ describe('authorizeUrl', () => {
 
 describe('redeemClaim', () => {
   it('posts the code in the body and never in the URL', async () => {
-    const fetchImpl = jest.fn<Promise<Response>, Parameters<FetchLike>>(async () =>
+    const fetchImpl = vi.fn<FetchLike>(async () =>
       jsonResponse(200, envelope({ launch_id: 'launch-7', ehr_type: 'athena', expires_in: 3600 })),
     );
 

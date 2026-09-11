@@ -2,7 +2,7 @@ import { fireEvent, render, waitFor } from '@testing-library/react-native';
 
 import type { ApiResult } from '@medauth/session-client';
 
-import type { FhirApi, LaunchContext, PatientSearchResults } from '../../../src/api/fhir';
+import type { FhirApi, LaunchContext, PatientSearchResults , VisitSubject } from '@medauth/fhir-client';
 import {
   NO_LAUNCH_MESSAGE,
   NO_MATCHES_MESSAGE,
@@ -10,7 +10,7 @@ import {
   PatientPickerScreen,
   TRUNCATED_MESSAGE,
 } from '../../../src/screens/PatientPickerScreen';
-import type { VisitSubject } from '../../../src/session/patientSource';
+
 
 /**
  * The screen that decides which patient a visit is about (TASK-025b).
