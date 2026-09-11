@@ -23,7 +23,14 @@
  * credential in a log line is a credential in a log line either way.
  */
 
-import type { LaunchApi, LaunchRequest, LaunchSession } from '@medauth/fhir-client';
+import {
+  LAUNCH_ERROR_PARAM,
+  narrowLaunchFailure,
+  type LaunchApi,
+  type LaunchFailure,
+  type LaunchRequest,
+  type LaunchSession,
+} from '@medauth/fhir-client';
 
 import { queryParam } from './uri';
 
@@ -59,17 +66,54 @@ export const BROWSER_UNAVAILABLE_MESSAGE =
   'MedAuth AI could not open a browser to sign in to the EHR.';
 
 /**
- * What the app says when the redirect arrived carrying no claim code.
+ * What the app says when the redirect arrived carrying neither a claim code nor
+ * a reported failure.
  *
  * The likeliest cause is not the server: it is a `SMART_RETURN_URI` this build
  * does not agree with fhir-integration about, or a scheme `app.json` does not
  * register. Both are configuration, and neither is anything a provider can act
- * on, so the message says who to tell.
+ * on, so the message says who to tell. A redirect that *does* report a failure
+ * is a different thing and must not land here — see `performSmartLaunch`.
  */
 export const NO_CLAIM_MESSAGE =
   'The EHR sign-in finished but MedAuth AI did not receive the launch. Report this to your administrator: the app and the server may disagree about where sign-in returns to.';
 
 export const REDEEM_FAILED_PREFIX = 'MedAuth AI could not complete the EHR launch.';
+
+export const DECLINED_MESSAGE =
+  'The EHR did not allow the sign-in. Sign in again, or ask whoever administers the EHR whether MedAuth AI is permitted for your account.';
+
+export const LAUNCH_FAILED_MESSAGE = 'The EHR sign-in did not complete. Sign in again.';
+
+/**
+ * What the provider is told about a launch the service reported as failed.
+ *
+ * Exhaustive over `LaunchFailure`, so a member added on the service side fails
+ * typechecking here rather than rendering as nothing. The wording is this app's
+ * and the vocabulary is the package's — the same split `apps/web` makes, because
+ * the copy is UI and `@medauth/fhir-client` holds none.
+ */
+export function messageForFailure(failure: LaunchFailure): string {
+  switch (failure) {
+    case 'declined':
+      return DECLINED_MESSAGE;
+    case 'failed':
+      return LAUNCH_FAILED_MESSAGE;
+    default: {
+      const unreachable: never = failure;
+      return unreachable;
+    }
+  }
+}
+
+/**
+ * Read a reported failure off the redirect this app was returned to.
+ *
+ * Null when the redirect reported none, which is every completed launch.
+ */
+export function failureFromRedirect(url: string): LaunchFailure | null {
+  return narrowLaunchFailure(queryParam(url, LAUNCH_ERROR_PARAM));
+}
 
 /**
  * The query parameter the claim code arrives on.
@@ -137,6 +181,18 @@ export async function performSmartLaunch({
 
   const claim = claimFromRedirect(result.url);
   if (claim === null) {
+    // **A redirect with no claim is not automatically a misconfiguration any
+    // more** (TASK-051g). The service now delivers a *failed* launch back
+    // through this same return target, carrying an error instead of a code, so
+    // checking for one before reaching `NO_CLAIM_MESSAGE` is what stops a
+    // provider the EHR refused from being told the app and the server disagree
+    // about where sign-in returns to. Before that delivery existed a failure
+    // never reached this app at all: the callback rendered JSON in the system
+    // browser, no redirect arrived, and closing the window read as a cancel.
+    const failure = failureFromRedirect(result.url);
+    if (failure !== null) {
+      return { kind: 'failed', message: messageForFailure(failure) };
+    }
     return { kind: 'failed', message: NO_CLAIM_MESSAGE };
   }
 
