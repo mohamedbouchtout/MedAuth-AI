@@ -5421,7 +5421,7 @@ logic do not change.
     - 533 tests in fhir-integration at 96%, against the 80% gate. Each commit
       lints, typechecks and passes its own suite.
 
-- [ ] **TASK-051g:** Deliver a *failed* launch back to the client that started it
+- [x] **TASK-051g:** Deliver a *failed* launch back to the client that started it
   - Service: `services/fhir-integration`; consumed by `apps/web` and
     `apps/mobile`
   - Prerequisite: TASK-051f (the success delivery this completes)
@@ -5508,6 +5508,40 @@ logic do not change.
     from a plain load that carried no claim at all
   - **Test:** `apps/mobile` reports a delivered failure as one, and not as the
     missing-claim configuration mismatch
+  - **Built.** The design is in CLAUDE.md under "A failed launch is delivered the
+    same way, and carries no claim code", inside TASK-051f's section, rather than
+    here. Notes worth keeping:
+    - **`_deliver_failure` is one helper at three call sites**, not a branch
+      copied into each. The three deliverable failures — the authorization
+      server refused, no code arrived, the token exchange failed — differ only
+      in which `LaunchFailure` they carry and what a `json` launch is raised.
+      Three separate branches is how one of them would later keep raising for a
+      `web` launch and nobody would notice.
+    - **The `json` raise carries `from None`.** One call site is inside an
+      `except TokenExchangeError` block, and without it the vendor's own
+      exception chains into the traceback — which is where a detail nobody chose
+      to expose ends up in a log. The behaviour TASK-051 had is preserved rather
+      than re-derived.
+    - **`declined` and `failed` are told apart at the call site, not inferred.**
+      A callback carrying neither a code nor an error is `failed`: nobody
+      refused anything, and telling a provider they cancelled when they did not
+      is the misreading the two-member vocabulary exists to prevent.
+    - **The unknown-`state` path is a test, not only a comment.** The tempting
+      "fix" is to read `delivery` off the callback's own request, so the case
+      that a `?delivery=web` on the callback changes nothing is asserted
+      directly — it is the one that would silently turn this route into an open
+      redirect.
+    - **Both sides were verified by breaking them.** Making `_deliver_failure`
+      always raise turns 14 of the 24 new service tests red; making `App` read
+      no failure turns 5 of its new cases red. Neither suite passes for reasons
+      other than the feature.
+    - **`scrubClaim` became `scrubLaunchParams`**, because it now removes two
+      parameters for two different reasons — a claim code is a credential, and a
+      reported failure is a report of one moment that a reload would otherwise
+      replay. The name was left accurate rather than quietly widened.
+    - 586 tests in fhir-integration at 96%, 207 in `apps/web`, 193 in
+      `apps/mobile`, 36 in `packages/fhir-client`. Each commit lints,
+      typechecks and passes its own suite.
 
 - [x] **TASK-052:** Base FHIR resource fetching (implements base.py methods)
   - Service: `services/fhir-integration`
