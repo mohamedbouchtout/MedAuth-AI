@@ -2798,12 +2798,14 @@ The insurance policy RAG is the technical core. Build and validate before other 
       TASK-042 and `nudge-client` out of the web app in TASK-043. Extracting
       before a second consumer exists would be guessing at the shape the second
       one needs.
-    - **A HIPAA finding was recorded rather than fixed here: TASK-046.** `httpx`
-      logs every request URL at INFO, so a search query string — a patient's
-      name — reaches stdout from the library. It predates this task; `_search`
-      has issued `Coverage?patient={id}` since TASK-052. Configuring library
-      loggers is a platform-wide decision rather than one route's, and a test
-      pins the gap so closing it is visible instead of silent.
+    - **A HIPAA finding was recorded rather than fixed here: TASK-046**, and
+      TASK-046 has since closed it. `httpx` logged every request URL at INFO, so
+      a search query string — a patient's name — reached stdout from the library.
+      It predated this task; `_search` has issued `Coverage?patient={id}` since
+      TASK-052. Configuring library loggers is a platform-wide decision rather
+      than one route's, so the gap was pinned by a test that asserted the leak,
+      which made closing it visible instead of silent. `packages/logging-policy`
+      now holds the floors, and that pinning test is gone.
     - **What still blocks a real encounter is one named constant**, `LAUNCH_ID`
       in `App.tsx`. Nothing here performs a SMART launch, so this app holds no
       `launch_id` and both routes are keyed on one. TASK-051f and TASK-025c.
@@ -2811,7 +2813,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
       track-a-clinical at 99%, all against the 80% gate. Each commit typechecks
       and passes its own suite.
 
-- [ ] **TASK-025c:** Obtain a SMART launch from `apps/mobile`
+- [~] **TASK-025c:** Obtain a SMART launch from `apps/mobile`
   - Prerequisite: **TASK-051f** (the handoff this consumes), TASK-051 (the launch
     itself), TASK-025b (everything that consumes the resulting `launch_id`)
   - App: `apps/mobile`
@@ -4318,7 +4320,7 @@ The insurance policy RAG is the technical core. Build and validate before other 
       `READ_COVERAGE` — which is the same looseness one layer down. They now use
       real members.
 
-- [ ] **TASK-046:** httpx logs PHI in outbound request URLs
+- [x] **TASK-046:** httpx logs PHI in outbound request URLs
   - Prerequisite: none. Small, cross-cutting, and deliberately not folded into
     TASK-025b, which is where it was noticed.
   - Services: every Python service that calls out over `httpx` —
@@ -4376,6 +4378,67 @@ The insurance policy RAG is the technical core. Build and validate before other 
   - **Test:** the same for a `?patient=` search carrying a patient identifier
   - **Test:** the same for a read whose *path* carries one — `Patient/{id}` —
     which is the case a query-string-only fix would silently miss
+  - **Built.** `packages/logging-policy` — `install_logging_policy()`, called
+    first in every service's `create_app()` and at the top of
+    `policy_scraper.__main__.main()`. Notes worth keeping:
+    - **Each floor was chosen by running the library**, and they are deliberately
+      not uniform — each sits just above where that library writes request or
+      response content, so nothing useful is thrown away to fix a leak one level
+      down. `httpx` → WARNING because it leaks *at* INFO. `urllib3` → INFO
+      (`connectionpool` writes the full request line at DEBUG). `botocore` and
+      `boto3` → INFO, which keeps `botocore.credentials` reporting where
+      credentials came from.
+    - **botocore was the larger exposure of the two, and it was not in the
+      task's own summary.** `botocore.endpoint` writes the entire request at
+      DEBUG, headers and body together, and `botocore.parsers` writes the entire
+      response body — so a Bedrock call logs an encounter's transcript going out
+      and the generated SOAP note coming back, and Comprehend Medical logs
+      clinical text. Only at DEBUG, so it is latent rather than active like the
+      `httpx` line, but "what does this write when someone turns the root logger
+      up" is exactly the question the task asked to check.
+    - **`httpcore` is floored and is on the record as not having leaked.** Its
+      trace renders a request as the method alone (`<Request [b'GET']>`) and it
+      logs no request headers, verified by running it. The floor guards against a
+      future version rendering more; it must not be read as evidence that
+      httpcore ever exposed a URL.
+    - **`sqlalchemy.engine` is deliberately *not* in the table**, and the reason
+      is mechanical rather than a judgement call. It writes every statement and
+      its bound parameters at INFO, but SQLAlchemy decides whether to emit those
+      from the engine's own `echo` flag rather than from the logger's level
+      (`sqlalchemy.log.InstanceLogger`). Verified against 2.0.52: pinned to
+      WARNING with `echo=True`, every statement and bound parameter is still
+      logged. An entry would have been a claim to protect something it cannot.
+      No engine in this repository passes `echo`, and with it unset nothing is
+      logged even at root DEBUG.
+    - **Installed in every service, unlike `cors-policy`.** That package goes
+      only where a browser reaches; this one has no such limit, because every
+      process can be turned up to DEBUG. `audio-ingestion` is the sharpest case
+      and is not browser-facing at all.
+    - **The policy raises and never lowers**, so a logger already pinned quieter
+      is left alone — overriding that would be this package loosening a
+      restriction rather than applying one.
+    - **The package's tests assert both halves**: each library leaks with the
+      policy uninstalled and is silent with it installed. The control half is
+      what stops a logging test from asserting nothing, which is a real hazard
+      here rather than a hypothetical — see the next note.
+    - **An earlier draft of the service-level tests asserted that *something* was
+      captured, and it failed immediately.** With the policy installed and a mock
+      transport, a clean read logs nothing at all, so "no record contains the
+      name" was passing because there were no records. They now prove the
+      identifier reached the request URL — via the fake EHR's own record of what
+      it was asked for — and then assert no log line carries it. Confirmed by
+      removing the call: all three fail without it.
+    - **The gap-pinning test is gone, as its own docstring asked.** The narrowing
+      paragraph on its neighbour is rewritten rather than deleted: that
+      assertion is still scoped to `src.` loggers, but now because it is a
+      different claim (the line this service composes) rather than because the
+      libraries were an exception nothing could assert away.
+    - The CLAUDE.md monorepo structure block was four packages out of date
+      (`cors-policy`, `payer-vocab`, `bedrock-client`, `nudge-client` all
+      missing); corrected while adding this one, rather than making it five.
+    - 18 tests in the new package at 100%, 556 in fhir-integration, and every
+      other service's suite re-run because all of them gained the call. Each
+      commit typechecks and passes its own suite.
 
 ---
 

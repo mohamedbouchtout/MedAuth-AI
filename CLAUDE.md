@@ -34,10 +34,15 @@ medauth-ai/
 ├── packages/
 │   ├── api-envelope/     # Shared HTTP response envelope + FastAPI error handlers
 │   ├── hipaa-logger/     # Shared audit logging — every service imports this
+│   ├── logging-policy/   # What third-party libraries may log — every service installs this
 │   ├── fhir-types/       # Shared FHIR R4 type definitions (Python + TypeScript)
 │   ├── audio-wire/       # Encounter-audio wire format — both frontends (TypeScript)
 │   ├── session-client/   # Session lifecycle client + token freshness — both frontends (TypeScript)
+│   ├── nudge-client/     # Nudge payload contract + acknowledge call — both frontends (TypeScript)
 │   ├── session-auth/     # Session-token validation for every real-time endpoint
+│   ├── cors-policy/      # The one CORS policy, installed by browser-facing services
+│   ├── payer-vocab/      # Canonical payer slugs + USPS jurisdiction codes
+│   ├── bedrock-client/   # Shared Bedrock access — client construction + reading replies
 │   └── crypto-utils/     # AES-256 helpers used across services
 ├── infrastructure/
 │   ├── terraform/        # AWS infrastructure as code
@@ -1788,6 +1793,93 @@ note has it.
   inside the primitive rather than a rule call sites are trusted to remember, the
   same arrangement as api-envelope's validation handler.
 
+### packages/logging-policy — Design Decisions (locked, do not revisit)
+**Scope note (read first):** this package decides the log level of *third-party*
+loggers, and nothing else. It configures no handlers, sets no format, does not
+touch the root logger, and does not touch any logger this repository owns —
+those stay with `logging.getLogger(__name__)` per the Python conventions above.
+It is not a logging framework and it is not related to `hipaa-logger`, which
+writes audit rows to Postgres and is not a logger at all in this sense. Same
+boundary `api-envelope`, `session-auth` and `cors-policy` each draw around
+themselves.
+
+**The gap it closes (TASK-046).** `httpx` logs every request it makes at INFO,
+as `HTTP Request: GET <full url> "HTTP/1.1 200 OK"`. Nothing configured that
+logger, so it inherited the root level and wrote patient identifiers to stdout on
+ordinary successful requests — against the first rule in Regulatory Context. It
+is the **whole URL and not only the query string**: `get_patient()` reads
+`Patient/{patient_id}` and `get_encounter()` reads `Encounter/{encounter_id}`, so
+anything that sanitised query parameters alone would have left the most ordinary
+read in the tree exposed and looked like it had worked. The exposure predates the
+task that found it — `_search` has issued `Coverage?patient={id}` since TASK-052;
+TASK-025b's `Patient?name=` only made it visible by putting a patient's *name*
+there.
+
+**Installed in every service, which is where it differs from `cors-policy`.**
+That package goes only into services a browser reaches, because middleware in a
+service no browser calls protects nothing. This one has no such limit: every
+service's process can be turned up to DEBUG and every one of them links a library
+that writes request content at DEBUG. `audio-ingestion` is the sharpest case and
+is not browser-facing at all — its Comprehend Medical call puts clinical text
+into `botocore.endpoint`'s DEBUG line. `policy-scraper` installs it too, even
+though it fetches public payer publications whose URLs carry no patient
+identifier, because what a library may write is a platform-wide decision rather
+than a per-URL judgement.
+
+**Each floor was chosen by running the library, not by reputation**, and the
+levels are deliberately not uniform — each sits just above where that library
+writes request or response content, so it keeps whatever it says that is useful:
+- **`httpx` → WARNING.** The defect. It leaks *at* INFO, so nothing lower closes
+  it. Errors and warnings still reach the log.
+- **`urllib3` → INFO.** `urllib3.connectionpool` writes the full request line at
+  DEBUG, query string included. It is botocore's transport.
+- **`botocore` and `boto3` → INFO.** The largest body of PHI of the five:
+  `botocore.endpoint` logs the entire request at DEBUG, headers and body
+  together, and `botocore.parsers` logs the entire response body. A Bedrock
+  request body is an encounter's transcript and its response is the generated
+  SOAP note. INFO rather than WARNING on purpose — `botocore.credentials` reports
+  at INFO where credentials were found, which is useful and carries nothing.
+- **`httpcore` → INFO, and it is on the record as not having leaked.** Its trace
+  renders a request as the method alone and it logs no request headers. The floor
+  is there because it is the transport under every URL httpx sends, so a future
+  version that starts rendering more would otherwise arrive silently. Do not read
+  this entry as evidence that httpcore ever exposed anything.
+
+**`sqlalchemy.engine` is deliberately not in the table, and that is not an
+oversight.** It writes every statement and its bound parameters at INFO, which is
+PHI, so it looks like the obvious sixth entry. It is not, for a mechanical
+reason: SQLAlchemy decides whether to emit those lines from the engine's own
+`echo` flag rather than from the logger's level, through
+`sqlalchemy.log.InstanceLogger`. Verified against SQLAlchemy 2.0.52 — with
+`sqlalchemy.engine` pinned to WARNING and `echo=True`, every statement and every
+bound parameter is still logged. An entry here would be a claim to protect
+something it cannot protect, which is worse than no entry. What actually holds
+the line is that no engine in this repository passes `echo`, and with it unset
+nothing is logged even with the root logger at DEBUG. Enabling echo against a
+database holding PHI is the decision to look at, not this table.
+
+**It raises and never lowers.** A logger already pinned above its floor is left
+alone — someone silencing a library further has chosen in the same direction as
+this policy, and overriding that would be this package loosening a restriction
+rather than applying one. What it cannot do is win against a *later* explicit
+`setLevel`, and it does not try to: the failure mode being fixed is a library
+writing PHI at a level nobody configured, not a developer deliberately turning
+one up.
+
+**Where it is called.** First in each service's `create_app()`, before anything
+else in startup can log, and at the top of `policy_scraper.__main__.main()` after
+`basicConfig` — after, because `LOG_LEVEL=DEBUG` is a real thing to do when a
+nightly run failed and the floors have to apply to the configuration a human just
+chose rather than to the default it replaced. Tests build their app through
+`create_app()`, so the policy is in force in the suites too, which is what makes
+the service-level assertions about it meaningful.
+
+**Do not solve this class of problem by moving identifiers out of URLs.** FHIR
+search is defined with parameters in the query string; there is nowhere else for
+them to go. The library's logging is what changes. A new direct AWS SDK or HTTP
+client dependency is a reason to check what it logs and add a floor here — in the
+same change, the way an action is added to `AuditAction`.
+
 ### packages/hipaa-logger — Design Decisions (locked, do not revisit)
 **Scope note (read first):** this package is NOT a general application logger.
 It writes one specific thing — a compliance audit trail row per PHI access —
@@ -2394,6 +2486,9 @@ Path filter groups (each maps to a test job):
   actually ran its own tests. Fixed: packages get dedicated jobs too.)
 - `api-envelope`: packages/api-envelope/**
 - `session-auth`: packages/session-auth/**
+- `logging-policy`: packages/logging-policy/** — every service installs it
+  (TASK-046), so a change here re-runs all of them through the `packages/**`
+  rule, and its own job runs the tests that drive the real libraries.
 - `crypto-utils`: packages/crypto-utils/**
 - `fhir-types`: packages/fhir-types/** — this job runs BOTH checks: pytest against
   the Pydantic models AND `tsc --noEmit` against packages/fhir-types/typescript/.
