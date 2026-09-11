@@ -8,6 +8,7 @@ dependencies = [
     "fastapi>=0.115",
     "medauth-api-envelope",
     "medauth-hipaa-logger",
+    "medauth-logging-policy",
     "medauth-session-auth",
     "pydantic>=2.13.5",
     "pydantic-settings>=2.6",

@@ -15,6 +15,7 @@ dependencies = [
     "medauth-cors-policy",
     "medauth-fhir-types",
     "medauth-hipaa-logger",
+    "medauth-logging-policy",
     "medauth-payer-vocab",
     # The shared SQLAlchemy models. TASK-060 reads clinical_notes and
     # clinical_nudges and writes prior_auth_requests, and CLAUDE.md's "Where the

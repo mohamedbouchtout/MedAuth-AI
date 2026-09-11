@@ -14,6 +14,11 @@ dependencies = [
     # Canonical payer slugs and USPS state codes. CMS documents ingest as
     # cms-medicare, and MAC jurisdiction codes are not all USPS codes.
     "medauth-payer-vocab",
+    # Raises httpx and urllib3 above the level at which they write request
+    # URLs. This service fetches public payer publications, so its own URLs
+    # carry no patient identifier — it installs the policy because what a
+    # library may write is settled platform-wide rather than per service.
+    "medauth-logging-policy",
     "pydantic>=2.13.5",
     "pydantic-settings>=2.6",
     "sqlalchemy[asyncio]>=2.0.52",

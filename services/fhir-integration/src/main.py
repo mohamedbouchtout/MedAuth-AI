@@ -42,6 +42,7 @@ from fastapi import FastAPI
 
 from api_envelope import install_error_handlers
 from cors_policy import install_cors
+from logging_policy import install_logging_policy
 from src.api.dependencies import close_clients
 from src.api.fhir import router as fhir_router
 from src.api.health import router as health_router
@@ -63,6 +64,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     """Build the application. A factory so tests get an isolated instance."""
+    # Raise the third-party loggers before anything else can use one: httpx
+    # writes every request URL at INFO, and a FHIR URL carries a patient
+    # identifier in its path as well as its query string. Settled once in
+    # packages/logging-policy, whose design decisions CLAUDE.md records.
+    install_logging_policy()
     app = FastAPI(
         title="MedAuth AI — fhir-integration",
         description=(
@@ -74,10 +80,10 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     # Refuse to boot on a missing or malformed client return target (TASK-051f).
-    # Before anything else, because the alternative surfaces at the far end of an
-    # OAuth redirect chain — after a human has logged in and a real credential
-    # has been spent — where there is nothing to do but start over. See CLAUDE.md,
-    # "Handing a completed SMART launch back to a client".
+    # Before any route is registered, because the alternative surfaces at the far
+    # end of an OAuth redirect chain — after a human has logged in and a real
+    # credential has been spent — where there is nothing to do but start over.
+    # See CLAUDE.md, "Handing a completed SMART launch back to a client".
     validate_return_targets(get_settings())
     install_error_handlers(app)
     # Origins are per environment; the policy itself — methods, headers,
