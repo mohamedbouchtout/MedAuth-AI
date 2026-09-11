@@ -10,6 +10,7 @@ dependencies = [
     "medauth-cors-policy",
     "medauth-fhir-types",
     "medauth-hipaa-logger",
+    "medauth-logging-policy",
     "medauth-payer-vocab",
     "pydantic>=2.13.5",
     "pydantic-settings>=2.6",

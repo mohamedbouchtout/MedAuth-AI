@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from api_envelope import install_error_handlers
+from logging_policy import install_logging_policy
 from src.api.dependencies import close_redis
 from src.api.health import router as health_router
 from src.api.websocket import router as websocket_router
@@ -40,6 +41,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     """Build the application. A factory so tests get an isolated instance."""
+    # Raise the third-party loggers before anything else can use one. No FHIR URL
+    # passes through this service, but botocore writes a whole request body at
+    # DEBUG and this one's carries an encounter's speech to Comprehend Medical.
+    # Settled once in packages/logging-policy, whose decisions CLAUDE.md records.
+    install_logging_policy()
     app = FastAPI(
         title="MedAuth AI — audio-ingestion",
         description=(

@@ -16,6 +16,7 @@ dependencies = [
     "medauth-api-envelope",
     "medauth-bedrock-client",
     "medauth-hipaa-logger",
+    "medauth-logging-policy",
     # TASK-016. The payer slug is what the Qdrant filter matches on and what the
     # rag: cache key is built from, so ingest and query have to agree about it.
     "medauth-payer-vocab",

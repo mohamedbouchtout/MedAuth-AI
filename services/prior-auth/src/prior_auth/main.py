@@ -31,6 +31,7 @@ from fastapi import FastAPI
 
 from api_envelope import install_error_handlers
 from cors_policy import install_cors
+from logging_policy import install_logging_policy
 from prior_auth.api.dependencies import close_redis, get_redis
 from prior_auth.api.health import router as health_router
 from prior_auth.api.submission import router as submission_router
@@ -65,6 +66,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     """Build the application. A factory so tests get an isolated instance."""
+    # Raise the third-party loggers before anything else can use one: httpx
+    # writes every request URL at INFO, and a FHIR URL carries a patient
+    # identifier in its path as well as its query string. Settled once in
+    # packages/logging-policy, whose design decisions CLAUDE.md records.
+    install_logging_policy()
     app = FastAPI(
         title="MedAuth AI — prior-auth",
         description=(

@@ -822,6 +822,95 @@ class TestLaunchContextProvider:
         assert "could not be reached" in caplog.text
 
 
+class TestLibraryLoggersAreQuiet:
+    """TASK-046: no library writes a patient identifier, from any route here.
+
+    These run through the real routes rather than against ``httpx`` directly,
+    because what has to hold is that *this service* does not leak — the package's
+    own suite already proves the floors work in isolation, and a test that only
+    checked levels would pass while a service forgot to install the policy.
+    ``create_app()`` calls ``install_logging_policy()``, so the client fixture is
+    what puts the policy in force here.
+
+    Captured at DEBUG in every case: the defect was that these loggers inherited
+    the root level, so "someone turned the root logger up" is the scenario rather
+    than an exotic one. Nothing filters the records by logger name, which is what
+    makes these cover the library half rather than only ours.
+
+    **Each test first proves the identifier actually reached the client**, by
+    finding it in the URL the fake EHR was asked for. An earlier draft asserted
+    that *something* was captured instead, which failed immediately and usefully:
+    with the policy installed and a mock transport, a clean read logs nothing at
+    all, so "no record contains the name" was true because there were no records.
+    The fake server's own record of the URL is the control these need — it says
+    the name was in the URL httpx was handed, so a silent log is a real result.
+    """
+
+    @staticmethod
+    def assert_quiet(
+        caplog: pytest.LogCaptureFixture, ehr_server: FakeFHIRServer, identifier: str
+    ) -> None:
+        """The shared shape: the URL carried it, and no log record did."""
+        assert any(identifier in url for url in ehr_server.requested_paths), (
+            f"{identifier} never reached the request URL, so this test proves nothing"
+        )
+        assert [
+            f"{record.name}: {record.getMessage()}"
+            for record in caplog.records
+            if identifier in record.getMessage()
+        ] == []
+
+    def test_a_search_carrying_a_patient_name_reaches_no_log_line(
+        self,
+        client: TestClient,
+        audit: AuditRecorder,
+        ehr_server: FakeFHIRServer,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The case TASK-025b found: a patient's name in a query string."""
+        with caplog.at_level("DEBUG"):
+            client.get("/fhir/patient/search", params={"query": "Sanchez"}, headers=HEADERS)
+
+        self.assert_quiet(caplog, ehr_server, "Sanchez")
+
+    def test_a_patient_scoped_search_reaches_no_log_line(
+        self,
+        client: TestClient,
+        audit: AuditRecorder,
+        ehr_server: FakeFHIRServer,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The older case: ``Coverage?patient={id}``, issued since TASK-052.
+
+        The patient context read fans out to ``Coverage`` and ``Condition``
+        searches, both of which carry the identifier as a query parameter.
+        """
+        with caplog.at_level("DEBUG"):
+            client.get("/fhir/patient/synthea-123/context", headers=HEADERS)
+
+        self.assert_quiet(caplog, ehr_server, "synthea-123")
+
+    def test_an_identifier_in_the_path_reaches_no_log_line(
+        self,
+        client: TestClient,
+        audit: AuditRecorder,
+        ehr_server: FakeFHIRServer,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The case a query-string-only fix would have missed entirely.
+
+        ``get_patient()`` reads ``Patient/{patient_id}`` and ``get_encounter()``
+        reads ``Encounter/{encounter_id}``, so the identifier is a path segment
+        on the most ordinary reads this service makes. Driven through the
+        encounter read because its URL has no query string at all, so nothing but
+        the path could be carrying the identifier.
+        """
+        with caplog.at_level("DEBUG"):
+            client.get("/fhir/encounter/encounter-1", headers=HEADERS)
+
+        self.assert_quiet(caplog, ehr_server, "encounter-1")
+
+
 class TestPatientSearch:
     """``GET /fhir/patient/search`` — the standalone-launch half (TASK-025b).
 
@@ -979,13 +1068,17 @@ class TestPatientSearch:
         would pass by having nothing to inspect. The line reports the count and
         never the terms.
 
-        **Scoped to this repository's own loggers, and that scope is a finding
-        rather than a convenience.** `httpx` logs every request it makes at INFO
-        including the full URL, so `Patient?name=Sanchez` reaches stdout from the
-        library. That is real, and it predates this route — `_search` has been
-        issuing `Coverage?patient={id}` since TASK-052 — so it is **TASK-046**
-        rather than something this test can assert away. The test below pins the
-        gap, so nobody reads this narrowing as "checked and clean".
+        **Scoped to this repository's own loggers, and no longer because the
+        libraries were the exception.** This assertion used to be narrowed to
+        `src.` because `httpx` wrote the whole URL at INFO and no test here could
+        assert that away — the gap was TASK-046, pinned by a test that asserted
+        the leak so nobody read the narrowing as "checked and clean". TASK-046
+        closed it in `packages/logging-policy`, and `TestLibraryLoggersAreQuiet`
+        below now asserts the library half through this same route. The narrowing
+        stays because the two halves are different claims: this one is about the
+        line this service composes, and a service that started interpolating a
+        search term into its own log message would still be a defect here even
+        with every library silent.
         """
         ehr_server.patient_matches = [
             patient_resource(f"synthea-{index}") for index in range(PATIENT_SEARCH_LIMIT + 1)
@@ -997,21 +1090,6 @@ class TestPatientSearch:
         ours = [record for record in caplog.records if record.name.startswith("src.")]
         assert ours, "expected the truncation branch to log"
         assert all("Sanchez" not in record.getMessage() for record in ours)
-
-    def test_the_httpx_logger_still_carries_the_query_and_that_is_task_046(
-        self, client: TestClient, audit: AuditRecorder, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Pins the known gap, so closing it is visible rather than silent.
-
-        When TASK-046 configures the library's logger this test fails and is
-        deleted in that change — which is the point of writing the gap down as an
-        assertion instead of as a comment.
-        """
-        with caplog.at_level("INFO"):
-            client.get("/fhir/patient/search", params={"query": "Sanchez"}, headers=HEADERS)
-
-        library = [record for record in caplog.records if record.name.startswith("httpx")]
-        assert any("Sanchez" in record.getMessage() for record in library)
 
     def test_an_unreachable_ehr_keeps_its_own_status_and_code(
         self, client: TestClient, audit: AuditRecorder, ehr_server: FakeFHIRServer

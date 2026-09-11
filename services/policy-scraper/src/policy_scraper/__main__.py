@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 
+from logging_policy import install_logging_policy
 from policy_scraper.config import get_settings
 from policy_scraper.scrape import run
 
@@ -22,6 +23,14 @@ def main() -> int:
         level=os.environ.get("LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    # After basicConfig, which sets the root level this raises the libraries
+    # above. LOG_LEVEL=DEBUG is a real thing to do when a nightly run failed, and
+    # it is exactly when urllib3 and botocore start writing request detail — so
+    # the floors have to be applied to the configuration a human just chose, not
+    # to the default they replaced. This job's own URLs are public payer
+    # publications, but what a library may log is settled platform-wide rather
+    # than per service. See packages/logging-policy.
+    install_logging_policy()
     logger = logging.getLogger(__name__)
 
     try:
