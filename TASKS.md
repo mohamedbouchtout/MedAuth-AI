@@ -7314,7 +7314,7 @@ logic do not change.
 
 ## Phase 7 — Provider Dashboard (Web App)
 
-- [ ] **TASK-070:** Session management UI
+- [x] **TASK-070:** Session management UI
   - App: `apps/web`
   - Prerequisite: **TASK-041d** (the transcript relay the active-session view
     subscribes to, which did not exist when this task was written — see the
@@ -7377,6 +7377,70 @@ logic do not change.
     do not re-derive it here. Send whichever one the route being called is
     keyed on, and never store them in one field named for either.
   - **Test:** component tests for start/active/end state transitions with mocked APIs
+  - Built (194 web tests at 95%, 32 in the new package, 189 mobile, all against
+    the 80% gate). Decisions worth knowing before touching this:
+    - **`packages/fhir-client` is the extraction TASK-025b named this task for**,
+      and it took `patientSource` and the launch client with the FHIR client:
+      they are one flow, and `patientSource` is the piece this task was told to
+      mirror rather than re-derive. `createLaunchApi` now takes the delivery as a
+      parameter, which was the only thing that differed per platform.
+    - **This app has no router, and that was decided rather than skipped.** The
+      only thing arriving from outside is a claim code, which identifies itself
+      by a query parameter rather than a path; everything after it is a phase of
+      one visit, which is how `apps/mobile` models the same flow. The trigger to
+      revisit is a screen a provider needs to *arrive* at — TASK-072's dashboard
+      is the likely first — or a requirement that the note review screen be
+      linkable. `src/App.tsx` says so at the point someone would change it.
+    - **Zustand is still not installed.** Nothing here needed cross-component
+      shared state that props and local state did not already carry, and
+      CLAUDE.md's "not installed until a task has state to keep in it" is a rule
+      about not building the abstraction first.
+    - **Recognition of a completed launch keys on the `claim` parameter, not on
+      the path.** The service owns where it redirects through
+      `SMART_WEB_RETURN_URL` and this app holds no copy of it, so a path
+      comparison could only discard a launch that had already succeeded — after
+      a human logged in and a real credential was spent.
+    - **`visitPhase` and `recovery` are deliberate twins of the mobile modules
+      rather than shared code**, and the reasoning is in both files. Each is
+      typed against its own app's capture hook; this app's `ended` carries the
+      session because TASK-071 is keyed on `session_id`; and what keeps the two
+      honest is that both end in an exhaustive `never` over `audio-wire`'s
+      vocabulary, so a new error code fails typechecking in both apps. If a third
+      consumer appears, or `AudioCaptureState` moves into `audio-wire`, they
+      belong in a package.
+    - **The transcript parser stays in `apps/web`** — one TypeScript consumer, so
+      extracting it would be guessing at what a second one needs. The trigger is
+      a genuine second consumer, as it was for the three packages that exist.
+    - **`NudgeOverlay` gained an `onNudges` report** so the flagged-procedure
+      checklist can outlive a dismissed banner without opening a second nudge
+      socket — which would mean a second `RELAY_NUDGES` audit row per encounter
+      and two connections competing to acknowledge one alert. The checklist
+      accumulates rather than mirrors: dismissing records that the provider saw
+      the alert, never that the gap it named was filled.
+    - **Three SessionScreen tests were passing by coincidence and were
+      rewritten.** They forced a re-render by clicking "end visit", so each was
+      really asserting about an ended visit — the one named for the recording
+      label passed while never rendering a recording phase. The replacement
+      re-renders explicitly, with a *fresh* element, because React bails out when
+      handed a referentially identical one and would reproduce the same silent
+      no-op. Verified by breaking `visitPhase`'s streaming check and watching
+      four tests go red.
+    - **Two services gained CORS cases for routes that were browser-facing for
+      the first time**, per the rule now written into CLAUDE.md: installing the
+      middleware is not covering a route. `GET /fhir/launch-context` and
+      `GET /fhir/patient/search` had been called since TASK-025b but only from
+      `apps/mobile`, which preflights nothing. Verified by narrowing
+      `ALLOWED_HEADERS` and watching them fail.
+    - **Opened TASK-051g.** A declined or failed launch never reaches the client:
+      the callback raises whatever delivery the launch declared, so a web
+      provider who cancels at the EHR lands on a JSON error page on another
+      origin with no way back, and this app cannot tell that from a login still
+      in progress. Not closed inline — it is a service-side change to TASK-051f's
+      delivery and has to answer for the `json` caller too.
+    - **What is deliberately not built is the note review screen.** Ending a
+      visit hands the completed session on and says the note is being generated;
+      TASK-071 is what receives it. Navigating a provider to a screen that does
+      not exist would be worse than saying plainly that the visit is closed.
 
 - [ ] **TASK-071:** Note review + edit UI
   - App: `apps/web`
