@@ -1078,7 +1078,12 @@ Every task below should use these exact patterns, not invent variants:
 ```
 transcription:{session_id}      pub/sub — raw transcript segments, published by
                                  audio-ingestion (TASK-020), consumed by
-                                 track-a-clinical (TASK-030) and track-b-rag (TASK-021)
+                                 track-a-clinical (TASK-030) and track-b-rag
+                                 (TASK-021). Payload shape is fixed in "The
+                                 transcript segment payload — one shape" above;
+                                 one writer and several readers, one of them in
+                                 another language. `text` is PHI and never
+                                 reaches a log line on this path.
 nudges:{session_id}              pub/sub — nudge events, published by track-b-rag
                                  (TASK-040), consumed by nudge-service (TASK-041).
                                  Payload shape is fixed in "The nudge payload —
@@ -1257,6 +1262,94 @@ token, so a client holding one is never made to re-learn it.
 **Renewal writes no audit row.** Obtaining a credential is not using it — the
 same test TASK-051 applied to both its own routes. The PHI reads that surround
 it audit as they already do.
+
+### The transcript segment payload — one shape (cross-cutting)
+What rides on `transcription:{session_id}` is fixed here rather than inside
+TASK-020, for the same reason the nudge payload below is: one writer, several
+readers, and only the writer knows the shape today. `audio-ingestion` publishes
+it (`encode_segment` in `src/publisher.py`), `track-a-clinical`'s consumer
+accumulates `text` for SOAP generation (TASK-030), `track-b-rag`'s consumer scans
+`text` for procedure keywords (TASK-021), `nudge-service`'s relay forwards the
+raw string without parsing it (TASK-041d), and TASK-070's browser hook parses it
+to render a live transcript.
+
+Settled by TASK-041d, and settled at the point it was rather than deferred,
+because the next reader was about to be the first one in TypeScript, in a
+browser, in a different directory of this repository. The two existing readers
+each hand-rolled their own `json.loads(payload)["text"]` and
+`.get("is_partial")`; a fourth doing the same in another language is how four
+definitions of one contract end up disagreeing about a field nobody re-checked.
+A section written after that reader exists documents the divergence instead of
+preventing it.
+
+```json
+{
+  "session_id": "0b7f1e2c-...",
+  "result_id": "a1b2c3d4-...",
+  "text": "Patient reports right knee pain for about six weeks.",
+  "is_partial": false,
+  "start_time": 12.34,
+  "end_time": 16.78
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `session_id` | `str` (UUID) | The encounter this segment belongs to. **Deliberately repeated inside the payload as well as being in the channel name**, so a consumer that multiplexes several sessions onto one connection does not have to parse it back out of the channel it arrived on. |
+| `result_id` | `str` | Transcribe Medical's own identifier for the utterance. Transcribe reuses one `result_id` across the successive revisions of an utterance, and only the final revision is published (below), so in the ordinary case a reader sees each one exactly once. A reader that needs idempotency keys on this rather than on text equality — two utterances can legitimately have identical text. |
+| `text` | `str` | What was said. **Never empty**: `audio-ingestion` drops results carrying no alternative or an empty transcript, which Transcribe emits around silence and which no consumer can act on. |
+| `is_partial` | `bool` | **Always `false` on the bus today, and the field still travels.** See below. |
+| `start_time` | `float \| None` | Seconds from the start of the transcription stream, as Transcribe reported them. Nullable because the value is passed through rather than computed, and a transcriber that reports no timing is not an error. |
+| `end_time` | `float \| None` | The same, for the end of the utterance. |
+
+**`text` is PHI, and this is the payload that carries the most of it in this
+repository.** It is what was said during a clinical encounter. It goes to Redis
+and to the clients the TASK-041d relay serves, and to no log line anywhere on
+that path: every module on it logs a session identifier, a character count or a
+close reason, never content. That rule is already stated in
+`publisher.py`, `relay.py` and both consumers; it is restated here because a new
+reader of this shape is exactly where it would otherwise be forgotten.
+
+**Only stabilized results are published, so `is_partial` is always `false` on
+this channel.** Transcribe emits a partial result for one utterance repeatedly as
+it revises it — the same `result_id`, several times a second — and then one final
+result. `publish_segment` returns `False` without touching Redis for a partial.
+Forwarding them would multiply bus traffic by an order of magnitude and, worse,
+make TASK-021 fire the same procedure keyword over and over as one sentence is
+re-transcribed, turning one order into a stream of duplicate nudges.
+
+The field nevertheless stays in the payload, and no reader may drop it or assume
+its value. It is what lets a later task widen the publisher to forward partials —
+for a live transcript that updates mid-sentence, which is the one place they would
+be worth having — without changing the message shape or any consumer's parse.
+Both existing consumers already skip a segment whose `is_partial` is true, so
+they are correct either way; a new reader should do the same rather than assume
+the field is decorative.
+
+**A reader narrows, it does not trust.** The TypeScript conventions above forbid
+`any` and require narrowing from `unknown`, and that applies with more force to a
+payload crossing a WebSocket into a browser: validate the fields this table names
+and ignore anything else on the object. Do not assume a field absent from this
+table exists because a particular transcriber happened to emit it. If both
+frontends end up reading this shape, it moves into a shared TypeScript package on
+the established trigger — the second consumer, the same one that produced
+`packages/nudge-client` and `packages/session-client` — rather than being defined
+twice.
+
+**Nothing reshapes it in transit.** `nudge-service`'s relay forwards the exact
+string it received and never models it, for the reason that service's `relay.py`
+already gives about nudges: a model there would be a second definition of this
+shape, free to drift from the one that writes it and positioned where nothing
+would notice. So this section binds the writer and the readers that parse, and
+the relay between them is deliberately ignorant of all of it.
+
+**The bus keeps no history.** A reader that subscribes mid-encounter, or
+resubscribes after a drop, receives only what is published from that moment;
+earlier segments are not recoverable from Redis, and the accumulated transcript
+lives in TASK-030's in-memory buffer, which no route exposes. A consumer must not
+present what it received as a complete transcript unless it has been connected
+for the whole encounter — the same rule this document applies to a payer's
+silence and to `validation: null`, one channel over.
 
 ### The nudge payload — one shape (cross-cutting)
 What rides on `nudges:{session_id}` is fixed here rather than inside TASK-040,
