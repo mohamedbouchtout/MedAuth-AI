@@ -47,6 +47,64 @@ import { MALFORMED, networkFailure, readEnvelope } from './http';
  */
 export type LaunchDelivery = 'web' | 'mobile';
 
+/**
+ * Why a launch did not complete — the client-reachable half of the service's
+ * `LaunchFailure` (TASK-051g).
+ *
+ * **It exists because a failed launch used to reach no client at all.** The
+ * callback raised identically whatever `delivery` the launch declared, so a
+ * provider who declined at the EHR landed on a JSON error document on the
+ * service's own origin: on web the page had navigated away and nothing was left
+ * to observe it, and on mobile the redirect never arrived so the launch looked
+ * like an abandoned one. Now a failure comes back through the same return target
+ * a success does, carrying this instead of a claim code.
+ *
+ * **Closed, and deliberately coarse.** Two members because a provider who was
+ * refused and a provider whose sign-in broke can act differently, and no more
+ * than two because nothing finer would change what they do next. The EHR's own
+ * refusal reason is not here and never crosses the wire: a third party's string
+ * rendered in our UI is read as ours. See CLAUDE.md, "A failed launch is
+ * delivered the same way, and carries no claim code".
+ */
+export type LaunchFailure = 'declined' | 'failed';
+
+/**
+ * The query parameter a failed launch arrives on.
+ *
+ * Fixed by `ERROR_QUERY_PARAM` in fhir-integration's `smart/delivery.py`, and
+ * distinct from the claim parameter rather than a second meaning for it: a
+ * client reads one URL and must be able to tell a launch it can redeem from one
+ * it cannot by which parameter is present, not by comparing a value.
+ */
+export const LAUNCH_ERROR_PARAM = 'error';
+
+/**
+ * Narrow a value read off a return redirect to the failure vocabulary.
+ *
+ * **Takes the extracted value, not the URL.** The two apps read a URL in
+ * genuinely different ways — `apps/web` runs `URLSearchParams` over its own
+ * `location.search`, `apps/mobile` hand-parses a custom-scheme URI that React
+ * Native's partial `URL` mis-splits — so the parsing stays with each app and
+ * only the vocabulary is shared. Sharing the vocabulary is the point: narrowing
+ * it twice is how two apps come to disagree about what an unrecognised value
+ * means.
+ *
+ * **An unrecognised value narrows to `failed`, never to null.** The service may
+ * add a member a shipped app does not know, and reading it as "no failure" would
+ * put the provider back on the sign-in screen with nothing said — the silence
+ * this delivery exists to end. What is certain from the parameter's presence is
+ * that the launch did not complete; only the finer distinction is lost.
+ *
+ * Null means the redirect reported no failure, which is every completed launch
+ * and every plain load.
+ */
+export function narrowLaunchFailure(value: string | null | undefined): LaunchFailure | null {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  return value === 'declined' ? 'declined' : 'failed';
+}
+
 /** What the app asks the EHR for. */
 export interface LaunchRequest {
   /**
