@@ -3891,6 +3891,119 @@ The insurance policy RAG is the technical core. Build and validate before other 
     - **No OpenAPI change.** CORS middleware adds no routes, so the committed
       specs and their drift tests are untouched.
 
+- [ ] **TASK-041d:** Transcript WebSocket relay
+  - Service: `services/nudge-service`
+  - Prerequisite: TASK-020 (which publishes `transcription:{session_id}`),
+    TASK-041 (the relay pattern and `packages/session-auth`), TASK-041c (the
+    `Origin` check this inherits). **Blocks TASK-070**, whose active-session view
+    cannot show a transcript without it.
+  - **The gap, found while reading TASK-070.** That task says to show a live
+    transcript by subscribing to "a display-only read of
+    `transcription:{session_id}` — reuse the nudge-service WebSocket pattern
+    from TASK-041 rather than inventing a new relay." That phrasing reads as
+    though a relay already exists to point a client at. It does not. This
+    repository has exactly two WebSocket routes — `/ws/audio/{session_id}` and
+    `/ws/nudges/{session_id}` — and the audio socket sends nothing back to its
+    client: `publish_segment` puts each segment on the Redis bus and that is the
+    only place it goes. Nothing anywhere relays transcript text to a browser, so
+    TASK-070's transcript pane had no server behind it.
+  - `WebSocket /ws/transcript/{session_id}`, mirroring `/ws/nudges/{session_id}`
+    exactly. "Mirroring" means the same primitives, not a second implementation
+    of them:
+    - Session JWT validated through **`packages/session-auth`** — both carriers,
+      signature, `exp`, and the token's `session_id` claim equal to the path's —
+      **before the handshake is accepted**, closing 4401 on refusal. Known
+      Constraint 8 forbids a parallel auth mechanism, and a third real-time
+      endpoint is that package's third consumer rather than a reason to write a
+      validator.
+    - `Origin` checked against `CORS_ALLOWED_ORIGINS` through
+      `packages/cors-policy`, refusing with 4401 like the nudge socket, for
+      exactly the reason CLAUDE.md records under "WebSocket handshakes are
+      outside CORS": defence in depth on a surface where a browser reaches a
+      live stream of PHI. It is not a fix for a hole — this repository carries no
+      ambient credential a hostile page could ride.
+    - Subscribed **per session, by name**, from the session id in the validated
+      token. Never `transcription:*`: a wildcard across the channel family
+      carrying speech hands one client every encounter in the clinic. This is
+      also why the `sessions:started` discipline TASK-021 and TASK-030 follow
+      does not apply here — those are long-lived consumers that must learn a
+      session exists before it speaks, whereas a client arrives already holding a
+      token naming the one session it may watch.
+    - Server-to-client only. Inbound frames are read to notice the disconnect and
+      discarded, as on the nudge socket and deliberately unlike the audio
+      socket's 1003 — nothing travels in that direction and a keepalive is not a
+      broken client.
+  - **Relayed verbatim, never deserialized**, for the reason
+    `nudge-service/src/relay.py` already gives about the nudge payload: a model
+    of the segment here would be a second definition of `encode_segment`'s shape,
+    free to drift from the one that writes it and positioned where nothing would
+    notice. The relay knows the channel name and nothing about the message. A
+    payload that is not valid UTF-8 is dropped rather than allowed to tear down a
+    live encounter's socket; anything else reaches the client as it arrived.
+  - **The relay audits, as its own action.** A transcript segment is what was
+    said during an identified clinical encounter, which is PHI by any reading of
+    the Known Constraint 6 test, and this service reads no tables — so the row
+    written here is the only record anywhere that a client watched an encounter's
+    speech. Add **`RELAY_TRANSCRIPT`** to `hipaa_logger.AuditAction`, alongside
+    `RELAY_NUDGES`, in this change, per the action-vocabulary rule: there is no
+    document table to keep in step, and a member is added in the same change as
+    the code that writes it. `RELAY_NUDGES` is not reused — "was this encounter's
+    speech streamed to a client" and "were its alerts" are different questions,
+    and collapsing them makes the first unanswerable from the audit trail. One
+    row per accepted connection rather than per segment, `actor_id` from the
+    token's `provider_id` claim, `resource_type` `Encounter` and `resource_id`
+    the session id: the three judgements `src/audit.py` already records,
+    unchanged. A refused connection writes none.
+  - **A client sees only what is said after it connects, and that is a property
+    of the bus rather than a defect to design around here.** Redis pub/sub keeps
+    no history, so a browser that connects late, or reconnects after a drop,
+    starts from silence — the accumulated transcript lives in TASK-030's
+    in-memory `TranscriptBuffer` in another service and no route exposes it. Say
+    so in this service's OpenAPI prose and in the hook TASK-070 writes, because
+    an empty pane otherwise reads as "nobody is speaking", which is the one thing
+    it must not be mistaken for. Replaying the buffer on connect is deliberately
+    **not** in scope: it would mean a new route on track-a-clinical returning an
+    encounter's speech, with its own audit question, and it is worth doing only
+    once someone has watched the plain version reconnect.
+  - Partials never arrive, and this service does not filter them:
+    `publish_segment` drops `is_partial` results before they reach the bus, so
+    what crosses this socket is one message per stabilized utterance. The field
+    is still in the payload, which is what lets a later task widen the publisher
+    without touching the relay or its consumers.
+  - **Two documents become stale the moment this ships, and both are fixed in the
+    same change.** CLAUDE.md's canonical Redis key list names
+    `transcription:{session_id}`'s consumers as track-a-clinical and track-b-rag;
+    this service becomes a third. And the "WebSocket handshakes are outside CORS"
+    note calls the nudge socket "the one surface in this repository where a
+    browser reaches a live stream of PHI" — it becomes two. Neither is edited
+    before the code exists, because until then both are true.
+  - `docs/api/nudge-service.yaml` gains a second `x-websocket-endpoints` entry,
+    with the drift test still covering `/health` only — OpenAPI 3.1 cannot
+    describe a WebSocket, so what keeps this one honest is its own tests.
+  - **The service is `nudge-service` despite the name, and the alternative was
+    considered.** CLAUDE.md's monorepo structure describes that service as
+    "Redis pub/sub → WebSocket relay to clients", which is this route's whole job
+    — it holds no database connection, subscribes to one channel and forwards.
+    The naming tension is real and is the cost of the choice; renaming the
+    service to match would touch its package, its port entry, its CI filter and
+    its audit `service_name`, which is churn a second relay does not justify.
+    `audio-ingestion` was the other candidate, since it already holds the
+    segments, and was rejected for two reasons: its socket is binary-in and
+    closes text frames with 1003, and serving the transcript back on it would tie
+    the display's lifetime to the capture socket, so a reconnect of either would
+    drop the other. A display-only stream a provider can open, close and reopen
+    independently of recording is the shape TASK-070 needs.
+  - **Test:** publish a segment to `transcription:{session_id}` on a real Redis,
+    verify it arrives at the WebSocket client as the exact string published
+  - **Test:** connect with an invalid JWT, and with a token whose `session_id`
+    claim names another session, verify 4401 and that no audit row is written
+  - **Test:** a disallowed `Origin` is refused, and an unconfigured allow-list
+    answers no browser at all
+  - **Test:** a payload the relay cannot parse still reaches the client
+    unaltered — the property "verbatim" actually means
+  - **Test:** one audit row per accepted connection, as `RELAY_TRANSCRIPT`, and
+    not one per relayed segment
+
 - [x] **TASK-042:** Nudge UI component (web)
   - App: `apps/web`
   - Prerequisite: TASK-041 (the socket), TASK-041b (the acknowledge route),
@@ -7057,6 +7170,12 @@ logic do not change.
 
 - [ ] **TASK-070:** Session management UI
   - App: `apps/web`
+  - Prerequisite: **TASK-041d** (the transcript relay the active-session view
+    subscribes to, which did not exist when this task was written — see the
+    transcript bullet below), TASK-051d (`GET /fhir/launch-context`), TASK-051f
+    (the launch handoff this app performs its own half of), TASK-025b (the
+    patient search route and the two-path order this mirrors), TASK-006b (the
+    re-mint endpoint), TASK-023 (the capture hook), TASK-042 (`<NudgeOverlay>`)
   - Start session: after an EHR launch, take the patient and encounter from
     **TASK-051d**'s `GET /fhir/launch-context` rather than searching for a
     patient the EHR has already named; fall back to patient search via
@@ -7075,10 +7194,26 @@ logic do not change.
     patient — passing `launch_id` and `ehr_encounter_id` too, which is what
     fills the payer columns (TASK-052b) — and begin audio capture (TASK-023)
     once session_id + jwt are returned
-  - Active session view: live transcript display (subscribe to a display-only
-    read of `transcription:{session_id}` — reuse the nudge-service WebSocket
-    pattern from TASK-041 rather than inventing a new relay), `<NudgeOverlay>`
-    (TASK-042), and a simple checklist of flagged procedures pending documentation
+  - Active session view: live transcript display, `<NudgeOverlay>` (TASK-042),
+    and a simple checklist of flagged procedures pending documentation
+  - **The transcript is read from TASK-041d's `/ws/transcript/{session_id}`, and
+    this bullet replaces one that assumed a relay already existed.** The earlier
+    wording said to "subscribe to a display-only read of
+    `transcription:{session_id}` — reuse the nudge-service WebSocket pattern from
+    TASK-041 rather than inventing a new relay", which reads as though there were
+    a relay to point at. There was not: nothing in this repository sent transcript
+    text to a browser, and the audio socket publishes to the bus rather than back
+    down its own connection. TASK-041d builds the relay; this app opens it with
+    the same token and the same subprotocol carrier `<NudgeOverlay>` already
+    uses, so the hook is the nudge hook's shape with a different channel and a
+    different parse.
+  - **An empty transcript pane must not read as "nobody is speaking."** Redis
+    pub/sub keeps no history, so a socket opened late or reopened after a drop
+    starts from silence and no earlier speech is recoverable — see TASK-041d,
+    which states this as a property of the bus and deliberately leaves replay out
+    of scope. Render the distinction between "connected, nothing said yet" and
+    "not connected" rather than showing one blank box for both; that is the same
+    rule this repository applies to a payer's silence and to `validation: null`.
   - End session: calls `POST /sessions/{session_id}/end` (TASK-006), stops
     audio capture, navigates to the note review screen (TASK-071)
   - **A visit outlasting the 15-minute JWT is settled in CLAUDE.md**, under
