@@ -178,12 +178,36 @@ def recorded_audit(monkeypatch: pytest.MonkeyPatch) -> RecordedAudit:
 
 
 @pytest.fixture
+def recorded_transcript_audit(monkeypatch: pytest.MonkeyPatch) -> RecordedAudit:
+    """The same substitution for the transcript stream (TASK-041d).
+
+    A separate recorder rather than one shared with the nudge stream, because
+    what several of these tests assert is that a connection to one stream writes
+    a row for *that* stream and not the other. One recorder could not tell them
+    apart.
+    """
+    recorder = RecordedAudit()
+    monkeypatch.setattr(
+        websocket_module,
+        "TRANSCRIPT_STREAM",
+        replace(websocket_module.TRANSCRIPT_STREAM, audit=recorder),
+    )
+    return recorder
+
+
+@pytest.fixture
 def client(
     signing_key: str,
     fake_redis: FakeRedis,
     recorded_audit: RecordedAudit,
+    recorded_transcript_audit: RecordedAudit,
 ) -> Iterator[TestClient]:
-    """A test client bound to the app with Redis replaced."""
+    """A test client bound to the app with Redis and both audit writes replaced.
+
+    Both streams are stubbed for every test using this client, so a test that
+    opens either socket cannot reach a real ``audit_log`` and a test that asserts
+    one stream audited can also assert the other did not.
+    """
     app = create_app()
     app.dependency_overrides[get_redis] = lambda: fake_redis
     with TestClient(app) as test_client:

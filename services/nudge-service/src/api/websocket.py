@@ -66,12 +66,12 @@ from session_auth import (
 )
 from src import relay
 from src.api.dependencies import get_app_settings, get_redis
-from src.audit import audit_nudge_stream
+from src.audit import audit_nudge_stream, audit_transcript_stream
 from src.config import Settings
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["nudges"])
+router = APIRouter(tags=["streams"])
 
 #: RFC 6455 1011: the server hit a condition that stopped it fulfilling the
 #: request. Sent when the subscription fails after the handshake was accepted.
@@ -123,6 +123,15 @@ NUDGE_STREAM: Final = RelayedStream(
     label="nudge",
     channel_template=relay.NUDGE_CHANNEL_TEMPLATE,
     audit=audit_nudge_stream,
+)
+
+#: The transcript stream (TASK-041d). Same three fields, different values —
+#: which is the whole of what the second stream needed once the lifecycle above
+#: was written once.
+TRANSCRIPT_STREAM: Final = RelayedStream(
+    label="transcript",
+    channel_template=relay.TRANSCRIPT_CHANNEL_TEMPLATE,
+    audit=audit_transcript_stream,
 )
 
 
@@ -258,6 +267,33 @@ async def nudge_stream(
     track-b-rag (TASK-040), forwarded unaltered.
     """
     await serve_stream(websocket, session_id, settings, redis, NUDGE_STREAM)
+
+
+@router.websocket("/ws/transcript/{session_id}")
+async def transcript_stream(
+    websocket: WebSocket,
+    session_id: str,
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    redis: Annotated[Redis, Depends(get_redis)],
+) -> None:
+    """Relay one encounter's transcript segments to a connected client.
+
+    TASK-041d. Authenticated exactly as the nudge socket is, and for the same
+    reasons: the session JWT in either carrier, carrying the same ``session_id``
+    as the URL. Each message is the segment payload published by audio-ingestion
+    (TASK-020), forwarded unaltered — its shape is fixed in CLAUDE.md, "The
+    transcript segment payload — one shape".
+
+    **A client sees only what is said after it connects.** Redis pub/sub keeps no
+    history, so a socket opened late or reopened after a drop starts from
+    silence, and the earlier segments are not recoverable here — the accumulated
+    transcript lives in track-a-clinical's in-memory buffer (TASK-030), which no
+    route exposes. A client must therefore not present what it received as a
+    complete transcript, and must show "connected, nothing said yet" differently
+    from "not connected": an empty pane that reads as "nobody is speaking" is the
+    one thing this stream must not be mistaken for.
+    """
+    await serve_stream(websocket, session_id, settings, redis, TRANSCRIPT_STREAM)
 
 
 async def _audit_accepted_connection(

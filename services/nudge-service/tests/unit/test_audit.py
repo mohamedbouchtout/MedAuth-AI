@@ -116,3 +116,77 @@ async def test_the_write_uses_hipaa_loggers_own_pool(
     await audit.audit_nudge_stream(session_id=uuid.uuid4(), provider_id=uuid.uuid4())
 
     assert "conn" not in recorded[0]
+
+
+class TestTranscriptStream:
+    """The second stream's row (TASK-041d).
+
+    Both functions go through one private writer, so these do not re-prove every
+    field. What they do prove is the part that must differ — the action — and
+    that sharing a writer did not let the transcript stream inherit the nudge
+    stream's identity.
+    """
+
+    async def test_the_action_is_its_own_and_not_the_nudge_streams(
+        self, recorded: list[dict[str, Any]]
+    ) -> None:
+        """An encounter's speech and its alerts are different disclosures.
+
+        One action for both would make "was this encounter's speech ever streamed
+        to a client" unanswerable from the audit trail, which is the whole reason
+        this member exists.
+        """
+        await audit.audit_transcript_stream(session_id=uuid.uuid4(), provider_id=uuid.uuid4())
+
+        assert recorded[0]["action"] == audit.AuditAction.RELAY_TRANSCRIPT
+        assert recorded[0]["action"] != audit.AuditAction.RELAY_NUDGES
+
+    async def test_the_row_identifies_the_provider_and_the_encounter(
+        self, recorded: list[dict[str, Any]]
+    ) -> None:
+        """The actor rule is the nudge stream's, one writer down."""
+        session_id = uuid.uuid4()
+        provider_id = uuid.uuid4()
+
+        await audit.audit_transcript_stream(session_id=session_id, provider_id=provider_id)
+
+        assert recorded[0]["actor_id"] == str(provider_id)
+        assert recorded[0]["session_id"] == str(session_id)
+        assert recorded[0]["resource_id"] == str(session_id)
+        assert recorded[0]["resource_type"] == "Encounter"
+        assert recorded[0]["service_name"] == "nudge-service"
+
+    async def test_the_client_address_and_agent_are_recorded_when_known(
+        self, recorded: list[dict[str, Any]]
+    ) -> None:
+        await audit.audit_transcript_stream(
+            session_id=uuid.uuid4(),
+            provider_id=uuid.uuid4(),
+            ip_address="203.0.113.7",
+            user_agent="Mozilla/5.0",
+        )
+
+        assert recorded[0]["ip_address"] == "203.0.113.7"
+        assert recorded[0]["user_agent"] == "Mozilla/5.0"
+
+    async def test_no_transcript_content_can_reach_the_row(
+        self, recorded: list[dict[str, Any]]
+    ) -> None:
+        """The row records that speech was streamed, never any of it.
+
+        Transcript text is the largest body of PHI on any bus here, and the audit
+        function takes no parameter that could carry it — this asserts the shape
+        rather than a filter, because there is nothing to filter.
+        """
+        await audit.audit_transcript_stream(session_id=uuid.uuid4(), provider_id=uuid.uuid4())
+
+        assert set(recorded[0]) == {
+            "actor_id",
+            "action",
+            "resource_type",
+            "resource_id",
+            "session_id",
+            "service_name",
+            "ip_address",
+            "user_agent",
+        }

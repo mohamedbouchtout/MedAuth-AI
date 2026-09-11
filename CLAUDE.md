@@ -1063,10 +1063,14 @@ of a vulnerability that never existed:
   already possess in order to use. There is nothing ambient to ride, so a page
   that does not hold a token cannot open a socket by pointing a browser at one.
 - **Why the check is added anyway.** It is nearly free once
-  `CORS_ALLOWED_ORIGINS` exists, and the nudge socket is the one surface in this
-  repository where a browser reaches a live stream of PHI. Defence in depth is
-  the entire justification, and it does not depend on the reasoning above being
-  wrong.
+  `CORS_ALLOWED_ORIGINS` exists, and the sockets `nudge-service` serves are
+  where a browser reaches a live stream of PHI. Defence in depth is the entire
+  justification, and it does not depend on the reasoning above being wrong.
+  There are two such sockets as of TASK-041d — the nudge stream and the
+  transcript stream, which carries what was actually said in the encounter and
+  is the larger disclosure of the two. This bullet named only the nudge socket
+  until then, and both go through one `serve_stream`, so the check is applied in
+  one place and the tests for it run against every path the service serves.
 - **What a future reader must not conclude.** That the check was added because
   tokens were reachable some other way, or that removing it would restore a
   vulnerability. What would change that: if the credential ever moves to a
@@ -1078,8 +1082,10 @@ Every task below should use these exact patterns, not invent variants:
 ```
 transcription:{session_id}      pub/sub — raw transcript segments, published by
                                  audio-ingestion (TASK-020), consumed by
-                                 track-a-clinical (TASK-030) and track-b-rag
-                                 (TASK-021). Payload shape is fixed in "The
+                                 track-a-clinical (TASK-030), track-b-rag
+                                 (TASK-021) and nudge-service (TASK-041d),
+                                 which relays it to a browser verbatim and
+                                 parses nothing. Payload shape is fixed in "The
                                  transcript segment payload — one shape" above;
                                  one writer and several readers, one of them in
                                  another language. `text` is PHI and never
