@@ -28,8 +28,8 @@ import { useEffect, useRef, useState } from 'react';
 
 import { launchApi as defaultLaunchApi, type LaunchApi } from './api/fhirClient';
 import type { Session } from './api/sessions';
-import { readClaim, scrubClaim } from './launch/inbound';
-import { completeLaunch } from './launch/smartLaunch';
+import { readClaim, readLaunchFailure, scrubLaunchParams } from './launch/inbound';
+import { completeLaunch, messageForFailure } from './launch/smartLaunch';
 import { LaunchScreen } from './screens/LaunchScreen';
 import { VisitFlow } from './screens/VisitFlow';
 
@@ -59,10 +59,26 @@ export function App({
   history = window.history,
 }: AppProps = {}) {
   const claim = readClaim(location.search);
+  // A failed launch comes back the same way a completed one does, carrying an
+  // `error` where a claim code would be (TASK-051g). The two are mutually
+  // exclusive by construction — a failure names no launch, so there is nothing
+  // to mint a code against — and the claim is read first so a completed launch
+  // could never be discarded in favour of an error some other party appended.
+  const launchFailure = claim === null ? readLaunchFailure(location.search) : null;
 
-  const [state, setState] = useState<AppState>(
-    claim === null ? { kind: 'no-launch', failure: null } : { kind: 'redeeming' },
-  );
+  const [state, setState] = useState<AppState>(() => {
+    if (claim !== null) {
+      return { kind: 'redeeming' };
+    }
+    // Distinct from a plain load, which is the whole point: before TASK-051g
+    // both looked like the sign-in screen with nothing said, and a provider who
+    // had just been refused by the EHR was invited to try again with no
+    // indication that anything had happened.
+    return {
+      kind: 'no-launch',
+      failure: launchFailure === null ? null : messageForFailure(launchFailure),
+    };
+  });
 
   /**
    * One redemption per code, ever.
@@ -83,7 +99,7 @@ export function App({
     // Out of the address bar and out of session history before the request is
     // even made. The code is a credential, and whether it is redeemed
     // successfully has no bearing on whether it should still be sitting in a URL.
-    scrubClaim(history, location);
+    scrubLaunchParams(history, location);
 
     let cancelled = false;
     void (async () => {
@@ -102,6 +118,22 @@ export function App({
       cancelled = true;
     };
   }, [claim, history, location, launches]);
+
+  /**
+   * Take a reported failure out of the URL once it has been rendered.
+   *
+   * The redemption effect below already scrubs, but it returns early when there
+   * is no claim — so without this an `?error=` would sit in the address bar and
+   * a reload would replay a failure the provider has already been told about.
+   * The message itself survives, because it is held in state rather than
+   * re-derived from the URL on every render.
+   */
+  useEffect(() => {
+    if (launchFailure === null) {
+      return;
+    }
+    scrubLaunchParams(history, location);
+  }, [launchFailure, history, location]);
 
   if (state.kind === 'redeeming') {
     return (
