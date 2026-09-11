@@ -18,6 +18,7 @@ members = [
     "medauth-fhir-integration",
     "medauth-fhir-types",
     "medauth-hipaa-logger",
+    "medauth-logging-policy",
     "medauth-nudge-service",
     "medauth-payer-vocab",
     "medauth-policy-scraper",
@@ -1787,6 +1788,11 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.13.5" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.52" },
 ]
+
+[[package]]
+name = "medauth-logging-policy"
+version = "0.1.0"
+source = { editable = "packages/logging-policy" }
 
 [[package]]
 name = "medauth-nudge-service"

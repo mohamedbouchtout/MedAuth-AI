@@ -1,0 +1,16 @@
+[project]
+name = "medauth-logging-policy"
+version = "0.1.0"
+description = "The repository's one third-party logging policy, installed per service. See TASK-046."
+requires-python = ">=3.12"
+# Deliberately none. The policy is a set of levels on stdlib loggers, so it must
+# be importable from any service without dragging a web framework or an AWS SDK
+# in behind it — including policy-scraper, which has no FastAPI app at all.
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/logging_policy"]
