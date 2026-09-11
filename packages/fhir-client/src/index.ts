@@ -35,8 +35,14 @@
 export { createFhirApi, LAUNCH_ID_HEADER } from './fhir';
 export type { FhirApi, LaunchContext, PatientMatch, PatientSearchResults } from './fhir';
 
-export { createLaunchApi } from './launch';
-export type { LaunchApi, LaunchDelivery, LaunchRequest, LaunchSession } from './launch';
+export { createLaunchApi, LAUNCH_ERROR_PARAM, narrowLaunchFailure } from './launch';
+export type {
+  LaunchApi,
+  LaunchDelivery,
+  LaunchFailure,
+  LaunchRequest,
+  LaunchSession,
+} from './launch';
 
 export { fixedSource, resolveLaunch, subjectFromLaunch, subjectFromMatch } from './patientSource';
 export type { LaunchResolution, PatientSource, VisitSubject } from './patientSource';

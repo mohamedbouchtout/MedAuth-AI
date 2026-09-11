@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { FetchLike } from '@medauth/session-client';
 
-import { createLaunchApi, type LaunchDelivery } from '../src/launch';
+import {
+  createLaunchApi,
+  LAUNCH_ERROR_PARAM,
+  narrowLaunchFailure,
+  type LaunchDelivery,
+} from '../src/launch';
 
 /**
  * The launch client (TASK-025c, shared with `apps/web` by TASK-070).
@@ -168,5 +173,40 @@ describe('redeemClaim', () => {
       expect(result.failure.kind).toBe('network');
       expect(result.failure.message).not.toContain(CLAIM);
     }
+  });
+});
+
+/**
+ * Reading a failed launch off a return redirect (TASK-051g).
+ *
+ * The narrowing is shared rather than done in each app because the interesting
+ * case is what an *unrecognised* value means: two apps deciding that separately
+ * is how one of them ends up silently showing a sign-in screen to a provider the
+ * EHR has just refused.
+ */
+describe('narrowLaunchFailure', () => {
+  it('narrows the two members the service sends', () => {
+    expect(narrowLaunchFailure('declined')).toBe('declined');
+    expect(narrowLaunchFailure('failed')).toBe('failed');
+  });
+
+  it('answers null when nothing failed', () => {
+    expect(narrowLaunchFailure(null)).toBeNull();
+    expect(narrowLaunchFailure(undefined)).toBeNull();
+    expect(narrowLaunchFailure('')).toBeNull();
+  });
+
+  /**
+   * A member a shipped app does not know still means the launch did not
+   * complete. Reading it as "no failure" would restore the silence this whole
+   * delivery exists to end.
+   */
+  it('narrows an unrecognised value to the generic failure', () => {
+    expect(narrowLaunchFailure('some_future_member')).toBe('failed');
+    expect(narrowLaunchFailure('DECLINED')).toBe('failed');
+  });
+
+  it('names the parameter the service actually appends', () => {
+    expect(LAUNCH_ERROR_PARAM).toBe('error');
   });
 });
