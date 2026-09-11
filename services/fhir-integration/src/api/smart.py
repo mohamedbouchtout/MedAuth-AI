@@ -53,7 +53,9 @@ from src.config import Settings
 from src.smart import store
 from src.smart.delivery import (
     LaunchDelivery,
+    LaunchFailure,
     append_claim,
+    append_failure,
     redirect_target_for,
 )
 from src.smart.discovery import DiscoveryError, fetch_smart_configuration
@@ -256,6 +258,72 @@ async def smart_launch(
     return RedirectResponse(redirect_to, status_code=status.HTTP_302_FOUND)
 
 
+def _deliver_failure(
+    *,
+    delivery: LaunchDelivery,
+    settings: Settings,
+    failure: LaunchFailure,
+    status_code: int,
+    code: str,
+    message: str,
+) -> RedirectResponse:
+    """Hand a launch that did not complete back the way its initiator declared.
+
+    The failure half of TASK-051f's delivery, added by TASK-051g. A launch that
+    declared ``web`` or ``mobile`` is redirected to that platform's return target
+    carrying a ``LaunchFailure``; a launch that declared ``json``, or declared
+    nothing, raises exactly what this route has always raised. **Supplement,
+    never replace** — the service-to-service caller is already served correctly,
+    and breaking it to serve an application would trade one gap for another.
+
+    Without this, every failure answered as JSON in whatever browser the EHR
+    redirected: the provider is left on a page that is not MedAuth with no link
+    back, and the app that started the launch never learns the launch ended. It
+    is worse on web than mobile, where ``openAuthSessionAsync`` hands control
+    back whatever the browser did.
+
+    **No claim code and no handoff record.** There is no launch to name, and a
+    code that resolves to nothing would be a credential-shaped value with no
+    credential behind it.
+
+    Args:
+        delivery: What the launch's initiator declared, off the claimed record —
+            never off this request. See the caller for why that distinction is
+            load-bearing.
+        settings: Holds the two validated return targets.
+        failure: What the client is told. Never the EHR's own error string.
+        status_code: The status a ``json`` launch raises.
+        code: The error code a ``json`` launch raises.
+        message: The message a ``json`` launch raises. It does not reach a
+            redirected client, which gets ``failure`` and nothing else.
+
+    Returns:
+        The redirect to the initiator's return target.
+
+    Raises:
+        ApiHTTPException: For a ``json`` launch — the unchanged behaviour.
+    """
+    target = redirect_target_for(
+        delivery,
+        web_return_url=settings.smart_web_return_url,
+        mobile_return_uri=settings.smart_mobile_return_uri,
+    )
+    if target is None:
+        # ``from None`` because one caller is inside an ``except`` block: the
+        # token-exchange failure raised here would otherwise chain the vendor's
+        # own exception into the traceback, which is where a detail nobody
+        # chose to expose ends up in a log.
+        raise ApiHTTPException(status_code, code, message) from None
+
+    # The vendor's own refusal reason is not in `failure` and is not in this
+    # line either: what the operator needs is which client was told what, and
+    # the reason was already logged where it was classified.
+    logger.info("Handing a failed launch to a %s client as %s.", delivery.value, failure.value)
+    # 302 rather than 307 for the reason the launch redirect gives: this is a
+    # browser navigation and the method must not be preserved across it.
+    return RedirectResponse(append_failure(target, failure), status_code=status.HTTP_302_FOUND)
+
+
 @router.get(
     "/callback",
     response_model=ApiResponse[LaunchSessionData],
@@ -265,8 +333,10 @@ async def smart_launch(
         status.HTTP_302_FOUND: {
             "description": (
                 "The launch declared `delivery=web` or `delivery=mobile`: a "
-                "redirect to that platform's return target, carrying a "
-                "single-use `claim` code and never the launch_id."
+                "redirect to that platform's return target. A completed launch "
+                "carries a single-use `claim` code and never the launch_id; a "
+                "failed one carries an `error` from a closed vocabulary and no "
+                "claim code at all."
             ),
         },
         **error_responses(
@@ -320,6 +390,13 @@ async def callback(
     the EHR redirected reaches no application. The decision is read off the
     claimed launch record and is never inferred from this request.
 
+    **A launch that does not complete is delivered the same way** (TASK-051g),
+    carrying a ``LaunchFailure`` instead of a claim code — see
+    ``_deliver_failure``. The one exception is an unknown ``state``, which is
+    answered before any record is in hand and therefore has no declared delivery
+    to honour; that path raises for every launch and the comment there says why
+    no fallback may be added.
+
     Returns the ``launch_id``. It does not return the SMART launch context the
     token response carried, nor the resolved actor: those identifiers are stored
     for TASK-052, which audits when it reads them, and a credential exchange is
@@ -332,6 +409,16 @@ async def callback(
     if pending is None:
         # Unknown, expired and already-consumed are one answer on purpose: the
         # difference would tell a caller probing states which ones were real.
+        #
+        # **This is the one failure that cannot be delivered to a client, and no
+        # code may be added that makes it one** (TASK-051g). The record is what
+        # carries `delivery`, and there is no record — so the value is not
+        # merely unread here, it is unknowable, and this raises for a `web`
+        # launch exactly as it does for a `json` one. Taking `delivery` off this
+        # request instead is the inference the success answer already refuses,
+        # and it would let anyone who can reach this route choose where this
+        # service redirects a browser. See CLAUDE.md, "A failed launch is
+        # delivered the same way, and carries no claim code".
         logger.warning("Rejected SMART callback: no pending launch for the presented state")
         raise ApiHTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -342,18 +429,31 @@ async def callback(
     host = issuer_host(pending.iss)
 
     if error is not None:
+        # The vendor's own error code is logged and goes no further: it is a
+        # string from a third party, and a client rendering it would put it
+        # somewhere a provider reads as ours.
         logger.info("SMART launch declined at %s (%s)", host, error)
-        raise ApiHTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            ERROR_CODE_AUTHORIZATION_DENIED,
-            f"The EHR's authorization server refused the launch ({error})",
+        return _deliver_failure(
+            delivery=pending.delivery,
+            settings=settings,
+            failure=LaunchFailure.DECLINED,
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code=ERROR_CODE_AUTHORIZATION_DENIED,
+            message=f"The EHR's authorization server refused the launch ({error})",
         )
 
     if code is None:
-        raise ApiHTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            ERROR_CODE_AUTHORIZATION_DENIED,
-            "The callback carried neither an authorization code nor an error",
+        # Not DECLINED: nobody refused anything, the callback is malformed.
+        # Telling a provider they cancelled when they did not is the misreading
+        # the two-member vocabulary exists to avoid.
+        logger.warning("SMART callback from %s carried neither a code nor an error", host)
+        return _deliver_failure(
+            delivery=pending.delivery,
+            settings=settings,
+            failure=LaunchFailure.FAILED,
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code=ERROR_CODE_AUTHORIZATION_DENIED,
+            message="The callback carried neither an authorization code nor an error",
         )
 
     credentials = require_credentials(settings, pending.ehr_type)
@@ -371,9 +471,14 @@ async def callback(
         )
     except TokenExchangeError as exc:
         logger.warning("Token exchange failed for %s: %s", host, exc.detail)
-        raise ApiHTTPException(
-            status.HTTP_502_BAD_GATEWAY, ERROR_CODE_TOKEN_EXCHANGE_FAILED, str(exc)
-        ) from None
+        return _deliver_failure(
+            delivery=pending.delivery,
+            settings=settings,
+            failure=LaunchFailure.FAILED,
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            code=ERROR_CODE_TOKEN_EXCHANGE_FAILED,
+            message=str(exc),
+        )
 
     # Who authorized this launch, if the EHR both told us and can prove it.
     # Never fails the launch: an unverifiable claim leaves the actor unknown,

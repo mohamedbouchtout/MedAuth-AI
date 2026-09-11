@@ -16,8 +16,17 @@ any other part of the request, and neither shape is a silent default: a caller
 that cannot see how its response shape was chosen cannot tell a wrong guess from
 a correct answer.
 
-See CLAUDE.md, "Handing a completed SMART launch back to a client", which settles
-all of this once because TASK-025c and TASK-070 both consume it.
+**A launch that does *not* complete is delivered the same way** (TASK-051g). It
+redirects to the same return target carrying a ``LaunchFailure`` instead of a
+claim code, and a ``json`` launch keeps raising exactly as it did — the same
+"supplement, never replace" split, applied to the other outcome. Without it a
+``delivery=web`` launch the provider declines renders a JSON error document on
+this service's origin, stranding the provider on a page that is not MedAuth
+while the app that started the launch learns nothing.
+
+See CLAUDE.md, "Handing a completed SMART launch back to a client" and its
+"A failed launch is delivered the same way" subsection, which settle all of this
+once because TASK-025c and TASK-070 both consume it.
 """
 
 from __future__ import annotations
@@ -51,10 +60,58 @@ class LaunchDelivery(StrEnum):
     MOBILE = "mobile"
 
 
+class LaunchFailure(StrEnum):
+    """Why a launch did not complete, as far as the client that started it is told.
+
+    A closed vocabulary for the reason ``LaunchDelivery`` above is one, plus a
+    stronger one of its own: this value **crosses into another language**. It
+    rides a redirect into ``apps/web``, which narrows it from ``unknown`` per the
+    TypeScript conventions, so a free-form string would put the emitter and the
+    only consumer that must recognise it in two languages with nothing holding
+    them in step.
+
+    **It is not a diagnostic channel.** What reaches a client is enough to say
+    "the launch did not complete, start again" and no more. The EHR's own OAuth
+    ``error`` code is logged here and never forwarded: it is a string from a
+    third party, and rendering it in our UI puts it somewhere a provider reads as
+    ours. See CLAUDE.md, "A failed launch is delivered the same way, and carries
+    no claim code".
+
+    **Two members, deliberately.** A provider who cancelled at the EHR and a
+    provider whose token exchange broke are in genuinely different situations,
+    and telling the first that something went wrong is as misleading as telling
+    the second that they cancelled. There is no third member because a
+    distinction the provider cannot act on differently does not earn a value
+    here — everything below ends in "launch again".
+
+    Note what this does *not* copy from ``claim_handoff()``, where unknown,
+    expired and already-redeemed are deliberately one answer: that collapse
+    exists so a caller probing codes learns nothing about which were real, and
+    the person at this browser already knows whether they clicked "deny". Taking
+    the mechanism without its justification would be the wrong kind of
+    consistency.
+    """
+
+    #: The authorization server reported that the launch was refused — the
+    #: provider declined, or the EHR refused them.
+    DECLINED = "declined"
+
+    #: The launch did not complete for any other reason: no authorization code
+    #: came back, or the token exchange failed.
+    FAILED = "failed"
+
+
 #: The query parameter the claim code rides back on. It is not the ``launch_id``:
 #: that is a capability handle and never goes in a URL. See ``store.LaunchClaim``
 #: for what makes a code safe to carry here.
 CLAIM_QUERY_PARAM = "claim"
+
+#: The query parameter a failed launch rides back on. Distinct from
+#: ``CLAIM_QUERY_PARAM`` rather than a second meaning for it: a client reads one
+#: URL and must be able to tell a launch it can redeem from one it cannot, and
+#: overloading a single parameter would make that a value comparison instead of a
+#: presence check.
+ERROR_QUERY_PARAM = "error"
 
 
 def redirect_target_for(
@@ -83,14 +140,21 @@ def redirect_target_for(
             return None
 
 
-def append_claim(target: str, claim: str) -> str:
-    """Return ``target`` carrying ``claim`` as its query string.
+def _append_parameter(target: str, name: str, value: str) -> str:
+    """Return ``target`` carrying one query parameter.
 
     Plain concatenation rather than ``urlencode``: a target is validated at
-    startup to carry no query and no fragment, and a claim code is base64url —
-    so neither side has anything to escape. Doing it this way keeps a custom
-    scheme URI like ``medauth://launch`` intact, which ``urlunsplit`` does not
-    reliably round-trip for schemes it does not recognise as hierarchical.
+    startup to carry no query and no fragment, a claim code is base64url, and a
+    ``LaunchFailure`` is a lowercase word — so neither side has anything to
+    escape. Doing it this way keeps a custom scheme URI like ``medauth://launch``
+    intact, which ``urlunsplit`` does not reliably round-trip for schemes it does
+    not recognise as hierarchical.
+    """
+    return f"{target}?{name}={value}"
+
+
+def append_claim(target: str, claim: str) -> str:
+    """Return ``target`` carrying ``claim`` as its query string.
 
     Args:
         target: A validated return target.
@@ -99,7 +163,25 @@ def append_claim(target: str, claim: str) -> str:
     Returns:
         The URL to redirect the browser to.
     """
-    return f"{target}?{CLAIM_QUERY_PARAM}={claim}"
+    return _append_parameter(target, CLAIM_QUERY_PARAM, claim)
+
+
+def append_failure(target: str, failure: LaunchFailure) -> str:
+    """Return ``target`` carrying ``failure`` as its query string.
+
+    The counterpart of ``append_claim`` for a launch that did not complete. It
+    carries **no claim code**, because there is no launch to name: issuing one
+    that resolves to nothing would put a credential-shaped value in a redirect
+    with no credential behind it.
+
+    Args:
+        target: A validated return target.
+        failure: What the client is told, from the closed vocabulary above.
+
+    Returns:
+        The URL to redirect the browser to.
+    """
+    return _append_parameter(target, ERROR_QUERY_PARAM, failure.value)
 
 
 class ReturnTargetError(ValueError):
