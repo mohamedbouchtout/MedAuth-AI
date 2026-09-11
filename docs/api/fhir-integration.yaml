@@ -262,8 +262,9 @@ paths:
                 $ref: '#/components/schemas/ApiResponse_LaunchSessionData_'
         '302':
           description: 'The launch declared `delivery=web` or `delivery=mobile`: a redirect
-            to that platform''s return target, carrying a single-use `claim` code and never
-            the launch_id.'
+            to that platform''s return target. A completed launch carries a single-use `claim`
+            code and never the launch_id; a failed one carries an `error` from a closed vocabulary
+            and no claim code at all.'
         '400':
           description: The `state` is unknown, expired or already consumed, or the authorization
             server reported that the provider declined.
