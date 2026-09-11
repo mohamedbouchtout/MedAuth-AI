@@ -4,7 +4,7 @@ import type { AudioCaptureErrorCode } from '@medauth/audio-wire';
 
 import type { ApiResult, Session, SessionsApi, StartVisitInput } from '../../../src/api/sessions';
 import type { AudioCaptureState } from '../../../src/hooks/useAudioCapture';
-import type { PatientSource } from '../../../src/session/patientSource';
+import type { PatientSource } from '@medauth/fhir-client';
 import { tokenExpiringAt } from '../../support/token';
 import {
   END_FAILED_MESSAGE,

@@ -2,10 +2,14 @@
 #
 # Decide which CI jobs a change needs to run.
 #
-# Reads changed file paths on stdin, one per line, and writes the seven outputs
-# the `changes` job publishes — members, any_python, web, mobile, fhir_types,
-# audio_wire, session_client — to stdout as `key=value` lines. The workflow
-# redirects that into $GITHUB_OUTPUT.
+# Reads changed file paths on stdin, one per line, and writes the outputs the
+# `changes` job publishes — members, any_python, web, mobile, fhir_types,
+# audio_wire, session_client, nudge_client, fhir_client — to stdout as
+# `key=value` lines. The workflow redirects that into $GITHUB_OUTPUT.
+#
+# That list used to be introduced as "the seven outputs" and was stale by two
+# before anyone noticed, so it is now named rather than counted: a name that
+# goes missing is visible, a count that goes stale is not.
 #
 # **Why this is a script rather than inline `run:` bash.** These rules decide
 # whether anything is tested at all, and their failure mode is silent
@@ -193,13 +197,13 @@ main() {
   # @medauth/nudge-client, and all three ship TypeScript source rather than a
   # build, so a change in any of them is a change to code that runs inside the
   # apps — test them when it moves.
-  if changed_matches '^(apps/web/|packages/(audio-wire|session-client|nudge-client)/)'; then
+  if changed_matches '^(apps/web/|packages/(audio-wire|session-client|nudge-client|fhir-client)/)'; then
     echo "web=true"
   else
     echo "web=false"
   fi
 
-  if changed_matches '^(apps/mobile/|packages/(audio-wire|session-client|nudge-client)/)'; then
+  if changed_matches '^(apps/mobile/|packages/(audio-wire|session-client|nudge-client|fhir-client)/)'; then
     echo "mobile=true"
   else
     echo "mobile=false"
@@ -245,6 +249,19 @@ main() {
     echo "nudge_client=true"
   else
     echo "nudge_client=false"
+  fi
+
+  # fhir-client is TypeScript only and gets the same treatment again: its own npm
+  # job, no place in ALL_PACKAGES, and a reaction to the npm root because a
+  # lockfile change can break `npm ci` without touching the package. It holds the
+  # client that obtains a SMART launch and the order deciding whether a patient
+  # search is the right question at all (TASK-070), so a change here that nothing
+  # tested would change which patient a visit is filed against in both apps at
+  # once.
+  if changed_matches '^(package\.json|package-lock\.json|\.github/workflows/ci\.yml|packages/fhir-client/)'; then
+    echo "fhir_client=true"
+  else
+    echo "fhir_client=false"
   fi
 }
 

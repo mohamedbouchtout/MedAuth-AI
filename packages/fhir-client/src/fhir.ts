@@ -1,10 +1,10 @@
 /**
- * Client for the two fhir-integration routes that identify a patient (TASK-025b).
+ * Client for the two fhir-integration routes that identify a patient.
  *
  * `GET /fhir/launch-context` (TASK-051d) says who the EHR launched us for, and
  * `GET /fhir/patient/search` (TASK-025b) finds a patient when nobody did. They
  * answer two different launch types and neither replaces the other — see
- * `patientSource` for the order they are used in.
+ * `./patientSource` for the order they are used in.
  *
  * **Both are keyed on `launch_id`, carried in the `X-MedAuth-Launch-Id`
  * header.** Never a query parameter: a `launch_id` resolves to an EHR access
@@ -16,15 +16,11 @@
  * Failures are returned as typed results and never thrown, per CLAUDE.md's
  * TypeScript conventions. Nothing here logs: a search query is a patient's name
  * and every successful response carries patient identifiers.
- *
- * **This lives in the app rather than in `packages/`, for now.** `apps/web` will
- * need the same two calls in TASK-070, and that is the point at which it moves —
- * the same trigger that extracted `session-client` from this app in TASK-042 and
- * `nudge-client` from the web app in TASK-043. Extracting it before a second
- * consumer exists would be guessing at the shape the second one needs.
  */
 
-import type { ApiFailure, ApiResult, FetchLike } from '@medauth/session-client';
+import type { ApiResult, FetchLike } from '@medauth/session-client';
+
+import { MALFORMED, networkFailure, optionalString, readEnvelope } from './http';
 
 /** The header both routes take the launch in. Spelled once. */
 export const LAUNCH_ID_HEADER = 'X-MedAuth-Launch-Id';
@@ -68,35 +64,6 @@ export interface FhirApi {
   ): Promise<ApiResult<PatientSearchResults>>;
 }
 
-const MALFORMED: ApiFailure = {
-  kind: 'malformed',
-  message: 'The server returned a response MedAuth AI could not read.',
-};
-
-function networkFailure(): ApiFailure {
-  // The thrown value is not surfaced: it can carry the request URL, and this
-  // one's query string carries a patient's name.
-  return {
-    kind: 'network',
-    message: 'MedAuth AI could not reach the server. Check the network connection.',
-  };
-}
-
-function readError(body: unknown, status: number): ApiFailure {
-  const error = (body as { error?: unknown } | null)?.error;
-  if (typeof error === 'object' && error !== null) {
-    const { code, message } = error as { code?: unknown; message?: unknown };
-    if (typeof code === 'string' && typeof message === 'string') {
-      return { kind: 'status', status, code, message };
-    }
-  }
-  return { kind: 'status', status, code: 'unknown', message: `The server returned ${status}.` };
-}
-
-function optionalString(value: unknown): string | null {
-  return typeof value === 'string' ? value : null;
-}
-
 function readLaunchContext(body: unknown): LaunchContext | null {
   const data = (body as { data?: unknown } | null)?.data;
   if (typeof data !== 'object' || data === null) {
@@ -124,7 +91,9 @@ function readMatch(value: unknown): PatientMatch | null {
   return {
     patientId: record.patient_id,
     familyName: optionalString(record.family_name),
-    givenNames: Array.isArray(given) ? given.filter((name): name is string => typeof name === 'string') : [],
+    givenNames: Array.isArray(given)
+      ? given.filter((name): name is string => typeof name === 'string')
+      : [],
     birthDate: optionalString(record.birth_date),
     gender: optionalString(record.gender),
   };
@@ -166,22 +135,7 @@ export function createFhirApi(
     } catch {
       return { ok: false, failure: networkFailure() };
     }
-
-    let body: unknown = null;
-    try {
-      body = await response.json();
-    } catch {
-      // Only fatal on the success path — an error status still tells the caller
-      // what happened without a parseable body.
-      if (response.ok) {
-        return { ok: false, failure: MALFORMED };
-      }
-    }
-
-    if (!response.ok) {
-      return { ok: false, failure: readError(body, response.status) };
-    }
-    return { ok: true, value: body };
+    return readEnvelope(response);
   }
 
   return {

@@ -29,7 +29,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import type { LaunchApi, LaunchRequest, LaunchSession } from '../api/launch';
+import type { LaunchApi, LaunchRequest, LaunchSession } from '@medauth/fhir-client';
 import { launchApi as defaultLaunchApi } from '../api/launchClient';
 import { SMART_ISS, SMART_RETURN_URI } from '../config';
 import { openAuthSession as defaultOpen } from '../launch/browser';

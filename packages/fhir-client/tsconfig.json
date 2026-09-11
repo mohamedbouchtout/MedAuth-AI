@@ -1,0 +1,36 @@
+{
+  // Mirrors packages/session-client, which mirrors packages/audio-wire. Every
+  // value this package reads off the wire is either a patient identifier or a
+  // handle that resolves to an EHR access token, so a loose type here is a
+  // credential or a patient handled on an assumption rather than a fact.
+  //
+  // No `outDir` and no build: consumers import `src/index.ts` directly, so both
+  // Vite (apps/web) and Metro/Jest (apps/mobile) transpile it as source. A dist
+  // build would have to be produced before either app's test run, which is a
+  // build-ordering rule that nothing enforces and everyone forgets.
+  //
+  // `lib` carries DOM only for `fetch`'s types — `RequestInit` and `Response`.
+  // Nothing here touches a document, and the `FetchLike` seam means nothing here
+  // reaches for a global either: the browser supplies one on web and Metro's on
+  // mobile.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": []
+  },
+  "include": ["src", "tests", "vitest.config.ts"]
+}

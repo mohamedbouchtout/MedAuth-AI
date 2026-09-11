@@ -25,12 +25,13 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 
 import type { ApiFailure } from '@medauth/session-client';
 
 import { fhirApi as defaultFhirApi } from '../api/fhirClient';
-import type { FhirApi, PatientMatch } from '../api/fhir';
 import {
   resolveLaunch,
   subjectFromMatch,
+  type FhirApi,
+  type PatientMatch,
   type VisitSubject,
-} from '../session/patientSource';
+} from '@medauth/fhir-client';
 
 export const NO_LAUNCH_MESSAGE =
   'MedAuth AI is not signed in to an EHR, so it has no way to identify the patient. Sign in to the EHR and try again.';
