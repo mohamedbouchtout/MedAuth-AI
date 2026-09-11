@@ -1,4 +1,13 @@
-"""``WebSocket /ws/audio/{session_id}`` — encounter audio in, transcript out.
+"""``WebSocket /ws/audio/{session_id}`` — encounter audio in, transcript onto the bus.
+
+**This socket is one-directional, and its summary line used to say otherwise.**
+"transcript out" read as though segments came back down this connection to the
+client that sent the audio. They do not, and never have: step 4 below publishes
+them to Redis and that is the only place they go. Nothing here calls ``send_*``
+at all. A client that wants to *display* an encounter's transcript subscribes to
+``nudge-service``'s ``/ws/transcript/{session_id}`` (TASK-041d), which relays the
+same channel — deliberately a separate socket, so a provider can open and close a
+transcript view without disturbing capture.
 
 The shape of one connection:
 
