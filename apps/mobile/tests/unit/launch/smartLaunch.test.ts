@@ -3,6 +3,8 @@ import type { ApiResult } from '@medauth/session-client';
 import type { LaunchApi, LaunchSession } from '@medauth/fhir-client';
 import {
   BROWSER_UNAVAILABLE_MESSAGE,
+  DECLINED_MESSAGE,
+  LAUNCH_FAILED_MESSAGE,
   NO_CLAIM_MESSAGE,
   performSmartLaunch,
   type AuthSessionOpener,
@@ -182,4 +184,69 @@ it('reports a spent claim code as a failure, holding no launch', async () => {
   if (outcome.kind === 'failed') {
     expect(outcome.message).toContain('No such launch claim.');
   }
+});
+
+/**
+ * A launch the service reported as failed (TASK-051g).
+ *
+ * Before that delivery existed a failure never reached this app: the callback
+ * rendered its JSON error in the system browser, no redirect arrived, and the
+ * provider closing the window read as a cancellation. Now the failure comes back
+ * through the same return target a success does — which means the redirect
+ * carries no claim code, and the point of these cases is that it must not be
+ * reported as the configuration mismatch that shape used to mean.
+ */
+it('reports a decline as a decline, not as a misconfiguration', async () => {
+  const api = fakeApi();
+
+  const outcome = await performSmartLaunch({
+    request: { iss: ISS },
+    returnUri: RETURN_URI,
+    api,
+    open: opener({ type: 'success', url: 'medauth://launch?error=declined' }),
+  });
+
+  expect(outcome).toEqual({ kind: 'failed', message: DECLINED_MESSAGE });
+  expect(api.redeemed).toHaveLength(0);
+});
+
+it('reports a generic failure distinctly from a decline', async () => {
+  const outcome = await performSmartLaunch({
+    request: { iss: ISS },
+    returnUri: RETURN_URI,
+    api: fakeApi(),
+    open: opener({ type: 'success', url: 'medauth://launch?error=failed' }),
+  });
+
+  expect(outcome).toEqual({ kind: 'failed', message: LAUNCH_FAILED_MESSAGE });
+});
+
+/**
+ * A member this build does not know still means the launch did not complete, so
+ * it must not fall through to the configuration message either.
+ */
+it('reports a failure it cannot name precisely as a launch failure', async () => {
+  const outcome = await performSmartLaunch({
+    request: { iss: ISS },
+    returnUri: RETURN_URI,
+    api: fakeApi(),
+    open: opener({ type: 'success', url: 'medauth://launch?error=some_future_member' }),
+  });
+
+  expect(outcome).toEqual({ kind: 'failed', message: LAUNCH_FAILED_MESSAGE });
+});
+
+/**
+ * A failure is a report, not a cancellation: the provider did not close the
+ * window, so telling the screen nothing happened would be wrong.
+ */
+it('does not report a reported failure as a cancellation', async () => {
+  const outcome = await performSmartLaunch({
+    request: { iss: ISS },
+    returnUri: RETURN_URI,
+    api: fakeApi(),
+    open: opener({ type: 'success', url: 'medauth://launch?error=declined' }),
+  });
+
+  expect(outcome.kind).toBe('failed');
 });
