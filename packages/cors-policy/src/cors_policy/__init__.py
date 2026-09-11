@@ -29,10 +29,11 @@ not an authorised caller, and CORS is a constraint a browser applies on behalf
 of its user rather than an access control the server enforces.
 
 It is a package rather than a few lines in each service because TASK-041c
-settles the policy once for the repository. Two services install the middleware
-(``track-a-clinical`` and ``track-b-rag``) and two more read the same origin
-list for their WebSocket handshakes (``audio-ingestion`` and ``nudge-service``),
-so a hand-written allow-list per service is four places for one policy to drift
+settles the policy once for the repository. Four services install the middleware
+(``track-a-clinical``, ``track-b-rag``, ``fhir-integration`` and ``prior-auth``)
+and two more read the same origin list for their WebSocket handshakes
+(``audio-ingestion`` and ``nudge-service``), so a hand-written allow-list per
+service is six places for one policy to drift
 — and a permissive middleware growing in one service is precisely how a
 repo-wide policy gets set by accident. See CLAUDE.md, "CORS and browser
 reachability", for why the policy lives in the services rather than in an

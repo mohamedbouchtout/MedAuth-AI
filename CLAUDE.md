@@ -989,12 +989,26 @@ that answers with PHI.
   or middleware. Bolting CORS onto it would make it the shared web framework it
   declares it is not. A separate package gets its own path-filter entry, its own
   CI job and the same 80% gate, per the packages rule in GitHub Actions above.
-- **Only the services that answer HTTP to a browser install it.** Today that is
-  `track-b-rag` (TASK-041b's acknowledge route) and `track-a-clinical`
-  (`GET`/`PATCH /notes/{session_id}`). `audio-ingestion` and `nudge-service`
-  expose WebSocket surfaces plus `/health`, and a browser applies no CORS to a
-  WebSocket upgrade, so middleware there would protect nothing. Add it to a
-  service when that service grows a browser-facing HTTP route, not pre-emptively.
+- **Only the services that answer HTTP to a browser install it.** Four do:
+  `track-b-rag` (TASK-041b's acknowledge route), `track-a-clinical`
+  (`GET`/`PATCH /notes/{session_id}`, and the session lifecycle routes
+  `apps/web` calls from TASK-070), `fhir-integration` (the launch handoff and
+  the two routes that identify a patient) and `prior-auth`. This bullet named
+  only the first two until TASK-070, which was already wrong by two services
+  when it was read — check the call sites rather than this list.
+  `audio-ingestion` and `nudge-service` expose WebSocket surfaces plus
+  `/health`, and a browser applies no CORS to a WebSocket upgrade, so middleware
+  there would protect nothing. Add it to a service when that service grows a
+  browser-facing HTTP route, not pre-emptively.
+- **Installing it is not covering a route.** The policy's methods and headers
+  are fixed repo-wide, so a service can import the package, call `install_cors`,
+  and still refuse a browser on a route whose method or header the policy does
+  not list. Each installing service therefore keeps a `test_cors.py` asserting
+  the specific path-and-method combinations its browser callers use, with an
+  unlisted-origin counterpart so the assertion cannot pass against a permissive
+  policy. A route that is browser-facing for the first time gets a case there in
+  the same change — including one already called from `apps/mobile`, which is
+  not a browser and preflights nothing.
 - **The deciding argument against an ingress was the dev and CI environment, not
   architectural taste.** Local development is `docker compose`, which runs no
   proxy, and `apps/web` talks straight to service ports (`VITE_AUDIO_WS_URL`
