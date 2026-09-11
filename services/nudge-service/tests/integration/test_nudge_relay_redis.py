@@ -30,6 +30,7 @@ import json
 import os
 import uuid
 from collections.abc import Iterator
+from dataclasses import replace
 
 import pytest
 import redis as sync_redis
@@ -91,9 +92,23 @@ def publisher(redis_url: str) -> Iterator[sync_redis.Redis]:
 
 @pytest.fixture
 def recorded_audit(monkeypatch: pytest.MonkeyPatch) -> RecordedAudit:
-    """The audit write needs a database; this suite is about the bus."""
+    """The audit write needs a database; this suite is about the bus.
+
+    Patches the stream description rather than a module-level function, for the
+    reason the unit conftest's copy of this fixture records: since TASK-041d the
+    audit function is reached through the ``RelayedStream`` the route names, so
+    patching ``websocket_module.audit_nudge_stream`` replaces a reference nothing
+    reads. This suite is where that mattered — with the stale target the real
+    audit function ran and ``audit_log`` rejected ``TestClient``'s ``testclient``
+    host as not an IP address, which is the only reason the substitution failing
+    was visible at all.
+    """
     recorder = RecordedAudit()
-    monkeypatch.setattr(websocket_module, "audit_nudge_stream", recorder)
+    monkeypatch.setattr(
+        websocket_module,
+        "NUDGE_STREAM",
+        replace(websocket_module.NUDGE_STREAM, audit=recorder),
+    )
     return recorder
 
 

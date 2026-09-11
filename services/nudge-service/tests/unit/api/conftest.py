@@ -17,6 +17,7 @@ import asyncio
 import datetime
 import uuid
 from collections.abc import Iterator
+from dataclasses import replace
 from typing import Any
 
 import jwt
@@ -155,8 +156,24 @@ def fake_redis() -> FakeRedis:
 
 @pytest.fixture
 def recorded_audit(monkeypatch: pytest.MonkeyPatch) -> RecordedAudit:
+    """Capture the audit call a connection makes instead of writing a row.
+
+    **The target is the stream description, not a module-level function**, and
+    that changed when TASK-041d factored the connection lifecycle. The audit
+    function is now reached through the ``RelayedStream`` the route names, so
+    patching ``websocket_module.audit_nudge_stream`` would replace a reference
+    nothing reads any more — the fixture would appear to work and record
+    nothing. Replacing the whole description keeps the substitution honest:
+    ``dataclasses.replace`` on a frozen dataclass fails loudly if the field is
+    ever renamed, and the route looks the name up in module globals at call
+    time, which is what makes the patch take effect.
+    """
     recorder = RecordedAudit()
-    monkeypatch.setattr(websocket_module, "audit_nudge_stream", recorder)
+    monkeypatch.setattr(
+        websocket_module,
+        "NUDGE_STREAM",
+        replace(websocket_module.NUDGE_STREAM, audit=recorder),
+    )
     return recorder
 
 

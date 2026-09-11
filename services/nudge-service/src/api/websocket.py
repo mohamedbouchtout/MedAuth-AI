@@ -1,39 +1,55 @@
-"""``WebSocket /ws/nudges/{session_id}`` — one encounter's nudges, live to a client.
+"""The WebSocket streams this service relays from the Redis bus to one client.
+
+Today that is ``/ws/nudges/{session_id}``. The whole connection lifecycle below
+is written once and parameterised by a :class:`RelayedStream`, because the parts
+that differ between one relayed channel and the next are the channel name, the
+audit action and a label for the log lines — and nothing else.
+
+**That shape is deliberate, not speculative generality.** TASK-041 established
+the rule for exactly this situation when it extracted ``packages/session-auth``
+rather than let ``audio-ingestion``'s validator be copied into this service: two
+hand-maintained copies of one mechanism diverge, not on purpose, but because a
+fix lands in whichever file the person had open. A second socket written
+standalone here would have been a near-verbatim copy of a working one, with the
+origin check, the pre-handshake refusal, the task group, the close codes and the
+teardown all duplicated.
 
 The shape of one connection:
 
-1. The session JWT is validated, from either carrier, **before the handshake is
-   accepted**. A refused token never reaches a state where it could send a frame,
-   and no subscription is opened for it. The validation is
-   ``packages/session-auth``, shared with the audio socket (TASK-020) rather than
-   reimplemented here — see CLAUDE.md, "How the JWT reaches a WebSocket
-   endpoint".
-2. The handshake is accepted, echoing ``medauth.session.v1`` if the client offered
-   subprotocols, and the access is written to the audit log.
-3. The service subscribes to ``nudges:{session_id}`` and forwards each message to
-   the client verbatim.
+1. The ``Origin`` is checked, then the session JWT is validated from either
+   carrier, both **before the handshake is accepted**. A refused peer never
+   reaches a state where it could send a frame, and no subscription is opened for
+   it. The validation is ``packages/session-auth``, shared with the audio socket
+   (TASK-020) rather than reimplemented here — see CLAUDE.md, "How the JWT
+   reaches a WebSocket endpoint".
+2. The handshake is accepted, echoing ``medauth.session.v1`` if the client
+   offered subprotocols, and the access is written to the audit log.
+3. The service subscribes to the stream's channel for that session and forwards
+   each message to the client verbatim.
 4. On disconnect it unsubscribes and closes the subscription.
 
 Steps 3 and 4 need two things watched at once — the bus and the socket — so they
 run in a task group. The relay task would otherwise block forever on a quiet
 encounter and never notice the client had gone.
 
-**This socket is one-directional.** Nothing in the protocol travels client to
+**These sockets are one-directional.** Nothing in the protocol travels client to
 server, so inbound frames are read only to notice the disconnect and their
 contents are discarded. That is a deliberate difference from the audio socket,
 which closes with 1003 on an unexpected frame type: there the frame *is* the
 payload, so a text frame means a broken client, while here a client sending a
 keepalive is not doing anything wrong and disconnecting it would be hostile.
 
-**PHI discipline.** Nudge text passes through this module and is never logged.
-Log lines here carry a session identifier or a close reason — never content, and
-never the token.
+**PHI discipline.** Relayed payload text passes through this module and is never
+logged. Log lines here carry a stream label, a channel name, a session identifier
+or a close reason — never content, and never the token.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any, Final
+import uuid
+from dataclasses import dataclass
+from typing import Annotated, Any, Final, Protocol
 
 import anyio
 from fastapi import APIRouter, Depends, WebSocket
@@ -62,6 +78,54 @@ router = APIRouter(tags=["nudges"])
 WS_CLOSE_INTERNAL_ERROR: Final = 1011
 
 
+class StreamAudit(Protocol):
+    """What this module needs of the audit function for one stream.
+
+    A protocol rather than a concrete reference so :class:`RelayedStream` can
+    hold the audit function for its own stream without this module deciding
+    which, and so a double substituted for one in a test is checked against the
+    same call shape the real function has.
+    """
+
+    async def __call__(
+        self,
+        *,
+        session_id: uuid.UUID,
+        provider_id: uuid.UUID,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> None:
+        """Record that one encounter's stream was opened to a client."""
+        ...
+
+
+@dataclass(frozen=True)
+class RelayedStream:
+    """One channel family this service relays, and the three things that vary.
+
+    Everything else about serving a connection — the origin check, the token
+    validation, the accept, the task group, the close codes, the teardown — is
+    identical for every stream and lives in :func:`serve_stream`.
+    """
+
+    #: Names the stream in log lines, e.g. ``"nudge"``. Never user-supplied.
+    label: str
+    #: A canonical Redis key template from CLAUDE.md's key list.
+    channel_template: str
+    #: Writes the one audit row an accepted connection produces.
+    audit: StreamAudit
+
+
+#: The nudge stream (TASK-041). Looked up from module globals by the route below
+#: rather than closed over, so a test can substitute one with a recording audit
+#: double through ``monkeypatch.setattr``.
+NUDGE_STREAM: Final = RelayedStream(
+    label="nudge",
+    channel_template=relay.NUDGE_CHANNEL_TEMPLATE,
+    audit=audit_nudge_stream,
+)
+
+
 def _authenticate(websocket: WebSocket, session_id: str, settings: Settings) -> SessionIdentity:
     """Validate the connection's token. Raises ``SessionAuthError`` if unusable."""
     token = extract_token(
@@ -71,21 +135,22 @@ def _authenticate(websocket: WebSocket, session_id: str, settings: Settings) -> 
     return validate_token(token, session_id=session_id, signing_key=settings.jwt_signing_key)
 
 
-async def _relay_nudges(pubsub: Any, websocket: WebSocket) -> None:
-    """Forward every published nudge to the client until cancelled.
+async def _relay_messages(pubsub: Any, websocket: WebSocket, channel: str) -> None:
+    """Forward every published message to the client until cancelled.
 
     The payload is sent exactly as it arrived. See :mod:`src.relay` for why this
-    module never parses it.
+    module never parses it. ``channel`` is passed down only so a dropped payload
+    can be logged against the stream it came from.
     """
     while True:
         message = await pubsub.get_message(
             ignore_subscribe_messages=True,
             timeout=relay.READ_TIMEOUT_SECONDS,
         )
-        if not relay.is_nudge_message(message):
+        if not relay.is_published_message(message):
             continue
 
-        payload = relay.decode_payload(message.get("data"))
+        payload = relay.decode_payload(message.get("data"), channel=channel)
         if payload is None:
             continue
 
@@ -95,7 +160,7 @@ async def _relay_nudges(pubsub: Any, websocket: WebSocket) -> None:
 async def _wait_for_disconnect(websocket: WebSocket) -> None:
     """Return when the client goes away.
 
-    Inbound frames are drained and discarded: this socket carries nothing in that
+    Inbound frames are drained and discarded: these sockets carry nothing in that
     direction, and a client that sends a keepalive should not be disconnected for
     it.
     """
@@ -105,19 +170,17 @@ async def _wait_for_disconnect(websocket: WebSocket) -> None:
             return
 
 
-@router.websocket("/ws/nudges/{session_id}")
-async def nudge_stream(
+async def serve_stream(
     websocket: WebSocket,
     session_id: str,
-    settings: Annotated[Settings, Depends(get_app_settings)],
-    redis: Annotated[Redis, Depends(get_redis)],
+    settings: Settings,
+    redis: Redis,
+    stream: RelayedStream,
 ) -> None:
-    """Relay one encounter's clinical nudges to a connected client.
+    """Authenticate a connection and relay one stream to it until it goes away.
 
-    The session JWT must be supplied either as ``Authorization: Bearer <jwt>`` or
-    as a ``medauth.jwt.<jwt>`` entry in the subprotocol list, and must carry the
-    same ``session_id`` as the URL. Each message is the nudge payload published by
-    track-b-rag (TASK-040), forwarded unaltered.
+    The whole lifecycle for every relayed stream. A route function's only job is
+    to name which :class:`RelayedStream` it serves.
     """
     # TASK-041c. Browsers apply no CORS to a WebSocket upgrade, so the policy
     # installed on the HTTP services does not reach this handshake and the
@@ -139,7 +202,7 @@ async def nudge_stream(
     # second code would add surface without telling a client anything. The
     # operational trace is where the two are distinguished, by the fixed label.
     if not is_allowed_origin(websocket.headers.get("origin"), settings.cors_allowed_origins):
-        logger.warning("Refused nudge connection: %s", ORIGIN_REFUSED_REASON)
+        logger.warning("Refused %s connection: %s", stream.label, ORIGIN_REFUSED_REASON)
         await websocket.close(code=WS_CLOSE_UNAUTHORIZED)
         return
 
@@ -147,42 +210,61 @@ async def nudge_stream(
         identity = _authenticate(websocket, session_id, settings)
     except SessionAuthError as exc:
         # The reason is a fixed label, never the token or a claim value.
-        logger.warning("Refused nudge connection: %s", exc.reason)
+        logger.warning("Refused %s connection: %s", stream.label, exc.reason)
         await websocket.close(code=WS_CLOSE_UNAUTHORIZED)
         return
 
     await websocket.accept(
         subprotocol=select_subprotocol(list(websocket.scope.get("subprotocols") or []))
     )
-    await _audit_accepted_connection(websocket, identity)
+    await _audit_accepted_connection(websocket, identity, stream)
 
-    channel = relay.channel_for(identity.session_id)
+    channel = relay.channel_for(stream.channel_template, identity.session_id)
     pubsub = redis.pubsub()
     try:
         await pubsub.subscribe(channel)
-        logger.info("Relaying nudges for session %s", identity.session_id)
+        logger.info("Relaying %s stream for session %s", stream.label, identity.session_id)
         # ``except*`` rather than ``except``: an anyio task group wraps whatever
         # its tasks raise in an ExceptionGroup, a single exception included, so a
         # plain ``except Exception`` here would never match.
         async with anyio.create_task_group() as tasks:
-            tasks.start_soon(_relay_nudges, pubsub, websocket)
+            tasks.start_soon(_relay_messages, pubsub, websocket, channel)
             await _wait_for_disconnect(websocket)
             # The relay task waits on a bus that may stay quiet for the rest of
             # the encounter; nothing else would ever end it.
             tasks.cancel_scope.cancel()
     except* Exception:
-        logger.exception("Nudge relay failed for session %s", identity.session_id)
+        logger.exception("The %s relay failed for session %s", stream.label, identity.session_id)
         await _close_quietly(websocket, WS_CLOSE_INTERNAL_ERROR)
     finally:
         # Unsubscribing before closing is what the task asks for explicitly. The
         # close alone would release the subscription, but only as a side effect
         # of tearing the connection down.
-        await _release_quietly(pubsub, channel)
+        await _release_quietly(pubsub, channel, stream.label)
 
 
-async def _audit_accepted_connection(websocket: WebSocket, identity: SessionIdentity) -> None:
+@router.websocket("/ws/nudges/{session_id}")
+async def nudge_stream(
+    websocket: WebSocket,
+    session_id: str,
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    redis: Annotated[Redis, Depends(get_redis)],
+) -> None:
+    """Relay one encounter's clinical nudges to a connected client.
+
+    The session JWT must be supplied either as ``Authorization: Bearer <jwt>`` or
+    as a ``medauth.jwt.<jwt>`` entry in the subprotocol list, and must carry the
+    same ``session_id`` as the URL. Each message is the nudge payload published by
+    track-b-rag (TASK-040), forwarded unaltered.
+    """
+    await serve_stream(websocket, session_id, settings, redis, NUDGE_STREAM)
+
+
+async def _audit_accepted_connection(
+    websocket: WebSocket, identity: SessionIdentity, stream: RelayedStream
+) -> None:
     """Write the one audit row this connection produces."""
-    await audit_nudge_stream(
+    await stream.audit(
         session_id=identity.session_id,
         provider_id=identity.provider_id,
         ip_address=websocket.client.host if websocket.client else None,
@@ -190,7 +272,7 @@ async def _audit_accepted_connection(websocket: WebSocket, identity: SessionIden
     )
 
 
-async def _release_quietly(pubsub: Any, channel: str) -> None:
+async def _release_quietly(pubsub: Any, channel: str, label: str) -> None:
     """Unsubscribe and close, tolerating a subscription already torn down.
 
     Runs on every path out of the handler, including the failing ones, so a
@@ -199,11 +281,11 @@ async def _release_quietly(pubsub: Any, channel: str) -> None:
     try:
         await pubsub.unsubscribe(channel)
     except Exception:
-        logger.debug("Nudge subscription was already gone before unsubscribe")
+        logger.debug("The %s subscription was already gone before unsubscribe", label)
     try:
         await pubsub.aclose()
     except Exception:
-        logger.debug("Nudge subscription was already closed")
+        logger.debug("The %s subscription was already closed", label)
 
 
 async def _close_quietly(websocket: WebSocket, code: int) -> None:
@@ -216,10 +298,3 @@ async def _close_quietly(websocket: WebSocket, code: int) -> None:
         await websocket.close(code=code)
     except RuntimeError:
         logger.debug("Client had already disconnected before close(%d)", code)
-
-
-__all__ = [
-    "WS_CLOSE_INTERNAL_ERROR",
-    "WS_CLOSE_UNAUTHORIZED",
-    "router",
-]

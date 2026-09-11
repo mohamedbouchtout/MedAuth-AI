@@ -51,7 +51,7 @@ async def test_a_failing_unsubscribe_still_closes_the_subscription() -> None:
     """The close must not be skipped because the unsubscribe raised."""
     pubsub = ExplodingPubSub(unsubscribe_fails=True, close_fails=False)
 
-    await _release_quietly(pubsub, "nudges:abc")
+    await _release_quietly(pubsub, "nudges:abc", "nudge")
 
     assert pubsub.unsubscribed is True
     assert pubsub.closed is True
@@ -60,7 +60,7 @@ async def test_a_failing_unsubscribe_still_closes_the_subscription() -> None:
 async def test_a_failing_close_is_swallowed() -> None:
     pubsub = ExplodingPubSub(unsubscribe_fails=False, close_fails=True)
 
-    await _release_quietly(pubsub, "nudges:abc")
+    await _release_quietly(pubsub, "nudges:abc", "nudge")
 
     assert pubsub.closed is True
 
@@ -71,7 +71,7 @@ async def test_neither_failure_is_logged_with_nudge_content(
     """Teardown logs name the situation, never what crossed the socket."""
     with caplog.at_level(logging.DEBUG):
         await _release_quietly(
-            ExplodingPubSub(unsubscribe_fails=True, close_fails=True), "nudges:x"
+            ExplodingPubSub(unsubscribe_fails=True, close_fails=True), "nudges:x", "nudge"
         )
 
     assert "knee MRI" not in caplog.text
