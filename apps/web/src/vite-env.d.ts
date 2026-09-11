@@ -15,6 +15,13 @@ interface ImportMetaEnv {
   readonly VITE_API_BASE_URL?: string;
   /** track-b-rag HTTP origin — where the nudge acknowledge route lives. */
   readonly VITE_TRACK_B_RAG_URL?: string;
+  /** fhir-integration HTTP origin — the SMART launch and patient identity routes. */
+  readonly VITE_FHIR_BASE_URL?: string;
+  /**
+   * The EHR a standalone launch targets — a public FHIR base URL, not a
+   * credential. Absent means this deployment offers no standalone launch.
+   */
+  readonly VITE_SMART_ISS?: string;
 }
 
 interface ImportMeta {
