@@ -19,6 +19,7 @@ exclude = ["packages/audio-wire", "packages/session-client", "packages/nudge-cli
 medauth-api-envelope = { workspace = true }
 medauth-bedrock-client = { workspace = true }
 medauth-hipaa-logger = { workspace = true }
+medauth-logging-policy = { workspace = true }
 medauth-cors-policy = { workspace = true }
 medauth-crypto-utils = { workspace = true }
 medauth-fhir-types = { workspace = true }
@@ -58,6 +59,7 @@ known-first-party = [
     "bedrock_client",
     "cors_policy",
     "hipaa_logger",
+    "logging_policy",
     "crypto_utils",
     "fhir_types",
     "payer_vocab",
