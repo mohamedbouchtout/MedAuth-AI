@@ -5443,30 +5443,71 @@ logic do not change.
     `apps/web` therefore cannot distinguish "the provider declined at the EHR"
     from "the provider is still signing in" from "the launch failed" — it only
     ever sees a load that carries no claim code.
+  - **The design is settled in CLAUDE.md**, under "A failed launch is delivered
+    the same way, and carries no claim code", inside the section TASK-051f
+    already wrote — both apps consume this and the cross-cutting rule applies.
+    This task builds it; it does not re-derive it. What follows is that section
+    only as far as this task's own acceptance needs it.
   - **The shape follows TASK-051f's own, and must not invent a second
     mechanism.** A failure on a launch whose record declared `delivery=web` or
     `delivery=mobile` redirects to that platform's configured return target,
-    carrying a fixed error code rather than the service's message — the same
-    reasoning that makes unknown, expired and already-redeemed one answer on
-    `POST /fhir/launch/claim`. A launch that declared `delivery=json`, or
-    declared nothing, keeps raising exactly as it does today: that is the
-    service-to-service caller, which is served correctly and must not be broken
-    to serve a new consumer. Same argument TASK-051f made for supplementing the
-    JSON answer rather than replacing it.
+    carrying a fixed error code rather than the service's message. A launch that
+    declared `delivery=json`, or declared nothing, keeps raising exactly as it
+    does today: that is the service-to-service caller, which is served correctly
+    and must not be broken to serve a new consumer. Same argument TASK-051f made
+    for supplementing the JSON answer rather than replacing it.
   - **A failure carries no claim code and writes no handoff record.** There is no
     launch to name, and issuing a code that resolves to nothing would be a
     credential-shaped value with no credential behind it.
+  - **The error vocabulary is `LaunchFailure`, a `StrEnum`**, beside
+    `LaunchDelivery` in `src/smart/delivery.py`. The fourth time this repository
+    has closed a string-matched identifier, after `payer-vocab`'s slugs,
+    `AuditAction` and `EHRType`, and the argument is theirs: one spelling,
+    defined once, with the added reason that this value crosses into TypeScript
+    where `apps/web` narrows it. Two members — `declined` when the authorization
+    server reported a refusal, `failed` for everything else — and the reasoning
+    for two rather than one or three is in CLAUDE.md.
   - **Do not widen the error vocabulary into a diagnostic channel.** What reaches
     the client is enough to say "the launch did not complete, start again" and
     no more; the operational detail stays in the service's own log, where it
     already is. An EHR's refusal reason rendered in our UI is a string from a
     third party in a place a provider will read as ours.
+  - **One failure structurally cannot redirect, and the code must say so.**
+    `claim_launch()` consumes the launch record before the callback reaches any
+    other failure, so an unknown, expired or replayed `state` leaves `delivery`
+    unknowable rather than merely unread — that path keeps raising for every
+    launch. Reading `delivery` off the callback's own request instead is the
+    inference TASK-051f refuses for the success answer, and would let anyone who
+    can reach the callback choose where this service redirects a browser.
+  - **`apps/mobile` is affected even though it already reported cancellations.**
+    Its `performSmartLaunch` reads a claim off the returned redirect and treats
+    its absence as a configuration mismatch — "the app and the server may
+    disagree about where sign-in returns to". A delivered failure arrives on
+    that exact shape, so without a change on this side the first provider the
+    EHR refuses is told to contact an administrator about a return URI. Check
+    for a reported failure before that message.
+  - **The vocabulary is shared through `packages/fhir-client`, not declared in
+    each app.** Both apps narrow the same value, and the interesting case is
+    what an *unrecognised* one means — two apps deciding that separately is how
+    one of them silently shows a sign-in screen to a provider who was just
+    refused. The package holds the parameter name, the type and the narrowing;
+    each app keeps its own URL parsing, because a browser's `location.search`
+    and a custom-scheme URI are genuinely different reads, and its own wording,
+    because the package holds no UI.
+  - Update `docs/api/fhir-integration.yaml` in the same change —
+    `tests/unit/api/test_openapi_contract.py` guards it.
   - **Test:** a declined `delivery=web` launch redirects to
     `SMART_WEB_RETURN_URL` with an error code and no claim parameter
   - **Test:** a declined `delivery=json` launch still raises, unchanged
   - **Test:** a failed launch writes no `fhir_launch_claim:` record
+  - **Test:** an unknown `state` raises whatever the delivery would have been,
+    because no record survives to declare one
+  - **Test:** no log line and no redirect URL emitted by a failed launch
+    contains the EHR's own error string
   - **Test:** `apps/web` renders the error delivery as a failed launch, distinct
     from a plain load that carried no claim at all
+  - **Test:** `apps/mobile` reports a delivered failure as one, and not as the
+    missing-claim configuration mismatch
 
 - [x] **TASK-052:** Base FHIR resource fetching (implements base.py methods)
   - Service: `services/fhir-integration`
