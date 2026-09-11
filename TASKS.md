@@ -5421,6 +5421,53 @@ logic do not change.
     - 533 tests in fhir-integration at 96%, against the 80% gate. Each commit
       lints, typechecks and passes its own suite.
 
+- [ ] **TASK-051g:** Deliver a *failed* launch back to the client that started it
+  - Service: `services/fhir-integration`; consumed by `apps/web` and
+    `apps/mobile`
+  - Prerequisite: TASK-051f (the success delivery this completes)
+  - **The gap, found while building TASK-070.** TASK-051f delivers a *completed*
+    launch to the client that started it and says nothing about a launch that
+    fails. `GET /fhir/callback` raises `ApiHTTPException` for every failure it
+    can reach — the EHR's authorization server refused (`error` in the query
+    string), no authorization code arrived, the token exchange failed — and it
+    raises them identically whatever `delivery` the launch declared. So a
+    `delivery=web` launch that the provider declines, or that the EHR refuses,
+    renders a JSON error document on fhir-integration's own origin. The provider
+    is left on a page that is not MedAuth, with no link back to it, and this app
+    never learns the launch ended.
+  - **It is worse on web than on mobile, which is why it surfaced here.**
+    `openAuthSessionAsync` hands control back to `apps/mobile` whatever the
+    browser did, so mobile observes a cancellation as `cancel` and reports it.
+    A browser launch navigates the page away entirely: there is no observer left
+    in the tab, and nothing this app can do from its own side closes the gap.
+    `apps/web` therefore cannot distinguish "the provider declined at the EHR"
+    from "the provider is still signing in" from "the launch failed" — it only
+    ever sees a load that carries no claim code.
+  - **The shape follows TASK-051f's own, and must not invent a second
+    mechanism.** A failure on a launch whose record declared `delivery=web` or
+    `delivery=mobile` redirects to that platform's configured return target,
+    carrying a fixed error code rather than the service's message — the same
+    reasoning that makes unknown, expired and already-redeemed one answer on
+    `POST /fhir/launch/claim`. A launch that declared `delivery=json`, or
+    declared nothing, keeps raising exactly as it does today: that is the
+    service-to-service caller, which is served correctly and must not be broken
+    to serve a new consumer. Same argument TASK-051f made for supplementing the
+    JSON answer rather than replacing it.
+  - **A failure carries no claim code and writes no handoff record.** There is no
+    launch to name, and issuing a code that resolves to nothing would be a
+    credential-shaped value with no credential behind it.
+  - **Do not widen the error vocabulary into a diagnostic channel.** What reaches
+    the client is enough to say "the launch did not complete, start again" and
+    no more; the operational detail stays in the service's own log, where it
+    already is. An EHR's refusal reason rendered in our UI is a string from a
+    third party in a place a provider will read as ours.
+  - **Test:** a declined `delivery=web` launch redirects to
+    `SMART_WEB_RETURN_URL` with an error code and no claim parameter
+  - **Test:** a declined `delivery=json` launch still raises, unchanged
+  - **Test:** a failed launch writes no `fhir_launch_claim:` record
+  - **Test:** `apps/web` renders the error delivery as a failed launch, distinct
+    from a plain load that carried no claim at all
+
 - [x] **TASK-052:** Base FHIR resource fetching (implements base.py methods)
   - Service: `services/fhir-integration`
   - Prerequisite: **TASK-050** (the stubs and the normalized models this fills
