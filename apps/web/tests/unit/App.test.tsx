@@ -3,7 +3,11 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { App } from '../../src/App';
 import type { LaunchApi, LaunchSession } from '../../src/api/fhirClient';
-import { REDEMPTION_FAILED_MESSAGE } from '../../src/launch/smartLaunch';
+import {
+  DECLINED_MESSAGE,
+  LAUNCH_FAILED_MESSAGE,
+  REDEMPTION_FAILED_MESSAGE,
+} from '../../src/launch/smartLaunch';
 import { NO_ISSUER_MESSAGE } from '../../src/screens/LaunchScreen';
 
 /**
@@ -132,5 +136,74 @@ describe('returning from a launch', () => {
 
     expect(launches.redeemClaim).not.toHaveBeenCalled();
     expect(screen.getByTestId('launch-screen')).toBeInTheDocument();
+  });
+});
+
+/**
+ * A launch that came back having failed (TASK-051g).
+ *
+ * The gap this closes is the one this app could do nothing about from its own
+ * side: a browser launch navigates the page away, so a provider who declined at
+ * the EHR was previously left on the service's JSON error document and this app
+ * never ran. Now the failure is delivered here, and the property that matters is
+ * that it is **distinct from a plain load** — the two rendered identically
+ * before, which is what let a refused sign-in look like nothing having happened.
+ */
+describe('returning from a failed launch', () => {
+  it('reports a decline on the launch screen', () => {
+    const launches = launchesThatRedeem();
+    renderApp('?error=declined', launches);
+
+    expect(screen.getByTestId('launch-failed')).toHaveTextContent(DECLINED_MESSAGE);
+    expect(launches.redeemClaim).not.toHaveBeenCalled();
+  });
+
+  it('reports a generic failure distinctly from a decline', () => {
+    renderApp('?error=failed');
+
+    expect(screen.getByTestId('launch-failed')).toHaveTextContent(LAUNCH_FAILED_MESSAGE);
+  });
+
+  /**
+   * The distinction this delivery exists to make. A plain load shows the launch
+   * screen with nothing reported; a failed launch shows the same screen saying
+   * what happened. Asserted together so neither can drift into the other.
+   */
+  it('is distinct from a plain load, which reports nothing', () => {
+    renderApp('');
+
+    expect(screen.queryByTestId('launch-failed')).not.toBeInTheDocument();
+    expect(screen.getByTestId('launch-screen')).toBeInTheDocument();
+  });
+
+  /**
+   * An `error` is not a credential, but leaving it in the URL would make a
+   * reload replay a failure the provider has already been told about.
+   */
+  it('takes the error out of the URL', async () => {
+    const { history } = renderApp('?error=declined');
+
+    await waitFor(() => expect(history.replaceState).toHaveBeenCalledWith(null, '', '/launch'));
+  });
+
+  /**
+   * The message is held in state rather than re-derived from the URL, so
+   * scrubbing the parameter must not erase what the provider is reading.
+   */
+  it('keeps the message after the URL has been scrubbed', async () => {
+    const { history } = renderApp('?error=declined');
+
+    await waitFor(() => expect(history.replaceState).toHaveBeenCalled());
+    expect(screen.getByTestId('launch-failed')).toHaveTextContent(DECLINED_MESSAGE);
+  });
+
+  /**
+   * A member this build does not know still means the launch did not complete.
+   * Rendering nothing would be the silence the delivery exists to end.
+   */
+  it('still reports a failure it cannot name precisely', () => {
+    renderApp('?error=some_future_member');
+
+    expect(screen.getByTestId('launch-failed')).toHaveTextContent(LAUNCH_FAILED_MESSAGE);
   });
 });

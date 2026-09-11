@@ -22,15 +22,16 @@
  *   there is, and a `launch_id` must never travel that way.
  * - **A provider who abandons the login never comes back here at all.** There is
  *   no cancellation to observe, unlike mobile's `openAuthSessionAsync`, which
- *   reports one. See `LaunchScreen` for what this app can and cannot say about a
- *   launch that did not complete, and TASK-051g for the failure delivery that
- *   does not exist yet.
+ *   reports one. A launch that *reaches* the EHR and fails there is a different
+ *   case and is reported: TASK-051g redirects it back here carrying an `error`,
+ *   which `messageForFailure` turns into what the provider is told.
  *
  * Nothing here logs. The authorize URL carries the EHR's launch context and the
  * claim code is a live credential.
  */
 
 import type { LaunchApi, LaunchRequest, LaunchSession } from '../api/fhirClient';
+import type { LaunchFailure } from './inbound';
 
 /** Navigates the current page. Injected so a test can observe it without a DOM. */
 export type Navigate = (url: string) => void;
@@ -49,6 +50,39 @@ export type LaunchOutcome =
 
 export const REDEMPTION_FAILED_MESSAGE =
   'MedAuth AI could not complete the EHR sign-in. Start the launch again from the chart.';
+
+export const DECLINED_MESSAGE =
+  'The EHR did not allow the sign-in. Sign in again, or ask whoever administers the EHR whether MedAuth AI is permitted for your account.';
+
+export const LAUNCH_FAILED_MESSAGE =
+  'The EHR sign-in did not complete. Sign in again.';
+
+/**
+ * What a provider is told about a launch that came back having failed.
+ *
+ * **Two messages because there are two members, and no more than two.** A
+ * provider who declined at the EHR can act on that differently from one whose
+ * sign-in broke; nothing finer would change what they do next, and the service
+ * deliberately sends nothing finer. The EHR's own refusal reason is not here
+ * because it never leaves the service — a third party's string rendered in this
+ * UI is read as ours. See CLAUDE.md, "A failed launch is delivered the same way,
+ * and carries no claim code".
+ *
+ * Exhaustive over `LaunchFailure`, so a member added on the service side fails
+ * typechecking here rather than rendering as nothing.
+ */
+export function messageForFailure(failure: LaunchFailure): string {
+  switch (failure) {
+    case 'declined':
+      return DECLINED_MESSAGE;
+    case 'failed':
+      return LAUNCH_FAILED_MESSAGE;
+    default: {
+      const unreachable: never = failure;
+      return unreachable;
+    }
+  }
+}
 
 /**
  * Send the browser to the EHR's authorization endpoint.
