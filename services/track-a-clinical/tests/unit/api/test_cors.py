@@ -6,8 +6,15 @@ and forgot the call would pass every test over there and still refuse every
 browser.
 
 The routes exercised are the ones ``apps/web`` calls: ``POST /sessions/start``
-when a provider taps "start visit", and ``PATCH /notes/{session_id}`` from the
-review screen.
+when a provider taps "start visit", ``PATCH /notes/{session_id}`` from the
+review screen, and — added by TASK-070, which is the first browser caller of
+either — ``POST /sessions/{id}/end`` and ``POST /sessions/{id}/token``.
+
+Those last two are a different path from ``/sessions/start`` and, in the
+re-mint's case, carry a header ``/sessions/start`` does not. The installation
+site says nothing about either, and the failure mode of assuming otherwise is a
+visit that starts and then cannot be ended or refreshed from the browser that
+started it — which reads as a session bug rather than a CORS one.
 """
 
 from __future__ import annotations
@@ -118,6 +125,67 @@ def test_no_configured_origins_answers_no_browser(monkeypatch: pytest.MonkeyPatc
     response = client.options(
         "/sessions/start",
         headers={"Origin": ALLOWED_ORIGIN, "Access-Control-Request-Method": "POST"},
+    )
+
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_preflight_for_ending_a_session_is_answered(configured_client: TestClient) -> None:
+    """The other end of TASK-070's visit, and a different path from ``/start``.
+
+    Without this the provider could open an encounter from the browser and never
+    close it — and nothing auto-completes an abandoned encounter, so the visit
+    would stay ``active`` with its token still re-mintable.
+    """
+    response = configured_client.options(
+        f"/sessions/{uuid.uuid4()}/end",
+        headers={
+            "Origin": ALLOWED_ORIGIN,
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == ALLOWED_ORIGIN
+    assert "POST" in response.headers["access-control-allow-methods"]
+
+
+def test_preflight_for_re_minting_a_token_admits_the_authorization_header(
+    configured_client: TestClient,
+) -> None:
+    """The re-mint presents the session's own token in ``Authorization``.
+
+    That header is what makes this preflight differ from ``/sessions/start``'s,
+    which sends only a JSON body. A policy that admitted the body but not the
+    header would leave a browser unable to refresh a token — so a visit running
+    past ``SESSION_TTL_SECONDS`` would fail to open its next socket, which is the
+    ordinary case for a real encounter rather than an edge one.
+    """
+    response = configured_client.options(
+        f"/sessions/{uuid.uuid4()}/token",
+        headers={
+            "Origin": ALLOWED_ORIGIN,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "authorization" in response.headers["access-control-allow-headers"].lower()
+
+
+def test_an_unlisted_origin_is_refused_on_the_re_mint_route(
+    configured_client: TestClient,
+) -> None:
+    """Per route rather than once for the service, as on the start route above.
+
+    A preflight answered for the right origin proves nothing on its own if the
+    policy would answer for any origin, and this is the route that refreshes a
+    credential.
+    """
+    response = configured_client.options(
+        f"/sessions/{uuid.uuid4()}/token",
+        headers={"Origin": OTHER_ORIGIN, "Access-Control-Request-Method": "POST"},
     )
 
     assert "access-control-allow-origin" not in response.headers
