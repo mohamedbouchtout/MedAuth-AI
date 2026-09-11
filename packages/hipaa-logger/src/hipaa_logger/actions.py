@@ -94,6 +94,13 @@ class AuditAction(StrEnum):
     #: An encounter's nudge stream was opened to a client.
     RELAY_NUDGES = "RELAY_NUDGES"
 
+    #: An encounter's transcript stream was opened to a client — its speech, not
+    #: its alerts. Deliberately not a second use of ``RELAY_NUDGES``: the two are
+    #: different disclosures of different data, and one action for both would
+    #: make "was this encounter's speech ever streamed to a client" a question
+    #: the audit trail cannot answer. Written by ``nudge-service`` (TASK-041d).
+    RELAY_TRANSCRIPT = "RELAY_TRANSCRIPT"
+
     #: A provider dismissed a nudge, and the row changed.
     ACKNOWLEDGE_NUDGE = "ACKNOWLEDGE_NUDGE"
 
