@@ -17,6 +17,13 @@ nothing about whether the policy admits it. The failure mode of assuming
 otherwise is a preflight rejected in a browser console belonging to whoever
 consumes the route next, which is a later task and a different app.
 
+TASK-070 is that later task, and it makes two more routes browser-facing for the
+first time: ``GET /fhir/launch-context`` and ``GET /fhir/patient/search``. Both
+have been called since TASK-025b — but only from ``apps/mobile``, which is not a
+browser and applies no CORS to anything, so neither had ever been preflighted by
+anyone. "It already works from mobile" is precisely the reasoning this file
+exists to refuse.
+
 The two launch routes are deliberately not covered: they are top-level browser
 navigations — the EHR redirects to ``/fhir/launch``, the authorization server to
 ``/fhir/callback`` — and a browser applies no CORS to a navigation.
@@ -37,6 +44,8 @@ ALLOWED_ORIGIN = "https://app.example.com"
 OTHER_ORIGIN = "https://evil.example.com"
 
 CLAIM_URL = "/fhir/launch/claim"
+LAUNCH_CONTEXT_URL = "/fhir/launch-context"
+PATIENT_SEARCH_URL = "/fhir/patient/search"
 
 
 def patient_context_url() -> str:
@@ -139,6 +148,71 @@ def test_an_unconfigured_deployment_answers_no_browser(
     response = unconfigured_client.options(
         CLAIM_URL,
         headers={"Origin": ALLOWED_ORIGIN, "Access-Control-Request-Method": "POST"},
+    )
+
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_the_launch_context_preflight_admits_the_launch_id_header(
+    configured_client: TestClient,
+) -> None:
+    """TASK-070's first call after redeeming a claim, and the first from a browser.
+
+    The launch travels in ``X-MedAuth-Launch-Id``, which is a header a browser
+    does not send by default — so this route preflights, and a policy that did
+    not list the header would leave the web app unable to identify any patient at
+    all while the same call kept working from ``apps/mobile``.
+    """
+    response = configured_client.options(
+        LAUNCH_CONTEXT_URL,
+        headers={
+            "Origin": ALLOWED_ORIGIN,
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "x-medauth-launch-id",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["access-control-allow-origin"] == ALLOWED_ORIGIN
+    assert "x-medauth-launch-id" in response.headers["access-control-allow-headers"].lower()
+
+
+def test_the_patient_search_preflight_admits_the_launch_id_header(
+    configured_client: TestClient,
+) -> None:
+    """The standalone-launch half of TASK-070's patient identification.
+
+    A different path from the launch context and reached only when the EHR named
+    nobody, so a policy covering one and not the other would fail exactly for the
+    providers who opened MedAuth directly.
+    """
+    response = configured_client.options(
+        PATIENT_SEARCH_URL,
+        headers={
+            "Origin": ALLOWED_ORIGIN,
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "x-medauth-launch-id",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["access-control-allow-origin"] == ALLOWED_ORIGIN
+    assert "x-medauth-launch-id" in response.headers["access-control-allow-headers"].lower()
+
+
+def test_an_unlisted_origin_is_refused_on_the_launch_context_route(
+    configured_client: TestClient,
+) -> None:
+    """The complementary half, per route rather than once for the service.
+
+    A preflight answered for the right origin proves nothing on its own if the
+    policy would answer for any origin, and the allow-list is applied by one
+    middleware — so this is cheap, and it is what makes the test above mean
+    something.
+    """
+    response = configured_client.options(
+        LAUNCH_CONTEXT_URL,
+        headers={"Origin": OTHER_ORIGIN, "Access-Control-Request-Method": "GET"},
     )
 
     assert "access-control-allow-origin" not in response.headers
