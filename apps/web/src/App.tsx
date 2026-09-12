@@ -29,6 +29,11 @@
  * no launch is arriving. `scrubLaunchParams` touches the query string and leaves
  * the path alone, so the two do not interfere.
  *
+ * **TASK-072's queue is the other destination, and the reason this app now has
+ * two routes rather than one.** A provider arrives at their prior
+ * authorizations rather than walking to them through a visit, which is exactly
+ * the condition TASK-070 named.
+ *
  * **The note route is deliberately outside the launch gate.** The note routes
  * take no credential in v1, so a reloaded or linked review screen must render
  * without a launch — with the chart write reporting that it holds none, which is
@@ -48,6 +53,7 @@ import { readClaim, readLaunchFailure, scrubLaunchParams } from './launch/inboun
 import { completeLaunch, messageForFailure } from './launch/smartLaunch';
 import { LaunchScreen } from './screens/LaunchScreen';
 import { NoteReviewRoute } from './screens/NoteReviewRoute';
+import { PriorAuthRoute } from './screens/PriorAuthRoute';
 import { VisitFlow } from './screens/VisitFlow';
 import type { CompletedVisit } from './session/completedVisit';
 
@@ -218,6 +224,19 @@ export function App({
             launchId={launchId}
             onStartAnotherVisit={startAnotherVisit}
           />
+        }
+      />
+      {/*
+        The prior-authorization queue (TASK-072) — the destination TASK-070
+        predicted when it said the trigger for a router would be "a screen a
+        provider needs to *arrive* at". It is outside the launch gate for the
+        same reason the note route is: it is reachable without one, and it says
+        what it needs rather than showing the sign-in screen.
+      */}
+      <Route
+        path="/prior-auth"
+        element={
+          <PriorAuthRoute launchId={launchId} onStartAnotherVisit={startAnotherVisit} />
         }
       />
       <Route path="*" element={visit} />

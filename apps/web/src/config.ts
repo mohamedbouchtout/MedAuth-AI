@@ -78,6 +78,29 @@ export const FHIR_INTEGRATION_URL =
   import.meta.env.VITE_FHIR_BASE_URL ?? 'http://localhost:8004';
 
 /**
+ * The prior-auth HTTP origin — where `POST /prior-auth/{request_id}/submit`
+ * lives (TASK-061), which the dashboard calls to resubmit a denied request.
+ *
+ * **The fourth HTTP origin, and it is a different service from the other
+ * three.** The dashboard reads its queue and a denial reason from
+ * `API_BASE_URL` — track-a-clinical owns `prior_auth_requests` and every read of
+ * it — and sends a resubmission here, because routing a submission is what
+ * `prior-auth` exists to do. Two services, two ports, two variables; collapsing
+ * them waits on the Phase 6 gateway CLAUDE.md defers to under "CORS and browser
+ * reachability", exactly as it does for the three above.
+ *
+ * `VITE_PRIOR_AUTH_URL` is added to `.env.example` by TASK-072 and is genuinely
+ * new rather than one that had been sitting there unread. The local-dev default
+ * is prior-auth's port from the table in CLAUDE.md — 8007, which that table
+ * notes was assigned around the CRD Reference Implementation already holding
+ * 8006.
+ *
+ * A deployed build must set an `https://` origin: a resubmission transmits a
+ * patient's prior-authorization bundle to a payer.
+ */
+export const PRIOR_AUTH_URL = import.meta.env.VITE_PRIOR_AUTH_URL ?? 'http://localhost:8007';
+
+/**
  * The EHR a standalone SMART launch targets — its FHIR base URL, the `iss` in
  * SMART's own vocabulary.
  *

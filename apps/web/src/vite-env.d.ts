@@ -17,6 +17,8 @@ interface ImportMetaEnv {
   readonly VITE_TRACK_B_RAG_URL?: string;
   /** fhir-integration HTTP origin — the SMART launch and patient identity routes. */
   readonly VITE_FHIR_BASE_URL?: string;
+  /** prior-auth HTTP origin — where a denied request is resubmitted (TASK-072). */
+  readonly VITE_PRIOR_AUTH_URL?: string;
   /**
    * The EHR a standalone launch targets — a public FHIR base URL, not a
    * credential. Absent means this deployment offers no standalone launch.
