@@ -17,7 +17,8 @@
     "@medauth/fhir-client": "*",
     "@medauth/session-client": "*",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "react-router": "^8.3.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
