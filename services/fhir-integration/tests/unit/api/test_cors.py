@@ -24,6 +24,13 @@ browser and applies no CORS to anything, so neither had ever been preflighted by
 anyone. "It already works from mobile" is precisely the reasoning this file
 exists to refuse.
 
+TASK-071 adds ``POST /fhir/notes``, the note write-back, which nothing had ever
+called from a browser. Its method and its ``X-MedAuth-Launch-Id`` header are
+both already in the policy's fixed lists, so this case passes on its first run —
+which is exactly why it is worth asserting rather than assuming. The rule is now
+written down in CLAUDE.md's testing conventions: installed middleware is never
+evidence that a particular path and method are covered.
+
 The two launch routes are deliberately not covered: they are top-level browser
 navigations — the EHR redirects to ``/fhir/launch``, the authorization server to
 ``/fhir/callback`` — and a browser applies no CORS to a navigation.
@@ -46,6 +53,7 @@ OTHER_ORIGIN = "https://evil.example.com"
 CLAIM_URL = "/fhir/launch/claim"
 LAUNCH_CONTEXT_URL = "/fhir/launch-context"
 PATIENT_SEARCH_URL = "/fhir/patient/search"
+NOTE_WRITE_URL = "/fhir/notes"
 
 
 def patient_context_url() -> str:
@@ -213,6 +221,56 @@ def test_an_unlisted_origin_is_refused_on_the_launch_context_route(
     response = configured_client.options(
         LAUNCH_CONTEXT_URL,
         headers={"Origin": OTHER_ORIGIN, "Access-Control-Request-Method": "GET"},
+    )
+
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_the_note_write_back_preflight_is_answered(
+    configured_client: TestClient,
+) -> None:
+    """TASK-071's own acceptance: the chart write, from the note review screen.
+
+    Two things about this request make it preflight, and a policy missing either
+    would refuse it: it is a ``POST`` carrying a JSON body, and it carries the
+    launch in ``X-MedAuth-Launch-Id``. Both are in the policy's fixed lists
+    already, so this passes without any change to ``packages/cors-policy`` —
+    asserted anyway, because the alternative is discovering otherwise in a
+    provider's browser console at the point a note is being filed to a chart.
+    """
+    response = configured_client.options(
+        NOTE_WRITE_URL,
+        headers={
+            "Origin": ALLOWED_ORIGIN,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,x-medauth-launch-id",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["access-control-allow-origin"] == ALLOWED_ORIGIN
+    assert "POST" in response.headers["access-control-allow-methods"]
+    allowed = response.headers["access-control-allow-headers"].lower()
+    assert "content-type" in allowed
+    assert "x-medauth-launch-id" in allowed
+
+
+def test_an_unlisted_origin_is_refused_on_the_note_write_back(
+    configured_client: TestClient,
+) -> None:
+    """The counterpart every case here needs.
+
+    Without it the assertion above would pass just as happily against a policy
+    that allowed every origin, which on a route that files clinical
+    documentation to a chart is the failure worth guarding against.
+    """
+    response = configured_client.options(
+        NOTE_WRITE_URL,
+        headers={
+            "Origin": OTHER_ORIGIN,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,x-medauth-launch-id",
+        },
     )
 
     assert "access-control-allow-origin" not in response.headers
