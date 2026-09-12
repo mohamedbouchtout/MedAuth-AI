@@ -497,6 +497,85 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /prior-auth:
+    get:
+      tags: [prior-auth]
+      operationId: listPriorAuthRequests
+      summary: List a provider's prior-authorization requests
+      description: >-
+        One page of a provider's prior-authorization queue, newest visit first.
+        Backs the dashboard in `apps/web` (TASK-072), so unlike the two
+        server-to-server routes below, a browser calls this one.
+
+
+        **Scoped to one provider, and the scoping is the route's own requirement
+        rather than a filter the caller may drop.** Every other prior-auth route
+        names a single request; this one spans every request a provider has
+        filed, which is a materially wider disclosure. The v1 "no credential
+        yet" reasoning that covers the narrow routes does not stretch to cover
+        it, so `provider_id` is required. When provider authentication lands in
+        Phase 5 it becomes a claim rather than an argument.
+
+
+        **This route writes no audit row, and that is the rule rather than an
+        exception to it** — the same argument as `/prior-auth/{request_id}/routing`
+        below. A route audits if and only if it touches PHI, in both directions,
+        and nothing in this response is clinical: no denial reason, no procedure,
+        no diagnosis, no note excerpt and no patient identifier. That field
+        selection is the whole reason the silence is correct, so adding a
+        clinical field here is a decision that has to be made deliberately — it
+        would oblige an audit row per response, and a queue polled on a timer
+        would bury the accesses an audit is actually asked about. A denial
+        reason is read one request at a time, from
+        `/prior-auth/{request_id}/decision`.
+
+
+        Paginated with `?cursor=`, per the repository's API Design convention.
+        The cursor is opaque: it names the last row of the page it came from, and
+        nothing outside this service parses it.
+      parameters:
+        - name: provider_id
+          in: query
+          required: true
+          description: >-
+            Whose requests to return. Required — this list is never unscoped.
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          required: false
+          description: >-
+            An exact `prior_auth_requests.status` to filter on, or omit for every
+            status. Includes `manual-submission-required`, which is work for a
+            person rather than a failure or a pending payer decision.
+          schema:
+            type: string
+            maxLength: 50
+        - name: cursor
+          in: query
+          required: false
+          description: Resume after the row a previous page's `next_cursor` named.
+          schema:
+            type: string
+            maxLength: 512
+      responses:
+        '200':
+          description: One page of the provider's queue, newest visit first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriorAuthListResponse'
+        '422':
+          description: >-
+            A query parameter is malformed, or `cursor` is not a value this
+            service issued (`prior_auth_invalid_cursor`). `provider_id` is
+            required — this list is never unscoped.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /prior-auth/{request_id}:
     get:
       tags: [prior-auth]
@@ -602,6 +681,68 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PriorAuthRoutingResponse'
+        '404':
+          description: >-
+            No such prior-authorization request, or its encounter has been
+            soft-deleted (`prior_auth_request_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: The path parameter is not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /prior-auth/{request_id}/decision:
+    get:
+      tags: [prior-auth]
+      operationId: readPriorAuthDecision
+      summary: Read what the payer decided, and why
+      description: >-
+        The payer's answer to one request, including the denial reason when there
+        is one. Read by the dashboard (TASK-072) when a provider opens a denied
+        request, so a browser calls this route.
+
+
+        **This one audits and the list does not, and the contrast is the
+        design.** `denial_reason` is the payer's account of why this patient's
+        care was refused — clinical content about a named encounter — so reading
+        it is a PHI access and writes a `READ_PRIOR_AUTH` row. A provider
+        actually opening a denial produces exactly one; a dashboard left open on
+        a wall produces none.
+
+
+        **Narrow on purpose, and a third route rather than four fields added to
+        `GET /prior-auth/{request_id}`.** That route returns `clinical_evidence`,
+        and pulling note excerpts across the network to render one sentence is
+        the over-fetch TASK-061 fixed at this same table from the other
+        direction. A caller that needs the evidence wants that route.
+
+
+        A denial carrying a null `denial_reason` is an ordinary answer: the payer
+        gave none. It is not the same fact as a request that was never denied,
+        and a client must not render it as a reason of its own.
+
+
+        Unauthenticated in v1, as every route here is.
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          description: The prior-authorization request whose decision is being read.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The payer's answer, including a denial reason when there is one.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriorAuthDecisionResponse'
         '404':
           description: >-
             No such prior-authorization request, or its encounter has been
@@ -918,6 +1059,165 @@ components:
         submittable:
           type: boolean
           description: Whether the request may be sent now, by the rule above.
+
+    PriorAuthListItem:
+      type: object
+      description: >-
+        One row of a provider's prior-authorization queue (TASK-072). **The field
+        list is a constraint rather than an implementation choice**: the route
+        returning these writes no audit row, and the only thing making that
+        correct is that nothing here is clinical content. `denial_reason`,
+        `procedures`, `diagnoses`, `clinical_evidence` and `patient_fhir_id` are
+        absent deliberately — a clinical field added here would oblige the route
+        to audit every response.
+      required:
+        [
+          request_id,
+          session_id,
+          status,
+          payer_name,
+          payer_outcome,
+          submission_method,
+          submitted_at,
+          decided_at,
+          started_at,
+          submittable,
+        ]
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          description: The request this describes, and what a resubmission is keyed on.
+        session_id:
+          type: string
+          format: uuid
+          description: >-
+            The encounter session it came out of — an opaque identifier of ours,
+            and what a client links a visit's note by.
+        status:
+          type: string
+          description: >-
+            Where the request has got to in our own process, including
+            `manual-submission-required`: work for a person, which is neither a
+            failure nor a pending payer decision.
+        payer_name:
+          type: string
+          nullable: true
+          description: The payer's own display name, as stored. Never a slug.
+        payer_outcome:
+          type: string
+          nullable: true
+          description: >-
+            What the payer said, once it has been asked. A different fact from
+            `status`, and null before submission.
+        submission_method:
+          type: string
+          nullable: true
+          description: >-
+            Which path transmitted it, or null when nothing has. Reported, never
+            predicted — routing is TASK-061's and the transport beneath it is the
+            adapter's.
+        submitted_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When it was last transmitted, or null.
+        decided_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the payer decided, or null.
+        started_at:
+          type: string
+          format: date-time
+          description: >-
+            When the visit this came out of began. The row's date, because
+            `prior_auth_requests` carries no timestamp of its own — and the more
+            meaningful one regardless.
+        submittable:
+          type: boolean
+          description: >-
+            Whether a submission may be attempted now, by the same rule the other
+            payloads report. What a resubmit control is offered on, rather than a
+            condition the client re-derives.
+
+    PriorAuthListData:
+      type: object
+      description: One page of a provider's queue, and how to ask for the next.
+      required: [requests, next_cursor]
+      properties:
+        requests:
+          type: array
+          description: This page of the queue, newest visit first.
+          items:
+            $ref: '#/components/schemas/PriorAuthListItem'
+        next_cursor:
+          type: string
+          nullable: true
+          description: >-
+            Pass as `?cursor=` for the following page, or null when this page is
+            the last. Opaque — this service's to change, and a caller that parses
+            it relies on something never promised.
+
+    PriorAuthListResponse:
+      type: object
+      description: The standard envelope, carrying one page of a provider's queue.
+      required: [data, error]
+      properties:
+        data:
+          $ref: '#/components/schemas/PriorAuthListData'
+          nullable: true
+        error:
+          $ref: '#/components/schemas/Error'
+          nullable: true
+
+    PriorAuthDecisionData:
+      type: object
+      description: >-
+        What the payer decided and why, for a provider following up a denial.
+        Carries a denial reason, so unlike the queue row this is PHI and the
+        route returning it audits.
+      required:
+        [request_id, payer_outcome, payer_reference_number, decided_at, denial_reason]
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          description: The request this describes.
+        payer_outcome:
+          type: string
+          nullable: true
+          description: What the payer said, or null before it was asked.
+        payer_reference_number:
+          type: string
+          nullable: true
+          description: >-
+            The payer's own reference, when it gave one. Legitimately absent on a
+            queued answer.
+        decided_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the payer decided, or null if it has not.
+        denial_reason:
+          type: string
+          nullable: true
+          description: >-
+            Why the request was refused, in the payer's words. Null for anything
+            not denied — and null on a denial the payer gave no reason for, which
+            is a different fact a client must not render as a reason of its own.
+
+    PriorAuthDecisionResponse:
+      type: object
+      description: The standard envelope, carrying one payer decision.
+      required: [data, error]
+      properties:
+        data:
+          $ref: '#/components/schemas/PriorAuthDecisionData'
+          nullable: true
+        error:
+          $ref: '#/components/schemas/Error'
+          nullable: true
 
     PriorAuthRoutingResponse:
       type: object

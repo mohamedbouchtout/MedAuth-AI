@@ -1,17 +1,27 @@
-"""Prior-authorization endpoints — the server side of a submission (TASK-054).
+"""Prior-authorization endpoints — a submission's server side, and a provider's queue.
 
 ``GET /prior-auth/{request_id}`` returns what a submission needs to be built
 from; ``PATCH /prior-auth/{request_id}/submission`` records what the payer said.
-Both exist because the work is split across two services: ``fhir-integration``
-holds the EHR credential and the adapter that speaks Da Vinci PAS, and this
-service owns ``prior_auth_requests`` and the ``encounters`` row behind it.
+Both exist because the work is split across two services (TASK-054):
+``fhir-integration`` holds the EHR credential and the adapter that speaks Da
+Vinci PAS, and this service owns ``prior_auth_requests`` and the ``encounters``
+row behind it.
 
-**Server-to-server, and no browser calls either of them.** They are the
+**Those two are server-to-server, and no browser calls them.** They are the
 prior-auth counterpart of ``/notes/{session_id}/ehr-reference``, and the reason
 is the same one CLAUDE.md gives under "Writing clinical data out to the EHR":
 the submitting service reading this over HTTP is what makes the read produce a
 ``READ_PRIOR_AUTH`` row, where a direct database connection from that service —
 which it has deliberately never had — would produce none.
+
+**``GET /prior-auth`` and ``GET /prior-auth/{request_id}/decision`` are not.**
+TASK-072 added them for the provider dashboard, so a browser calls both, and
+this service's ``test_cors.py`` carries their preflight cases — installed
+middleware is never evidence that a particular path and method are covered.
+The list is the wider read in this module by some way: every other route here
+names one request, and that one spans a provider's whole queue. It is therefore
+the only route here that requires a scope argument, and ``provider_id`` is
+required rather than optional for that reason alone.
 
 **Keyed on the request's own primary key rather than on a session.** One
 encounter can carry several prior-authorization requests, so a ``session_id``
@@ -22,9 +32,20 @@ rather than a session follows the same v1 rule" — which also settles the
 credential question these routes inherit unchanged: none in v1, and the actor
 comes from the ``encounters`` row rather than from anything the caller sent.
 
-**Everything here is PHI**, and ``clinical_evidence`` is clinical
-documentation drawn from the provider's note. Both routes audit, and no log line
-in this module carries a procedure, a diagnosis or an excerpt.
+**Everything here is PHI except two routes, and both exceptions are deliberate
+rather than convenient.** ``clinical_evidence`` is clinical documentation drawn
+from the provider's note and ``denial_reason`` is a payer's account of why a
+patient's care was refused, so the full read, the decision read and the
+submission write all audit. ``/routing`` and the list do not, because their
+payloads carry no clinical field at all — CLAUDE.md's rule is an if-and-only-if
+in both directions, and a route over non-clinical data must *not* write to
+``audit_log`` or "who accessed patient X" stops being a query you can just run.
+What holds that line is the field lists on ``PriorAuthRoutingData`` and
+``PriorAuthListItem``, each of which says so at the payload; adding a clinical
+field to either makes its route's silence wrong.
+
+No log line in this module carries a procedure, a diagnosis, an excerpt or a
+denial reason.
 """
 
 from __future__ import annotations
@@ -33,7 +54,7 @@ import logging
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api_envelope import ApiHTTPException, ApiResponse, error_responses
@@ -41,6 +62,9 @@ from hipaa_logger import AuditAction
 from track_a_clinical import audit, prior_auth
 from track_a_clinical.api.dependencies import get_db_session
 from track_a_clinical.api.schemas import (
+    PriorAuthDecisionData,
+    PriorAuthListData,
+    PriorAuthListItem,
     PriorAuthRequestData,
     PriorAuthRoutingData,
     RecordSubmissionRequest,
@@ -61,6 +85,10 @@ ERROR_CODE_REQUEST_NOT_FOUND = "prior_auth_request_not_found"
 #: writes a new ``prior_auth_submission_attempts`` row rather than answering
 #: this. What is refused is a repeat of a live request.
 ERROR_CODE_ALREADY_SUBMITTED = "prior_auth_already_submitted"
+#: A cursor this service did not issue. Refused rather than ignored: silently
+#: restarting from the first page would make a broken pager look like one that
+#: had simply run out of rows.
+ERROR_CODE_INVALID_CURSOR = "prior_auth_invalid_cursor"
 
 REQUEST_ERROR_DESCRIPTIONS = {
     status.HTTP_404_NOT_FOUND: (
@@ -89,6 +117,91 @@ async def _load(session: AsyncSession, request_id: uuid.UUID) -> tuple[PriorAuth
             f"No prior authorization request {request_id}",
         )
     return found
+
+
+@router.get(
+    "",
+    response_model=ApiResponse[PriorAuthListData],
+    summary="List a provider's prior-authorization requests",
+    response_description="One page of the provider's queue, newest visit first.",
+    responses=error_responses(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        descriptions={
+            status.HTTP_422_UNPROCESSABLE_CONTENT: (
+                "A query parameter is malformed, or `cursor` is not a value this "
+                "service issued (`prior_auth_invalid_cursor`). `provider_id` is "
+                "required — this list is never unscoped."
+            ),
+        },
+    ),
+)
+async def list_prior_auth_requests(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    provider_id: Annotated[
+        uuid.UUID,
+        Query(description="Whose requests to return. Required; the list is never unscoped."),
+    ],
+    request_status: Annotated[
+        str | None,
+        Query(
+            alias="status",
+            max_length=50,
+            description="An exact status to filter on, or omit for every status.",
+        ),
+    ] = None,
+    cursor: Annotated[
+        str | None,
+        Query(max_length=512, description="Resume after the row a previous page named."),
+    ] = None,
+) -> ApiResponse[PriorAuthListData]:
+    """Return one page of a provider's prior-authorization queue.
+
+    **Scoped to one provider, and the scoping is the route's own requirement
+    rather than a filter the caller may drop.** Every other route here is keyed
+    on one request or one session; this one spans every request a provider has
+    filed, which is a materially wider disclosure, and the v1 "no credential
+    yet" reasoning that covers the narrow routes does not stretch to it. When
+    provider authentication lands in Phase 5 this parameter becomes a claim
+    rather than an argument, and nothing else about the route changes.
+
+    **This route writes no audit row, and that is the rule rather than an
+    exception to it** — the same argument, and the second instance of it, as
+    ``/prior-auth/{request_id}/routing``. Nothing in the response is clinical:
+    no denial reason, no procedure, no diagnosis, no note excerpt and no patient
+    identifier. See ``PriorAuthListItem``, which fixes that field list and says
+    what adding to it would cost. A queue polled on a timer would otherwise write
+    an audit row per refresh and bury the accesses an audit is actually asked
+    about.
+
+    Paginated with ``?cursor=``, per CLAUDE.md's API Design convention. The
+    cursor is opaque and single-purpose: it names the last row of the page it
+    came from, and nothing outside this service parses it.
+
+    Takes no session token in v1, on the same terms as every other route here.
+    """
+    try:
+        rows, next_cursor = await prior_auth.list_requests(
+            session,
+            provider_id=provider_id,
+            status=request_status,
+            cursor=cursor,
+        )
+    except prior_auth.InvalidCursor as exc:
+        raise ApiHTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ERROR_CODE_INVALID_CURSOR,
+            "That cursor was not issued by this service. Start from the first page.",
+        ) from exc
+
+    return ApiResponse[PriorAuthListData](
+        data=PriorAuthListData(
+            requests=[
+                PriorAuthListItem.from_rows(request=request, encounter=encounter)
+                for request, encounter in rows
+            ],
+            next_cursor=next_cursor,
+        )
+    )
 
 
 @router.get(
@@ -179,6 +292,58 @@ async def read_prior_auth_routing(
     prior_auth_request, encounter = await _load(session, request_id)
     return ApiResponse[PriorAuthRoutingData](
         data=PriorAuthRoutingData.from_rows(request=prior_auth_request, encounter=encounter)
+    )
+
+
+@router.get(
+    "/{request_id}/decision",
+    response_model=ApiResponse[PriorAuthDecisionData],
+    summary="Read what the payer decided, and why",
+    response_description="The payer's answer, including a denial reason when there is one.",
+    responses=error_responses(
+        status.HTTP_404_NOT_FOUND,
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        descriptions=REQUEST_ERROR_DESCRIPTIONS,
+    ),
+)
+async def read_prior_auth_decision(
+    request_id: uuid.UUID,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ApiResponse[PriorAuthDecisionData]:
+    """Return the payer's decision on one request, for a provider following it up.
+
+    **This one audits, and the list beside it does not.** ``denial_reason`` is
+    the payer's account of why this patient's care was refused, so reading it is
+    a PHI access and writes a ``READ_PRIOR_AUTH`` row — where the queue carries
+    no clinical field and correctly writes none. The two together are the design
+    rather than an inconsistency: a provider actually opening a denial produces
+    exactly one audit row, and a dashboard left open on a wall produces none.
+
+    **Narrow on purpose.** The full read returns ``clinical_evidence``, and
+    fetching note excerpts to render one sentence is the over-fetch TASK-061
+    fixed at this table from the other direction. A caller that needs the
+    evidence wants that route.
+
+    A denial with a null ``denial_reason`` is an ordinary answer: the payer gave
+    none. It is not the same as a request that was never denied, and a caller
+    must not render it as a reason of its own.
+    """
+    prior_auth_request, encounter = await _load(session, request_id)
+
+    await audit.audit_prior_auth_access(
+        session,
+        action=AuditAction.READ_PRIOR_AUTH,
+        request_id=prior_auth_request.id,
+        session_id=encounter.session_id,
+        provider_id=encounter.provider_id,
+        ip_address=_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    await session.commit()
+
+    return ApiResponse[PriorAuthDecisionData](
+        data=PriorAuthDecisionData.from_row(prior_auth_request)
     )
 
 

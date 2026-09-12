@@ -15,6 +15,12 @@ re-mint's case, carry a header ``/sessions/start`` does not. The installation
 site says nothing about either, and the failure mode of assuming otherwise is a
 visit that starts and then cannot be ended or refreshed from the browser that
 started it — which reads as a session bug rather than a CORS one.
+
+TASK-072 adds the prior-authorization dashboard's two reads, ``GET
+/prior-auth`` and ``GET /prior-auth/{request_id}/decision``. They are the first
+browser ``GET`` on this service — every case above is a POST or a PATCH — so
+the method itself is one the policy has never been asked for here, and the two
+paths are separately unproven from each other.
 """
 
 from __future__ import annotations
@@ -186,6 +192,73 @@ def test_an_unlisted_origin_is_refused_on_the_re_mint_route(
     response = configured_client.options(
         f"/sessions/{uuid.uuid4()}/token",
         headers={"Origin": OTHER_ORIGIN, "Access-Control-Request-Method": "POST"},
+    )
+
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_preflight_for_listing_prior_auth_requests_is_answered(
+    configured_client: TestClient,
+) -> None:
+    """TASK-072's dashboard, and the first browser GET on this service.
+
+    Every preflight above is for a POST or a PATCH, so this is a method the
+    policy has never been asked for on this service. Installing the middleware
+    says nothing about it, and the failure it would hide is a dashboard that
+    loads its shell and can never fill it.
+    """
+    response = configured_client.options(
+        "/prior-auth",
+        headers={
+            "Origin": ALLOWED_ORIGIN,
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == ALLOWED_ORIGIN
+    assert "GET" in response.headers["access-control-allow-methods"]
+
+
+def test_an_unlisted_origin_is_refused_on_the_prior_auth_list(
+    configured_client: TestClient,
+) -> None:
+    """The counterpart every case needs: an answer for the right origin proves
+    nothing if the policy would answer for any origin — and this route returns a
+    provider's whole queue.
+    """
+    response = configured_client.options(
+        "/prior-auth",
+        headers={"Origin": OTHER_ORIGIN, "Access-Control-Request-Method": "GET"},
+    )
+
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_preflight_for_reading_a_decision_is_answered(configured_client: TestClient) -> None:
+    """A different path from the list, and the one that returns a denial reason.
+
+    Its own case rather than the list's, because a path the policy has not been
+    asked about is a path nothing has proved it answers for.
+    """
+    response = configured_client.options(
+        f"/prior-auth/{uuid.uuid4()}/decision",
+        headers={
+            "Origin": ALLOWED_ORIGIN,
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == ALLOWED_ORIGIN
+
+
+def test_an_unlisted_origin_is_refused_on_the_decision_route(
+    configured_client: TestClient,
+) -> None:
+    response = configured_client.options(
+        f"/prior-auth/{uuid.uuid4()}/decision",
+        headers={"Origin": OTHER_ORIGIN, "Access-Control-Request-Method": "GET"},
     )
 
     assert "access-control-allow-origin" not in response.headers

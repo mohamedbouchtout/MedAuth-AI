@@ -35,12 +35,14 @@ from track_a_clinical import audit, prior_auth
 from track_a_clinical.api.dependencies import get_db_session
 from track_a_clinical.api.prior_auth import (
     ERROR_CODE_ALREADY_SUBMITTED,
+    ERROR_CODE_INVALID_CURSOR,
     ERROR_CODE_REQUEST_NOT_FOUND,
 )
 from track_a_clinical.main import create_app
 from track_a_clinical.models import (
     PRIOR_AUTH_STATUS_DENIED,
     PRIOR_AUTH_STATUS_ERROR,
+    PRIOR_AUTH_STATUS_MANUAL_REQUIRED,
     PRIOR_AUTH_STATUS_PENDING,
     PRIOR_AUTH_STATUS_SUBMITTED,
     Encounter,
@@ -160,6 +162,9 @@ def encounter() -> Encounter:
     encounter.insurance_payer = "Aetna Better Health"
     encounter.insurance_plan_type = "PPO"
     encounter.insurance_member_id = "W123456789"
+    # NOT NULL with a server default, so a row read back from PostgreSQL always
+    # carries one; only a detached object built in a test can be missing it.
+    encounter.started_at = datetime.datetime(2026, 2, 14, 8, 0, tzinfo=datetime.UTC)
     return encounter
 
 
@@ -647,3 +652,216 @@ async def test_the_recorded_time_is_the_servers(
 
     assert request_row.submitted_at is not None
     assert request_row.submitted_at >= before
+
+
+class ListSession:
+    """A session whose ``execute`` answers a list query with the rows it was given.
+
+    The list route's own SQL — the provider filter, the ordering and the cursor's
+    row-wise comparison — is not what this fake can prove, and the integration
+    suite next door is where those are asserted against a real PostgreSQL. What
+    this one is for is the part a database cannot show: which fields leave the
+    service, and that no audit row is written.
+    """
+
+    def __init__(self, rows: list[tuple[PriorAuthRequest, Encounter]]) -> None:
+        self.rows = rows
+        self.commits = 0
+
+    async def execute(self, _statement: Any) -> Any:
+        return _ListResult(self.rows)
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+
+class _ListResult:
+    def __init__(self, rows: list[tuple[PriorAuthRequest, Encounter]]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[Any]:
+        return [_Row(row) for row in self._rows]
+
+
+def denied(request: PriorAuthRequest) -> PriorAuthRequest:
+    """Put a request in the state a provider would be following up."""
+    request.status = PRIOR_AUTH_STATUS_DENIED
+    request.submitted_at = datetime.datetime(2026, 3, 1, 9, 30, tzinfo=datetime.UTC)
+    request.decided_at = datetime.datetime(2026, 3, 3, 14, 5, tzinfo=datetime.UTC)
+    request.payer_outcome = "complete"
+    request.payer_reference_number = PAYER_REFERENCE
+    request.denial_reason = "Six weeks of conservative therapy not documented."
+    return request
+
+
+@pytest_asyncio.fixture
+async def list_client(
+    encounter: Encounter, request_row: PriorAuthRequest, recorded_audit: RecordedAudit
+) -> AsyncIterator[AsyncClient]:
+    app = create_app()
+    app.dependency_overrides[get_db_session] = lambda: ListSession([(request_row, encounter)])
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://track-a-clinical"
+    ) as http:
+        yield http
+
+
+async def test_list_returns_the_providers_queue(
+    list_client: AsyncClient,
+    request_row: PriorAuthRequest,
+    encounter: Encounter,
+) -> None:
+    response = await list_client.get(f"/prior-auth?provider_id={encounter.provider_id}")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["next_cursor"] is None
+    [row] = payload["requests"]
+    assert row["request_id"] == str(request_row.id)
+    assert row["session_id"] == str(encounter.session_id)
+    assert row["status"] == PRIOR_AUTH_STATUS_PENDING
+    assert row["submittable"] is True
+
+
+async def test_list_carries_no_clinical_field(
+    list_client: AsyncClient, request_row: PriorAuthRequest, encounter: Encounter
+) -> None:
+    """The guard on the constraint that keeps this route out of ``audit_log``.
+
+    A clinical field added to the row would make the route's silence wrong, and
+    this is what fails when someone adds one. ``denial_reason`` is checked on a
+    *denied* request, so its absence is the payload's doing rather than the
+    fixture happening to carry no denial.
+    """
+    denied(request_row)
+
+    response = await list_client.get(f"/prior-auth?provider_id={encounter.provider_id}")
+
+    [row] = response.json()["data"]["requests"]
+    for field in ("denial_reason", "procedures", "diagnoses", "clinical_evidence"):
+        assert field not in row
+    assert "patient_fhir_id" not in row
+
+
+async def test_list_writes_no_audit_row(
+    list_client: AsyncClient, encounter: Encounter, recorded_audit: RecordedAudit
+) -> None:
+    """Non-clinical read, so auditing it would dilute the table it would be written to."""
+    await list_client.get(f"/prior-auth?provider_id={encounter.provider_id}")
+
+    assert recorded_audit.actions == []
+
+
+async def test_list_refuses_to_answer_unscoped(list_client: AsyncClient) -> None:
+    """A wider read than anything else here, so the scope is required rather than defaulted."""
+    response = await list_client.get("/prior-auth")
+
+    assert response.status_code == 422
+
+
+async def test_list_refuses_a_cursor_it_did_not_issue(
+    list_client: AsyncClient, encounter: Encounter
+) -> None:
+    """Refused rather than ignored: a silent restart reads as a page that ran out of rows."""
+    response = await list_client.get(
+        f"/prior-auth?provider_id={encounter.provider_id}&cursor=not-a-cursor"
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == ERROR_CODE_INVALID_CURSOR
+
+
+async def test_list_reports_the_visits_own_date(
+    list_client: AsyncClient, encounter: Encounter
+) -> None:
+    """``prior_auth_requests`` has no timestamp of its own; the visit's start is the row's date.
+
+    Deliberately not the fixture's own date: an assertion against that value
+    would hold even if this field were never read from the encounter at all.
+    """
+    encounter.started_at = datetime.datetime(2025, 11, 3, 16, 45, tzinfo=datetime.UTC)
+
+    response = await list_client.get(f"/prior-auth?provider_id={encounter.provider_id}")
+
+    [row] = response.json()["data"]["requests"]
+    assert row["started_at"].startswith("2025-11-03T16:45:00")
+
+
+async def test_list_reports_a_manual_request_as_its_own_state(
+    list_client: AsyncClient, request_row: PriorAuthRequest, encounter: Encounter
+) -> None:
+    """Work for a person is neither a failure nor a pending payer decision."""
+    request_row.status = PRIOR_AUTH_STATUS_MANUAL_REQUIRED
+
+    response = await list_client.get(f"/prior-auth?provider_id={encounter.provider_id}")
+
+    [row] = response.json()["data"]["requests"]
+    assert row["status"] == PRIOR_AUTH_STATUS_MANUAL_REQUIRED
+    assert row["submission_method"] is None
+
+
+async def test_decision_returns_the_payers_answer(
+    client: AsyncClient, request_row: PriorAuthRequest
+) -> None:
+    denied(request_row)
+
+    response = await client.get(f"/prior-auth/{request_row.id}/decision")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["denial_reason"] == request_row.denial_reason
+    assert data["payer_reference_number"] == PAYER_REFERENCE
+    assert data["payer_outcome"] == "complete"
+
+
+async def test_decision_carries_no_clinical_evidence(
+    client: AsyncClient, request_row: PriorAuthRequest
+) -> None:
+    """Narrow on purpose: note excerpts are not read to render one sentence."""
+    denied(request_row)
+
+    response = await client.get(f"/prior-auth/{request_row.id}/decision")
+
+    data = response.json()["data"]
+    assert "clinical_evidence" not in data
+    assert "procedures" not in data
+
+
+async def test_decision_audits_as_a_prior_auth_read(
+    client: AsyncClient, request_row: PriorAuthRequest, recorded_audit: RecordedAudit
+) -> None:
+    """The contrast with the list beside it: a denial reason is clinical content."""
+    denied(request_row)
+
+    await client.get(f"/prior-auth/{request_row.id}/decision")
+
+    assert recorded_audit.actions == [AuditAction.READ_PRIOR_AUTH]
+
+
+async def test_decision_distinguishes_no_reason_given_from_no_denial(
+    client: AsyncClient, request_row: PriorAuthRequest
+) -> None:
+    """A payer that denied without saying why is not a request that was never denied."""
+    denied(request_row)
+    request_row.denial_reason = None
+
+    response = await client.get(f"/prior-auth/{request_row.id}/decision")
+
+    data = response.json()["data"]
+    assert data["denial_reason"] is None
+    assert data["decided_at"] is not None
+
+
+async def test_decision_404s_for_an_unknown_request(recorded_audit: RecordedAudit) -> None:
+    app = create_app()
+    app.dependency_overrides[get_db_session] = lambda: PriorAuthSession(
+        encounter=None, request=None
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://track-a-clinical"
+    ) as http:
+        response = await http.get(f"/prior-auth/{uuid.uuid4()}/decision")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == ERROR_CODE_REQUEST_NOT_FOUND
+    assert recorded_audit.actions == []

@@ -19,6 +19,10 @@ def test_app_exposes_the_session_note_and_prior_auth_routes() -> None:
         "/sessions/{session_id}/token",
         "/notes/{session_id}",
         "/notes/{session_id}/ehr-reference",
+        # The dashboard's two reads (TASK-072). Unlike the three below them, a
+        # browser calls both.
+        "/prior-auth",
+        "/prior-auth/{request_id}/decision",
         "/prior-auth/{request_id}",
         "/prior-auth/{request_id}/routing",
         "/prior-auth/{request_id}/submission",

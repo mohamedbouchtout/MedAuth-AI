@@ -448,6 +448,160 @@ class PriorAuthRoutingData(BaseModel):
         )
 
 
+class PriorAuthListItem(BaseModel):
+    """One row of the provider's prior-authorization queue (TASK-072).
+
+    **This field list is a constraint, not an implementation choice, and adding
+    to it is a decision that has to be made deliberately.** The route that
+    returns these writes no audit row, and the *only* thing making that correct
+    is that nothing here is clinical content. CLAUDE.md's audit rule is an
+    if-and-only-if in both directions, so the moment a clinical field appears
+    the route owes a ``READ_PRIOR_AUTH`` row per response — and a dashboard
+    polled on a timer would then bury "who accessed patient X" under one row per
+    refresh. Whatever needs a clinical field belongs on
+    :class:`PriorAuthDecisionData` or the full read instead.
+
+    Specifically absent, and each for a reason rather than an oversight:
+    ``denial_reason`` (the payer's account of why this patient's care was
+    refused — clinical, and the reason :class:`PriorAuthDecisionData` exists),
+    ``procedures`` and ``diagnoses`` (what was asked for and why), and
+    ``patient_fhir_id`` (identifies the patient at the EHR, and the queue has no
+    use for it).
+
+    This is :class:`PriorAuthRoutingData`'s argument applied to a list, and the
+    second time this service has answered it the same way. What is present is a
+    status, a payer's own trading name, timestamps and identifiers of ours.
+
+    Attributes:
+        request_id: The row this describes, and what the resubmit call is keyed
+            on.
+        session_id: The encounter session it came out of. An opaque identifier of
+            ours, and what the dashboard links to a visit's note by.
+        status: Where the request has got to in our process — including
+            ``manual-submission-required``, which is work for a person rather
+            than a failure or a pending payer decision.
+        payer_name: The payer's own display name, as stored. **Never a slug.**
+        payer_outcome: What the payer said, once it has been asked. A different
+            fact from ``status``, and null before submission.
+        submission_method: Which path transmitted it, or null when nothing has.
+            Reported, never predicted: routing is TASK-061's and the transport
+            beneath it is the adapter's.
+        submitted_at: When it was last transmitted, or null.
+        decided_at: When the payer decided, or null.
+        started_at: When the visit this came out of began. The row's date,
+            because ``prior_auth_requests`` carries no timestamp of its own — and
+            the more meaningful one regardless.
+        submittable: Whether a submission may be attempted now, by the service's
+            own rule rather than one the dashboard re-derives. This is what the
+            resubmit control is offered on.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    request_id: uuid.UUID
+    session_id: uuid.UUID
+    status: str
+    payer_name: str | None
+    payer_outcome: str | None
+    submission_method: str | None
+    submitted_at: datetime.datetime | None
+    decided_at: datetime.datetime | None
+    started_at: datetime.datetime
+    submittable: bool
+
+    @classmethod
+    def from_rows(cls, *, request: PriorAuthRequest, encounter: Encounter) -> PriorAuthListItem:
+        """Render one queue row from the request and its encounter.
+
+        ``payer_name`` falls back to the encounter's ``insurance_payer`` exactly
+        as the other two payloads' does — both hold the payer's own display name,
+        so the fallback joins two spellings of one fact rather than substituting
+        a different one.
+        """
+        return cls(
+            request_id=request.id,
+            session_id=encounter.session_id,
+            status=request.status,
+            payer_name=request.payer_name or encounter.insurance_payer,
+            payer_outcome=request.payer_outcome,
+            submission_method=request.submission_method,
+            submitted_at=request.submitted_at,
+            decided_at=request.decided_at,
+            started_at=encounter.started_at,
+            submittable=is_submittable(request),
+        )
+
+
+class PriorAuthListData(BaseModel):
+    """``data`` payload of ``GET /prior-auth`` (TASK-072).
+
+    Attributes:
+        requests: This page of the provider's queue, newest visit first.
+        next_cursor: Pass as ``?cursor=`` for the following page, or null when
+            this page is the last. Opaque: it is this service's to change, and a
+            caller that parses it is relying on something never promised.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    requests: list[PriorAuthListItem]
+    next_cursor: str | None
+
+
+class PriorAuthDecisionData(BaseModel):
+    """``data`` payload of ``GET /prior-auth/{request_id}/decision`` (TASK-072).
+
+    What the payer decided and why, for a provider following up a denial.
+
+    **This one audits**, and the contrast with :class:`PriorAuthListItem` beside
+    it is the whole design: ``denial_reason`` is the payer's account of why this
+    patient's care was refused, which is clinical content about a named
+    encounter. Reading it is a PHI access and writes a ``READ_PRIOR_AUTH`` row.
+
+    **It is a third route rather than four fields added to
+    :class:`PriorAuthRequestData`.** That payload's own docstring says these were
+    left out because they "belong to work that follows a decision up and would be
+    a wider disclosure for no caller" — TASK-072 is that caller, so the stated
+    reason has expired, but that route also returns ``clinical_evidence``, and a
+    dashboard pulling note excerpts across the network to render one sentence is
+    the over-fetch TASK-061 already fixed at this same table.
+
+    Splitting it this way is also the better audit trail in both directions: the
+    queue manufactures no rows for a screen nobody read, and a provider actually
+    opening a denial produces exactly one.
+
+    Attributes:
+        request_id: The row this describes.
+        payer_outcome: What the payer said, or null before it was asked.
+        payer_reference_number: The payer's own reference, when it gave one.
+            Legitimately absent on a queued answer.
+        decided_at: When the payer decided, or null if it has not.
+        denial_reason: Why the request was refused, in the payer's words. Null
+            for anything not denied — and null on a denial the payer gave no
+            reason for, which is a different fact the dashboard must not render
+            as a reason of its own.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    request_id: uuid.UUID
+    payer_outcome: str | None
+    payer_reference_number: str | None
+    decided_at: datetime.datetime | None
+    denial_reason: str | None
+
+    @classmethod
+    def from_row(cls, request: PriorAuthRequest) -> PriorAuthDecisionData:
+        """Render the decision fields from the request row."""
+        return cls(
+            request_id=request.id,
+            payer_outcome=request.payer_outcome,
+            payer_reference_number=request.payer_reference_number,
+            decided_at=request.decided_at,
+            denial_reason=request.denial_reason,
+        )
+
+
 class RecordSubmissionRequest(BaseModel):
     """Body of ``PATCH /prior-auth/{request_id}/submission`` (TASK-054).
 
