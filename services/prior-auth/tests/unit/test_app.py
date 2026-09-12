@@ -17,7 +17,6 @@ from prior_auth.api.dependencies import (
     get_redis,
     get_session_end_consumer,
 )
-from prior_auth.config import get_settings
 from prior_auth.consumer import SessionEndConsumer
 from prior_auth.main import create_app
 
@@ -115,6 +114,15 @@ class TestHealth:
 
 
 class TestTheSurfaceIsDeliberatelySmall:
+    """What this service exposes over HTTP.
+
+    The CORS assertions that used to live here moved to ``test_cors.py`` with
+    TASK-072, which is where CLAUDE.md's testing rule says a service's preflight
+    cases live — and where they gained the thing a middleware-presence check
+    cannot give: a preflight actually answered for the submit route's own path
+    and method.
+    """
+
     def test_the_surface_is_health_and_the_submission_router(self) -> None:
         """Assembly still arrives on a subscription; TASK-061 added the one route.
 
@@ -126,41 +134,6 @@ class TestTheSurfaceIsDeliberatelySmall:
             "/health",
             "/prior-auth/{request_id}/submit",
         }
-
-    def test_cors_is_installed_when_an_origin_is_configured(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Inverted by TASK-061, deliberately rather than by coincidence.
-
-        This asserted the *absence* of CORS while nothing here answered a
-        browser, which was correct until TASK-072's dashboard got a route to
-        call: it resubmits a denied request through the submission router. Per
-        CLAUDE.md, CORS is installed when a service grows a browser-facing HTTP
-        route — so what changed is the condition the old assertion rested on,
-        not the rule.
-        """
-        get_settings.cache_clear()
-        monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "https://app.example.com")
-        try:
-            app = create_app()
-            assert any("CORSMiddleware" in str(m.cls) for m in app.user_middleware)
-        finally:
-            get_settings.cache_clear()
-
-    def test_cors_trusts_no_origin_by_default(self) -> None:
-        """An unconfigured deployment answers no browser rather than one nobody chose.
-
-        ``install_cors`` adds nothing at all for an empty allow-list, which is
-        why the assertion above has to configure one — and why this is the half
-        that actually guards against a permissive default shipping.
-        """
-        get_settings.cache_clear()
-        try:
-            assert get_settings().cors_allowed_origins == ()
-            app = create_app()
-            assert not any("CORSMiddleware" in str(m.cls) for m in app.user_middleware)
-        finally:
-            get_settings.cache_clear()
 
 
 class TestLifespan:
