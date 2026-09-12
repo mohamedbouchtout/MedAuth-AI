@@ -7706,7 +7706,7 @@ logic do not change.
       in `apps/web/src/config.ts`, and `apps/web/**` and
       `services/fhir-integration/**` already select their jobs.
 
-- [ ] **TASK-072:** Prior auth status dashboard
+- [x] **TASK-072:** Prior auth status dashboard
   - App: `apps/web`
   - Services: `services/track-a-clinical` (the list and the decision read)
   - `GET /prior-auth?status=&provider_id=&cursor=` — **added to
@@ -7726,9 +7726,14 @@ logic do not change.
   - **The row is deliberately non-clinical, and that selection is what keeps
     this route audit-free.** The fields are exactly:
     `request_id`, `session_id`, `status`, `payer_name`, `payer_outcome`,
-    `submission_method`, `submitted_at`, `decided_at`, `created_at`, and
-    `submittable`. **Not `denial_reason`, not `procedures`, not `diagnoses`, not
-    `clinical_evidence`, and not `patient_fhir_id`.**
+    `submission_method`, `submitted_at`, `decided_at`, `started_at` (the
+    encounter's), and `submittable`. **Not `denial_reason`, not `procedures`,
+    not `diagnoses`, not `clinical_evidence`, and not `patient_fhir_id`.**
+    - **`prior_auth_requests` has no `created_at` column**, which is why the
+      visit's own start time is what a row is dated by. Adding one would be a
+      migration this task has already declined to carry for the manual-reason
+      column, and `encounters.started_at` is the more meaningful date anyway —
+      it is when the visit this request came out of happened.
     - This is the `/prior-auth/{request_id}/routing` precedent applied to a
       list: that route carries three non-clinical facts and writes no audit row,
       and its docstring forbids adding a clinical field for exactly this reason.
@@ -7757,8 +7762,8 @@ logic do not change.
   - **Pagination is `?cursor=`, per CLAUDE.md's API Design convention.** Nothing
     new is invented here; that section already fixes cursor-based pagination for
     every endpoint, and this is the first list route in the repository to need
-    it. Order by `created_at` descending with the row id as a tiebreak, so the
-    cursor is stable when two requests share a timestamp.
+    it. Order by the encounter's `started_at` descending with the request id as
+    a tiebreak, so the cursor is stable when two visits share a timestamp.
   - Denial reason display (`prior_auth_requests.denial_reason`) — **read on
     demand, not from the list.** The column is the payer's account of why this
     patient's care was refused, so it is clinical content and cannot be in the
@@ -7844,7 +7849,45 @@ logic do not change.
     provider's encounter is absent, and a request with no `provider_id` argument
     is a 422 rather than an unscoped answer
   - **Test:** paging with `?cursor=` returns each request exactly once across
-    two pages, including when two rows share a `created_at`
+    two pages, including when two encounters share a `started_at`
+  - Built (401 tests in `track-a-clinical` at 97%, 179 in `prior-auth` at 99%,
+    347 in `apps/web` at 92%, all against the 80% gate). Notes on what the
+    implementation settled that this text did not:
+    - **`prior_auth_requests` turned out to have no `created_at`**, which this
+      task's own wording had assumed. The row is dated by the encounter's
+      `started_at` instead — no migration, and the more meaningful date anyway.
+      The cursor carries that timestamp *and* the request id, because two visits
+      can begin in the same microsecond and a timestamp-only cursor then skips
+      or repeats a row at a page boundary. Both failures are silent, so the tie
+      case is asserted against a real PostgreSQL rather than a fake.
+    - **The denial reason needed a route that did not exist.** With it excluded
+      from the audit-free list row, nothing exposed it at all:
+      `GET /prior-auth/{request_id}` deliberately omits `denial_reason` and
+      `decided_at`, saying they "belong to work that follows a decision up and
+      would be a wider disclosure for no caller". This task is that caller, so
+      the stated reason expired — but that route also returns
+      `clinical_evidence`, so widening it would pull note excerpts across the
+      network to render one sentence. Hence
+      `GET /prior-auth/{request_id}/decision`, narrow and audited.
+    - **The split is a better audit trail than either half alone**, which was
+      not the argument for it but is the reason not to revisit it: the queue
+      manufactures no rows for a screen nobody read, and a provider actually
+      opening a denial produces exactly one.
+    - **`submittable` is necessary but not sufficient for the resubmit
+      control.** It is true for a `pending` request — never submitted — so a
+      client trusting it alone would offer a *re*submission on something never
+      submitted once. The control is offered on `denied`/`error` *and*
+      `submittable`, so the task's rule decides and the service's flag vetoes.
+    - **The dashboard shows a manual request's state but not its reason**, per
+      the scope limit above; the reason *is* shown immediately after a
+      resubmission, because the router returns it in that one response before
+      dropping it. TASK-072b closes the gap.
+    - **`apps/web` had no `@testing-library/user-event`** — the existing screen
+      tests drive `fireEvent`, and these match rather than adding a dependency
+      for one file.
+    - **Prettier is not in CI for this app** (lint, typecheck, test, build are)
+      and 74 files already differ from it, so nothing here was reformatted to
+      satisfy a check the repository does not run.
 
 - [ ] **TASK-072b:** Persist why a request needs manual submission
   - Prerequisite: TASK-061 (which chooses the reason), TASK-072 (which is the
