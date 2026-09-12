@@ -38,7 +38,7 @@ import { isNearExpiry } from '@medauth/session-client';
 import type { Nudge } from '@medauth/nudge-client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import type { PatientSource } from '@medauth/fhir-client';
+import type { PatientSource, VisitSubject } from '@medauth/fhir-client';
 
 import { sessionsApi, type ApiFailure, type Session, type SessionsApi } from '../api/sessions';
 import { NudgeOverlay } from '../components/NudgeOverlay';
@@ -47,6 +47,7 @@ import { TranscriptPane } from '../components/TranscriptPane';
 import { AUDIO_INGESTION_WS_URL } from '../config';
 import { useAudioCapture } from '../hooks/useAudioCapture';
 import { useTranscriptStream } from '../hooks/useTranscriptStream';
+import type { CompletedVisit } from '../session/completedVisit';
 import { recoveryFor } from '../session/recovery';
 import { visitPhase, type SessionStatus } from '../session/visitPhase';
 
@@ -84,8 +85,16 @@ const RECOVERY_GUIDANCE = {
 export interface SessionScreenProps {
   /** Where the patient and provider come from. See `@medauth/fhir-client`. */
   patientSource: PatientSource;
-  /** Called once the encounter is closed, with the session it closed. TASK-071. */
-  onCompleted?: (session: Session) => void;
+  /**
+   * Called once the encounter is closed, with everything the note review screen
+   * needs about it (TASK-071).
+   *
+   * A `CompletedVisit` rather than a bare session because this is the only place
+   * all three identifiers are known at once — the session from
+   * `POST /sessions/start`, the launch and the chart entry from the resolved
+   * subject. See that type for why they stay three named fields.
+   */
+  onCompleted?: (visit: CompletedVisit) => void;
   sessions?: SessionsApi;
   audioBaseUrl?: string;
   now?: () => number;
@@ -141,6 +150,9 @@ export function SessionScreen({
   now = Date.now,
 }: SessionScreenProps) {
   const [sessionStatus, setSessionStatus] = useState<SessionStatus>({ kind: 'none' });
+
+  /** The subject this visit was started for, kept for `onCompleted`. */
+  const subjectRef = useRef<VisitSubject | null>(null);
 
   /**
    * Bumped every time capture should be (re)started for the open session.
@@ -226,6 +238,12 @@ export function SessionScreen({
       setSessionStatus({ kind: 'failed', message: NO_SUBJECT_MESSAGE });
       return;
     }
+
+    // Held so the completed visit can name the launch and the chart entry
+    // alongside the session. This is the only point in the app where all three
+    // are in hand; re-deriving any of them later would mean holding it under a
+    // second name, which CLAUDE.md's "two names for one visit" rejects.
+    subjectRef.current = subject;
 
     // The chart entry and the launch are passed through when the subject has
     // them: together they are what lets the service fill the encounter's payer
@@ -335,15 +353,22 @@ export function SessionScreen({
               Visit completed.
             </p>
             {/*
-              TASK-071 is the note review screen. Until it exists this is an
-              explicit action rather than an automatic navigation: sending a
-              provider somewhere that is not built yet would be worse than
-              leaving them on a screen that says the visit is closed.
+              An explicit action rather than an automatic navigation. Ending a
+              visit and opening the note are two decisions, and a provider who
+              ended a visit to start the next one should not be taken to a note
+              they did not ask for — the note keeps, and its screen is now
+              linkable, so nothing is lost by waiting to be asked.
             */}
             {onCompleted !== undefined && sessionStatus.kind === 'ended' && (
               <Action
                 label="Review note"
-                onClick={() => onCompleted(sessionStatus.session)}
+                onClick={() =>
+                  onCompleted({
+                    session: sessionStatus.session,
+                    launchId: subjectRef.current?.launchId ?? null,
+                    ehrEncounterId: subjectRef.current?.ehrEncounterId ?? null,
+                  })
+                }
                 testId="review-note"
               />
             )}

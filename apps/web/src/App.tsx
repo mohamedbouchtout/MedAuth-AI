@@ -12,26 +12,44 @@
  * order, and `apps/mobile` models exactly the same flow with the same union and
  * no router at all.
  *
- * What would change that: a screen a provider needs to *arrive* at rather than
- * reach — TASK-072's prior-auth dashboard is the likely first, since it is a
- * standing view rather than a step in a visit — or a requirement that the note
- * review screen be linkable or survive a refresh. At that point this app takes a
- * router and these phases become routes. Adding one now would be scaffolding for
- * screens whose URLs nobody has yet needed.
+ * **TASK-071 is that trigger firing, so this app now has a router.** The
+ * condition named here was "a requirement that the note review screen be
+ * linkable or survive a refresh", and the note review screen is that
+ * requirement: a provider interrupted during chart review is an ordinary event
+ * in a clinic rather than an edge case, and a review screen that exists only as
+ * an in-memory phase of one visit is lost to any reload. So `/notes/:sessionId`
+ * is a route, and the visit flow is what everything else renders.
+ *
+ * **The claim code is still read here, above the routes, and that has not
+ * changed.** TASK-051f's redirect lands at whatever path `SMART_WEB_RETURN_URL`
+ * names, and `launch/inbound.ts` is explicit that this app must not hold a
+ * second copy of that setting or discard a completed launch whose path it did
+ * not expect. So an arriving launch is still a fact about the URL this page
+ * booted at rather than a route, and routing only decides what is rendered once
+ * no launch is arriving. `scrubLaunchParams` touches the query string and leaves
+ * the path alone, so the two do not interfere.
+ *
+ * **The note route is deliberately outside the launch gate.** The note routes
+ * take no credential in v1, so a reloaded or linked review screen must render
+ * without a launch — with the chart write reporting that it holds none, which is
+ * a state rather than an error. Putting it behind the gate would show a provider
+ * the sign-in screen for a note they can legitimately read.
  *
  * The launch is held in memory for the life of the page and never persisted: a
  * `launch_id` resolves to an EHR access token, so it is a credential by this
- * repository's own definition.
+ * repository's own definition. That is exactly why a reload loses it.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Route, Routes, useNavigate } from 'react-router';
 
 import { launchApi as defaultLaunchApi, type LaunchApi } from './api/fhirClient';
-import type { Session } from './api/sessions';
 import { readClaim, readLaunchFailure, scrubLaunchParams } from './launch/inbound';
 import { completeLaunch, messageForFailure } from './launch/smartLaunch';
 import { LaunchScreen } from './screens/LaunchScreen';
+import { NoteReviewRoute } from './screens/NoteReviewRoute';
 import { VisitFlow } from './screens/VisitFlow';
+import type { CompletedVisit } from './session/completedVisit';
 
 /**
  * Where the app is, which is a property of how it was opened.
@@ -43,8 +61,7 @@ import { VisitFlow } from './screens/VisitFlow';
 type AppState =
   | { kind: 'no-launch'; failure: string | null }
   | { kind: 'redeeming' }
-  | { kind: 'launched'; launchId: string }
-  | { kind: 'completed'; session: Session };
+  | { kind: 'launched'; launchId: string };
 
 export interface AppProps {
   launches?: LaunchApi;
@@ -65,6 +82,18 @@ export function App({
   // to mint a code against — and the claim is read first so a completed launch
   // could never be discarded in favour of an error some other party appended.
   const launchFailure = claim === null ? readLaunchFailure(location.search) : null;
+
+  const navigate = useNavigate();
+
+  /**
+   * The visit this page most recently closed, or null.
+   *
+   * Held here rather than passed through the router's location state so that a
+   * `launch_id` never reaches `history.state`, and so the review screen can tell
+   * a visit it has context for from one it was linked to. See `CompletedVisit`
+   * for why its three identifiers stay three named fields.
+   */
+  const [completed, setCompleted] = useState<CompletedVisit | null>(null);
 
   const [state, setState] = useState<AppState>(() => {
     if (claim !== null) {
@@ -135,8 +164,37 @@ export function App({
     scrubLaunchParams(history, location);
   }, [launchFailure, history, location]);
 
+  const launchId = state.kind === 'launched' ? state.launchId : null;
+
+  /**
+   * Ending a visit navigates to its note.
+   *
+   * The session goes in the path — it is the only identifier this service
+   * exposes to clients and every note route is keyed on it — and the rest of the
+   * completed visit is kept in memory. The launch in particular never goes in a
+   * URL: it resolves to an EHR access token.
+   */
+  const onCompleted = useCallback(
+    (visit: CompletedVisit) => {
+      setCompleted(visit);
+      void navigate(`/notes/${visit.session.sessionId}`);
+    },
+    [navigate],
+  );
+
+  const startAnotherVisit = useCallback(() => void navigate('/'), [navigate]);
+
+  /**
+   * Everything that is a phase of one visit rather than a destination.
+   *
+   * The launch gate lives here and not around the whole app: the note route
+   * below is reachable without a launch, because the note routes take no
+   * credential in v1 and a linked or reloaded review screen is a legitimate way
+   * to arrive at one.
+   */
+  let visit: React.ReactNode;
   if (state.kind === 'redeeming') {
-    return (
+    visit = (
       <main className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-6">
         <h1 className="text-lg font-semibold text-slate-900">MedAuth AI</h1>
         <p className="text-sm text-slate-700" data-testid="redeeming">
@@ -144,33 +202,25 @@ export function App({
         </p>
       </main>
     );
-  }
-
-  if (state.kind === 'no-launch') {
-    return <LaunchScreen failure={state.failure} />;
-  }
-
-  if (state.kind === 'completed') {
-    return (
-      <main className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-6">
-        <h1 className="text-lg font-semibold text-slate-900">Visit completed</h1>
-        {/*
-          TASK-071 builds the note review screen against `GET /notes/{session_id}`.
-          Until it exists this names the visit that was closed rather than
-          pretending to be that screen — the session id is what TASK-071 is keyed
-          on, and it is the one identifier this app hands on.
-        */}
-        <p className="text-sm text-slate-700" data-testid="awaiting-note-review">
-          The note for this visit is being generated. Review arrives in TASK-071.
-        </p>
-      </main>
-    );
+  } else if (state.kind === 'no-launch') {
+    visit = <LaunchScreen failure={state.failure} />;
+  } else {
+    visit = <VisitFlow launchId={state.launchId} onCompleted={onCompleted} />;
   }
 
   return (
-    <VisitFlow
-      launchId={state.launchId}
-      onCompleted={(session) => setState({ kind: 'completed', session })}
-    />
+    <Routes>
+      <Route
+        path="/notes/:sessionId"
+        element={
+          <NoteReviewRoute
+            completed={completed}
+            launchId={launchId}
+            onStartAnotherVisit={startAnotherVisit}
+          />
+        }
+      />
+      <Route path="*" element={visit} />
+    </Routes>
   );
 }

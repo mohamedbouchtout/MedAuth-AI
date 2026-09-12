@@ -1,4 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react';
+import type { ReactNode } from 'react';
+import { MemoryRouter } from 'react-router';
 import { describe, expect, it, vi } from 'vitest';
 
 import { App } from '../../src/App';
@@ -18,7 +20,19 @@ import { NO_ISSUER_MESSAGE } from '../../src/screens/LaunchScreen';
  * outcome, and the moment between finding one and holding a launch must not be
  * rendered as "no launch" — which would invite a provider who has just signed in
  * to sign in again.
+ *
+ * **The router and the boot URL are two different things here, deliberately.**
+ * A `MemoryRouter` supplies the route the app renders; the injected `location`
+ * supplies the URL the page was *opened* at, which is where a claim code lives.
+ * That is not test scaffolding papering over a mismatch — `launch/inbound.ts`
+ * says in terms that an arriving launch is a fact about the URL this app booted
+ * at rather than a route, precisely so the service can redirect anywhere its own
+ * `SMART_WEB_RETURN_URL` names.
  */
+
+function inRouter(node: ReactNode, at = '/launch') {
+  return <MemoryRouter initialEntries={[at]}>{node}</MemoryRouter>;
+}
 
 const SESSION: LaunchSession = {
   launchId: 'launch-7',
@@ -39,7 +53,7 @@ function launchesThatRedeem(): LaunchApi {
 
 function renderApp(search: string, launches: LaunchApi = launchesThatRedeem()) {
   const history = { replaceState: vi.fn() } as unknown as History;
-  render(<App launches={launches} location={locationAt(search)} history={history} />);
+  render(inRouter(<App launches={launches} location={locationAt(search)} history={history} />));
   return { history, launches };
 }
 
@@ -99,9 +113,11 @@ describe('returning from a launch', () => {
     const launches = launchesThatRedeem();
     const history = { replaceState: vi.fn() } as unknown as History;
     const { rerender } = render(
-      <App launches={launches} location={locationAt('?claim=code-1')} history={history} />,
+      inRouter(<App launches={launches} location={locationAt('?claim=code-1')} history={history} />),
     );
-    rerender(<App launches={launches} location={locationAt('?claim=code-1')} history={history} />);
+    rerender(
+      inRouter(<App launches={launches} location={locationAt('?claim=code-1')} history={history} />),
+    );
 
     await waitFor(() => expect(launches.redeemClaim).toHaveBeenCalledTimes(1));
   });
