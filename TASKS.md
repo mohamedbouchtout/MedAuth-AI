@@ -7708,10 +7708,77 @@ logic do not change.
 
 - [ ] **TASK-072:** Prior auth status dashboard
   - App: `apps/web`
-  - `GET /prior-auth?status=` (add this list endpoint to `services/prior-auth`
-    if not already covered — flag if missing) — list all prior auth requests
-    with status (pending, submitted, approved, denied)
-  - Denial reason display (`prior_auth_requests.denial_reason`)
+  - Services: `services/track-a-clinical` (the list and the decision read)
+  - `GET /prior-auth?status=&provider_id=&cursor=` — **added to
+    `services/track-a-clinical`, not to `services/prior-auth`.** Known
+    Constraints #9 flagged this endpoint as possibly-missing; it is missing, and
+    this task builds it.
+    - **The service is corrected here rather than followed.** An earlier draft
+      of this line said `services/prior-auth`, written before TASK-061 existed.
+      That service was deliberately scoped as a router: it reads the three
+      routing facts over HTTP and writes one status, and every read of
+      `prior_auth_requests` lives in `track-a-clinical`, which owns the table,
+      its migrations and the three routes already keyed on it. A list endpoint
+      in `prior-auth` would be a second read path into a table it does not own,
+      existing only because of how this line was originally worded. That
+      `apps/web` then reuses the already-bound `API_BASE_URL` instead of
+      configuring a fourth origin is confirmation, not the reason.
+  - **The row is deliberately non-clinical, and that selection is what keeps
+    this route audit-free.** The fields are exactly:
+    `request_id`, `session_id`, `status`, `payer_name`, `payer_outcome`,
+    `submission_method`, `submitted_at`, `decided_at`, `created_at`, and
+    `submittable`. **Not `denial_reason`, not `procedures`, not `diagnoses`, not
+    `clinical_evidence`, and not `patient_fhir_id`.**
+    - This is the `/prior-auth/{request_id}/routing` precedent applied to a
+      list: that route carries three non-clinical facts and writes no audit row,
+      and its docstring forbids adding a clinical field for exactly this reason.
+      CLAUDE.md's audit rule is an if-and-only-if in both directions, so a route
+      over non-clinical data must *not* write to `audit_log` — a dashboard
+      polled on a timer would otherwise bury "who accessed patient X" under one
+      row per refresh.
+    - **State it as a constraint at the payload, not as an implementation
+      choice.** A future field addition has to consciously check against it:
+      the moment a clinical field appears here the route owes an audit row, and
+      the two would then disagree silently. Say so in the schema's docstring,
+      the way `PriorAuthRoutingData` already does.
+    - `payer_name` is the payer's own display name and `session_id` is an
+      opaque identifier of ours; neither is patient data. `patient_fhir_id` is
+      left out because it identifies a patient at the EHR and the dashboard has
+      no use for it.
+  - **Provider scoping is required, not optional.** `provider_id` is a required
+    query parameter and the list is filtered on the encounter's provider. An
+    unscoped list of every prior-authorization request across every patient and
+    provider is a materially larger exposure than the single-resource routes
+    around it, and the v1 "no credential yet" reasoning does not stretch to
+    cover it: that reasoning was written for routes keyed on one encounter's
+    data. A wider read gets a stricter bar even before provider authentication
+    lands in Phase 5, at which point the parameter becomes a claim rather than
+    an argument.
+  - **Pagination is `?cursor=`, per CLAUDE.md's API Design convention.** Nothing
+    new is invented here; that section already fixes cursor-based pagination for
+    every endpoint, and this is the first list route in the repository to need
+    it. Order by `created_at` descending with the row id as a tiebreak, so the
+    cursor is stable when two requests share a timestamp.
+  - Denial reason display (`prior_auth_requests.denial_reason`) — **read on
+    demand, not from the list.** The column is the payer's account of why this
+    patient's care was refused, so it is clinical content and cannot be in the
+    audit-free row above. It comes from a new narrow read,
+    `GET /prior-auth/{request_id}/decision`, returning `payer_outcome`,
+    `payer_reference_number`, `decided_at` and `denial_reason` and nothing else.
+    - **It audits**, as `READ_PRIOR_AUTH`, exactly as the full read does.
+    - **It is a third route rather than a widening of
+      `GET /prior-auth/{request_id}`.** That payload's docstring says
+      `decided_at` and `denial_reason` were left out because they "belong to
+      work that follows a decision up and would be a wider disclosure for no
+      caller" — this task is that caller, so the stated reason has expired. But
+      that route also returns `clinical_evidence`, and a dashboard fetching note
+      excerpts to render one sentence is the over-fetch TASK-061 already fixed
+      at this exact table. Add the narrow read; leave the submitter's route
+      alone.
+    - **One audit row per provider actually opening a denial** is the point of
+      splitting it this way, and it is a better trail than the alternative in
+      both directions: the list does not manufacture rows for a screen nobody
+      read, and a genuine read of a denial reason is recorded.
   - Resubmission flow for denied requests: calls `POST /prior-auth/{request_id}/submit`
     again (TASK-061). **What that endpoint does on a repeat is settled in
     TASK-061, not here** — a resubmission writes a new
@@ -7735,11 +7802,79 @@ logic do not change.
       transmitting anything, and the dashboard must show that as work for a
       person rather than as an error or as a pending payer decision — the
       distinction the whole routing model exists to preserve.
+    - **The dashboard shows the state and not the reason, and that is a
+      deliberate scope limit.** `mark_manual_submission_required` writes
+      `status` alone; the four labels it chooses between
+      (`payer-has-no-prior-auth-api`, `no-payer-recorded`,
+      `encounter-not-linked-to-ehr`, `submission-path-not-configured`) are
+      logged and returned on the submit response, then lost. Persisting them
+      needs a column, a migration, and the closed-vocabulary decision already
+      made for `SubmissionMethod`, `SubmissionOutcome`, `AuditAction` and
+      `EHRType` — which is a task, not something absorbed into a screen.
+      **TASK-072b**, below. Deferred on the same terms as TASK-024b and
+      TASK-054's CoverMyMeds scoping rather than smuggled in here.
+  - **Routing: this is a real route, not a phase of the visit union.** TASK-070
+    named this dashboard as the likely trigger for a router, and TASK-071
+    installed one. A provider arrives at the queue rather than walking to it
+    through a visit, so it is `/prior-auth` under `apps/web`'s existing
+    `<Routes>`, outside the launch gate for the same reason the note route is.
+  - `apps/web` needs the `prior-auth` service origin for the resubmit call —
+    port 8007, which no `VITE_` variable names today. Add it and **bind it in
+    `apps/web/src/config.ts`**, not only in `.env.example`; a variable nothing
+    reads is the failure that section has already produced three times. The list
+    and decision reads are `track-a-clinical`, so they use `API_BASE_URL`.
+  - `services/prior-auth` becomes browser-facing for the first time here. It
+    installs `packages/cors-policy` already, and per CLAUDE.md's testing rule
+    that is not evidence the submit route and its method are covered: add the
+    preflight case with its unlisted-origin counterpart. **Move that service's
+    CORS assertions out of `tests/unit/test_app.py` into `test_cors.py`** while
+    doing it, which is where the rule says they live and where the other three
+    installing services keep theirs.
+  - Update `docs/api/track-a-clinical.yaml` for both new routes — the committed
+    spec is half of a contract the drift test checks.
   - **Test:** render list with mixed statuses, verify denial reason shown only
     for denied items, verify the resubmit button shown for `denied` and `error`
     and for no other status
   - **Test:** a request flagged for manual submission renders as work for a
     person, distinct from both a failure and a pending payer decision
+  - **Test:** the list route writes no `audit_log` row, and the decision route
+    writes one — a regression guard on the field selection above, since the
+    thing that would break it is a clinical field being added to the row
+  - **Test:** the list is filtered by provider — a request belonging to another
+    provider's encounter is absent, and a request with no `provider_id` argument
+    is a 422 rather than an unscoped answer
+  - **Test:** paging with `?cursor=` returns each request exactly once across
+    two pages, including when two rows share a `created_at`
+
+- [ ] **TASK-072b:** Persist why a request needs manual submission
+  - Prerequisite: TASK-061 (which chooses the reason), TASK-072 (which is the
+    screen that wants it)
+  - Service: `services/prior-auth` writes it; `services/track-a-clinical` owns
+    the migration, per the migration-ownership rule
+  - `prior_auth_requests` gains a nullable `manual_submission_reason` column.
+    `mark_manual_submission_required` already receives the label and logs it —
+    it writes it too, in the same statement that sets the status.
+  - **The four labels become a closed vocabulary** rather than the module-level
+    string constants they are today, for the fifth time and the same reason each
+    of the first four converted: the value is compared by string equality, it
+    crosses a service boundary and a `VARCHAR` that constrains nothing, and a
+    dashboard branches on it. `SubmissionMethod`, `SubmissionOutcome`,
+    `AuditAction` and `EHRType` are the precedents; put it beside the first two,
+    in the service that owns the column.
+  - `GET /prior-auth?status=` carries it, and **this does not make that route
+    audit.** A reason names a payer's API capability or our own missing
+    configuration, not a patient — `no-payer-recorded` and
+    `submission-path-not-configured` are facts about us. Check it against the
+    stated field constraint in TASK-072 explicitly rather than appending it.
+  - Backfill is deliberately not attempted: rows already at
+    `manual-submission-required` were marked before the column existed and the
+    reason is only in a log line. A NULL there honestly says "not recorded",
+    which is the same choice made for audit rows written before TASK-051c.
+  - **Test:** each of the four routing outcomes persists its own label, and the
+    dashboard renders a manual request differently for a payer with no API than
+    for an encounter with no launch
+  - **Test:** a row marked before this task reads back NULL and renders as
+    manual submission with no reason given, not as an error
 
 ---
 
@@ -8024,7 +8159,14 @@ helpful."
    unclear, same as any other gap found so far.
 
    **Patient search is built**, by TASK-025b, which reached it first. TASK-070
-   calls it rather than adding it again. The prior-auth list is still open.
+   calls it rather than adding it again.
+
+   **The prior-auth list is TASK-072's, and it goes in `track-a-clinical`.**
+   This constraint's own wording pointed at `services/prior-auth`, which was
+   written before TASK-061 scoped that service as a router that reads its facts
+   over HTTP and owns no table. The service that owns `prior_auth_requests` owns
+   reads of it; see TASK-072 for the full reasoning, and do not re-derive it
+   from this line.
 
    **Patient search is for a standalone launch only.** After an EHR launch the
    EHR has already named the patient and TASK-051 stored it, so the identifier
