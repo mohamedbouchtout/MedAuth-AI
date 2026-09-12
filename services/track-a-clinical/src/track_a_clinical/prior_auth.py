@@ -12,19 +12,31 @@ it has deliberately never had, and the read would then produce no
 ``READ_PRIOR_AUTH`` row anywhere. Same arrangement, and same argument, as the
 note write-back one task earlier.
 
-Everything here is PHI: ``clinical_evidence`` holds excerpts of the provider's
-note. Nothing in this module logs a procedure, a diagnosis or an excerpt — only
-identifiers.
+**TASK-072 added two reads that are not part of that split**, and they are the
+reason this module is no longer server-to-server only: :func:`list_requests`
+backs the provider's dashboard queue, and the decision fields it deliberately
+omits are read one request at a time. A browser calls both.
+
+Everything here is PHI *except the list*: ``clinical_evidence`` holds excerpts of
+the provider's note, and ``denial_reason`` is a payer's account of why this
+patient's care was refused. :func:`list_requests` is the exception by
+construction rather than by luck — the route over it returns no clinical field,
+which is what keeps it out of ``audit_log``, and that selection is stated at
+:class:`~track_a_clinical.api.schemas.PriorAuthListItem` so a later field
+addition has to check against it. Nothing in this module logs a procedure, a
+diagnosis, an excerpt or a denial reason — only identifiers.
 """
 
 from __future__ import annotations
 
+import base64
 import datetime
 import logging
 import uuid
 from typing import Final
 
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from hipaa_logger import AuditAction
@@ -96,6 +108,144 @@ async def load_request(
         return None
     request, encounter = row.tuple()
     return request, encounter
+
+
+#: How many requests one page of the dashboard list carries. A page bound rather
+#: than a tuning constant: it exists so that one request cannot ask for every
+#: prior authorization a provider has ever filed, and the cursor below is how a
+#: caller that genuinely wants them all gets them.
+LIST_PAGE_SIZE: Final = 50
+
+
+class InvalidCursor(ValueError):
+    """The caller sent a `cursor` this service did not issue.
+
+    Raised rather than ignored. Silently restarting from the first page would
+    make a broken pager look like a working one that had run out of rows, which
+    is the same class of failure as an empty retrieval indistinguishable from a
+    payer we hold no policy for.
+    """
+
+
+def encode_cursor(started_at: datetime.datetime, request_id: uuid.UUID) -> str:
+    """Return the opaque cursor naming the last row of a page.
+
+    Both halves of the sort key, because ``started_at`` alone does not identify a
+    row: two visits can begin in the same microsecond, and a cursor that named
+    only the timestamp would either skip the second one or serve it twice.
+
+    Args:
+        started_at: The encounter start time of the page's last row.
+        request_id: That row's primary key.
+
+    Returns:
+        A base64 string carrying both values. Opaque to the caller by
+        construction — it is ours to change, and nothing outside this module
+        parses it.
+    """
+    raw = f"{started_at.isoformat()}|{request_id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+
+def decode_cursor(cursor: str) -> tuple[datetime.datetime, uuid.UUID]:
+    """Return the sort key a cursor names.
+
+    Args:
+        cursor: A value produced by :func:`encode_cursor`.
+
+    Returns:
+        The encounter start time and request id to resume after.
+
+    Raises:
+        InvalidCursor: The value is not one this service issued.
+    """
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+        started_at_text, _, request_id_text = raw.partition("|")
+        return datetime.datetime.fromisoformat(started_at_text), uuid.UUID(request_id_text)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise InvalidCursor(f"Not a cursor this service issued: {cursor!r}") from exc
+
+
+async def list_requests(
+    session: AsyncSession,
+    *,
+    provider_id: uuid.UUID,
+    status: str | None = None,
+    cursor: str | None = None,
+    limit: int = LIST_PAGE_SIZE,
+) -> tuple[list[tuple[PriorAuthRequest, Encounter]], str | None]:
+    """Return one page of a provider's prior-authorization requests, newest first.
+
+    **Scoped to one provider, and the scope is not optional.** The caller cannot
+    ask for every request across every patient: that is a materially wider
+    disclosure than the single-resource routes around it, and TASK-072 requires
+    the narrower bar even though no route here takes a credential in v1. The
+    provider is matched against the *encounter's* ``provider_id``, which is the
+    same column every actor in this service is resolved from.
+
+    **The page carries whole rows and the route narrows them.** Nothing clinical
+    reaches the response — see :class:`~track_a_clinical.api.schemas.PriorAuthListItem`,
+    which fixes the field list and explains why that selection is what keeps the
+    route out of ``audit_log``.
+
+    Ordered by the encounter's ``started_at`` descending with the request id as a
+    tiebreak. ``prior_auth_requests`` carries no timestamp of its own, and the
+    visit's start is the more meaningful date regardless: it is when the
+    encounter this request came out of happened.
+
+    Args:
+        session: The active database session.
+        provider_id: Whose requests to return.
+        status: An exact ``prior_auth_requests.status`` to filter on, or None for
+            every status.
+        cursor: Resume after the row this names, or None for the first page.
+        limit: Maximum rows in the page.
+
+    Returns:
+        The page's rows, and the cursor for the next page — None when this page
+        is the last one.
+
+    Raises:
+        InvalidCursor: The cursor is not one this service issued.
+    """
+    query = (
+        sa.select(PriorAuthRequest, Encounter)
+        .join(Encounter, PriorAuthRequest.encounter_id == Encounter.id)
+        .where(
+            Encounter.provider_id == provider_id,
+            Encounter.deleted_at.is_(None),
+        )
+        .order_by(Encounter.started_at.desc(), PriorAuthRequest.id.desc())
+        # One more than the page, so "is there a next page" is answered by what
+        # came back rather than by a second COUNT query over the same predicate.
+        .limit(limit + 1)
+    )
+
+    if status is not None:
+        query = query.where(PriorAuthRequest.status == status)
+
+    if cursor is not None:
+        last_started_at, last_request_id = decode_cursor(cursor)
+        # Row-wise comparison against the composite sort key: strictly older
+        # visits, plus the ties broken after the id we stopped at. Written as a
+        # tuple so the two halves cannot drift from the ORDER BY above.
+        query = query.where(
+            sa.tuple_(Encounter.started_at, PriorAuthRequest.id)
+            < sa.tuple_(
+                sa.literal(last_started_at, sa.TIMESTAMP(timezone=True)),
+                sa.literal(last_request_id, postgresql.UUID(as_uuid=True)),
+            )
+        )
+
+    rows = [row.tuple() for row in (await session.execute(query)).all()]
+
+    if len(rows) <= limit:
+        return rows, None
+
+    page = rows[:limit]
+    last_request, last_encounter = page[-1]
+    return page, encode_cursor(last_encounter.started_at, last_request.id)
 
 
 #: The statuses a request may be resubmitted from. Both are terminal and
