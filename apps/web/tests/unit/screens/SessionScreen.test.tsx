@@ -318,7 +318,15 @@ describe('ending a visit', () => {
     await waitFor(() => expect(sessions.endVisit).toHaveBeenCalledWith(SESSION_ID));
   });
 
-  it('hands the completed session on, for the note review screen', async () => {
+  /**
+   * The note review screen (TASK-071) needs three identifiers, and this is the
+   * only place all three are known at once: the session comes from
+   * `POST /sessions/start`, the launch and the chart entry from the resolved
+   * subject. They are asserted as three separate named fields because that is
+   * the requirement — CLAUDE.md's "A SMART launch is not an encounter session"
+   * forbids one field standing for two of them.
+   */
+  it('hands the session, the launch and the chart entry on separately', async () => {
     const sessions = sessionsThatWork();
     const { onCompleted } = renderScreen(sessions);
     fireEvent.click(screen.getByTestId('start-visit'));
@@ -328,7 +336,33 @@ describe('ending a visit', () => {
     await waitFor(() => expect(screen.getByTestId('review-note')).toBeInTheDocument());
     fireEvent.click(screen.getByTestId('review-note'));
 
-    expect(onCompleted).toHaveBeenCalledWith({ sessionId: SESSION_ID, jwt: FRESH });
+    expect(onCompleted).toHaveBeenCalledWith({
+      session: { sessionId: SESSION_ID, jwt: FRESH },
+      launchId: 'launch-7',
+      ehrEncounterId: 'Encounter/7',
+    });
+  });
+
+  /**
+   * A standalone launch names no chart entry, and that null is what makes the
+   * review screen report the EHR write as unavailable rather than offering a
+   * button whose only possible answer is 422.
+   */
+  it('reports no chart entry for a visit started without one', async () => {
+    const sessions = sessionsThatWork();
+    const standalone: PatientSource = () =>
+      Promise.resolve({ patientId: SUBJECT.patientId, providerId: SUBJECT.providerId });
+    const { onCompleted } = renderScreen(sessions, standalone);
+    fireEvent.click(screen.getByTestId('start-visit'));
+    await waitFor(() => expect(screen.getByTestId('end-visit')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('end-visit'));
+    await waitFor(() => expect(screen.getByTestId('review-note')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('review-note'));
+
+    expect(onCompleted).toHaveBeenCalledWith(
+      expect.objectContaining({ launchId: null, ehrEncounterId: null }),
+    );
   });
 
   /**

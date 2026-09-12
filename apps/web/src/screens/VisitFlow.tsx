@@ -15,7 +15,8 @@
 import { fixedSource, type FhirApi, type VisitSubject } from '@medauth/fhir-client';
 import { useCallback, useState } from 'react';
 
-import type { Session, SessionsApi } from '../api/sessions';
+import type { SessionsApi } from '../api/sessions';
+import type { CompletedVisit } from '../session/completedVisit';
 
 import { PatientPicker } from './PatientPicker';
 import { SessionScreen } from './SessionScreen';
@@ -23,7 +24,7 @@ import { SessionScreen } from './SessionScreen';
 export interface VisitFlowProps {
   /** The SMART launch this app holds, or null when it holds none. */
   launchId: string | null;
-  onCompleted?: (session: Session) => void;
+  onCompleted?: (visit: CompletedVisit) => void;
   fhir?: FhirApi;
   sessions?: SessionsApi;
 }
