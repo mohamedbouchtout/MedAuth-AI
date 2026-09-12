@@ -7517,7 +7517,7 @@ logic do not change.
       TASK-071 is what receives it. Navigating a provider to a screen that does
       not exist would be worse than saying plainly that the visit is closed.
 
-- [ ] **TASK-071:** Note review + edit UI
+- [x] **TASK-071:** Note review + edit UI
   - App: `apps/web`
   - `GET /notes/{session_id}` (TASK-032) — display generated SOAP note in an
     editable form, one text area per SOAP section. Keyed on the `session_id` the
@@ -7644,6 +7644,67 @@ logic do not change.
   - **Test:** accepting a `comprehend-medical` suggestion re-sends that entry
     with `source: "provider-accepted"` and no `confidence`
 
+  - Built (295 web tests at 92% statements, against the 80% gate; two CORS cases
+    added to `fhir-integration`). Decisions worth knowing before touching this:
+    - **The router is `react-router` 8.3.1, and the app uses four things from
+      it** — `BrowserRouter`, `Routes`/`Route`, `useNavigate`, `useParams`. No
+      data router, no loaders, no nested layouts: there are two routes, and
+      anything more would be scaffolding for screens nobody has needed. Vite's
+      default SPA history fallback is what serves `/notes/:sessionId` on a
+      reload in dev and in `preview`; a production host that serves static files
+      must do the same, which is the one deployment consequence of taking a
+      router at all.
+    - **`BrowserRouter` is mounted in `main.tsx`, not inside `App`.** That keeps
+      the router out of the component under test, so suites drive a route with a
+      `MemoryRouter` — and it keeps `App`'s injected `location`/`history` props
+      meaning what they always meant: the URL the *page booted at*, which is
+      where a claim code lives. Those two notions of "the URL" are deliberately
+      separate, and `tests/unit/App.test.tsx` says so at the point a reader would
+      otherwise think one of them was scaffolding.
+    - **There is no `completed` app state any more; there is a
+      `CompletedVisit`.** The instruction this task started from was to extend
+      the completed state with the session and the launch as separate named
+      fields. Taking the router changed where they live rather than whether they
+      are separate: the session is in the URL, because the screen has to be
+      linkable and `session_id` is the only identifier this service exposes to
+      clients; the launch stays in memory, because it resolves to an EHR access
+      token and must never reach a URL. `CompletedVisit` carries all three
+      identifiers as three named fields and is built in `SessionScreen`, the only
+      place all three are known at once.
+    - **A reload keeps the note and loses the launch, and the screen says which.**
+      That is not a defect worked around — it follows from a `launch_id` being a
+      credential. It is why `writeBackState` has a `no-launch` state distinct
+      from `not-linked`, and why `no-launch` is checked first: after a reload
+      both inputs are gone, and the missing launch is the one a provider can act
+      on.
+    - **The `unrecorded` state outranks everything, including the note's own
+      `filed`.** `EHR_NOTE_RECORD_FAILED` means the document exists on the chart
+      and this system did not record it, so the button must never come back —
+      the next press is a second copy of one visit's note on a patient's chart.
+      Asserted at both levels, and verified by letting a later state supersede it
+      and watching two tests go red.
+    - **Three mutations were run against the finished suite** rather than
+      trusting green: always sending `icd10_codes` (7 tests red), letting a later
+      state outrank an unrecorded write (2 red), and swapping the `no-launch` /
+      `not-linked` ordering (1 red). TASK-070 found three tests that had been
+      passing by coincidence, which is why this is now worth doing deliberately.
+    - **`vitest`'s `waitFor` is not used in `useNote`'s tests.** It polls on real
+      timers and every assertion there is about a hook driven by fake ones; the
+      tests advance the clock explicitly instead, which also states how much time
+      passed rather than hiding it.
+    - **Both new clients stay in `apps/web`**, including `POST /fhir/notes`,
+      which is a `fhir-integration` route that `packages/fhir-client`'s scope
+      note would otherwise claim. There is one consumer — `apps/mobile` has no
+      note review screen — and the established trigger for extraction is a second
+      one. `LAUNCH_ID_HEADER` is imported from that package rather than spelled
+      again, so there is still one definition of the header name.
+    - **`Mark reviewed` is unavailable while edits are unsaved, and says why.**
+      The attestation records what is *stored*; a provider able to attest over an
+      unsaved textarea would be signing something the record does not contain.
+    - No new environment variable, no migration, no new Redis key, no CI change:
+      `API_BASE_URL` and `FHIR_INTEGRATION_URL` were both already bound and read
+      in `apps/web/src/config.ts`, and `apps/web/**` and
+      `services/fhir-integration/**` already select their jobs.
 
 - [ ] **TASK-072:** Prior auth status dashboard
   - App: `apps/web`
