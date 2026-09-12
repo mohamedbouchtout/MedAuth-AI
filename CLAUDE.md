@@ -203,6 +203,18 @@ Bedrock is the only AWS service called during local dev (no local mock available
   against that service.
 - Test files mirror src structure: `src/services/rag.py` → `tests/unit/services/test_rag.py`
 - Minimum 80% coverage on services/packages; CI fails below this
+- **A browser-facing route gets its own preflight case in that service's
+  `test_cors.py`, in the change that makes it browser-facing.** Installed
+  middleware is never evidence that a particular path and method are covered:
+  `packages/cors-policy` fixes the methods and headers repo-wide, so a service
+  can install it correctly and still refuse a browser on a route whose method or
+  header the policy does not list. The full reasoning, and the unlisted-origin
+  counterpart every case needs, are in "CORS and browser reachability" below —
+  this line exists because three consecutive tasks (TASK-041c, TASK-070,
+  TASK-071) each rediscovered the same gap from scratch, which is a sign the
+  rule was not written where someone adding a route would look for it. A route
+  already called from `apps/mobile` still needs a case the first time a browser
+  calls it; mobile preflights nothing.
 
 ### Moto does not implement Comprehend Medical (standing exception)
 "Moto for all AWS mocking" (Known Constraints #3 in TASKS.md) cannot be

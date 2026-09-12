@@ -7545,7 +7545,105 @@ logic do not change.
     suggestions, visibly distinct from the codes the provider is signing;
     accepting one re-sends it with `source: "provider-accepted"`, which is what
     makes it claimable by TASK-060. See CLAUDE.md's shape contract.
+
+  - **This app takes a router, and that is TASK-070's deferred trigger firing
+    rather than a new preference.** `App.tsx` named the condition in terms —
+    "a requirement that the note review screen be linkable or survive a
+    refresh" — and this screen is that requirement. A provider interrupted
+    mid-chart-review is an ordinary event in a clinic rather than an edge case,
+    and a review screen that exists only as an in-memory phase of one visit is
+    lost to any reload. Install the smallest real router rather than
+    hand-rolling `popstate` handling, and give it two routes: the visit flow and
+    `/notes/:sessionId`.
+    - **The claim code is still read above the routes, not by one.** TASK-051f's
+      redirect lands at whatever path `SMART_WEB_RETURN_URL` names, and
+      `launch/inbound.ts` is explicit that this app must not hold a second copy
+      of that setting or discard a completed launch whose path it did not
+      expect. So redemption stays where it is, ahead of routing, and routing
+      only decides what is rendered once no launch is arriving.
+    - **A refresh keeps the note and loses the launch**, which is a real
+      consequence rather than a defect to design around. A `launch_id` resolves
+      to an EHR access token, so `App.tsx` holds it in memory for the life of
+      the page and never persists it; the note is server-side and reloads fine.
+      That makes "no launch in this page" a third distinct reason the EHR write
+      is unavailable, and it is rendered as its own state — see below.
+
+  - **"Write to EHR" is never rendered as a live button that can only fail.**
+    Three states are distinguishable before the provider presses anything, and
+    each says which it is:
+    - **Available** — this page holds a launch and the encounter is linked to a
+      chart entry.
+    - **This visit has no chart entry** — the session was started outside a
+      SMART launch, so `POST /fhir/notes` could only ever answer 422
+      `ENCOUNTER_NOT_LINKED_TO_EHR`. Say that, rather than offering the button
+      and letting the provider discover it.
+    - **This page no longer holds the EHR launch** — the tab was reloaded.
+      Recoverable by launching again from the chart, and that is what it should
+      say.
+    Hiding the control in the last two cases is not the fix: a provider who
+    expected to file a note and sees nothing cannot tell a visit with no chart
+    entry from a broken build. Two different situations get two legible states,
+    which is the same call TASK-032 made server-side in keeping
+    `note_not_generated` distinct from `session_not_found`.
+
+  - **The note is generated asynchronously, so the screen polls.** TASK-030
+    generates it from the `session:ended` signal through a Sonnet call, and this
+    screen is reached by ending a visit — so the first `GET` will usually answer
+    404 `note_not_generated`. Render that distinctly from `session_not_found`
+    ("the note isn't ready" versus "this visit does not exist"), and poll rather
+    than asking the provider to refresh a page whose content arrives on its own
+    within seconds.
+    - **Every 3 seconds, for at most 40 attempts (2 minutes), then a manual
+      "check again".** Both numbers are chosen defaults rather than
+      measurements: nobody has timed a Sonnet SOAP generation over a long
+      encounter transcript, and the ceiling is there so a generation that failed
+      outright stops presenting as one still in progress. Record that provenance
+      beside them so a later reader knows changing them is safe.
+    - Polling stops on the first success and on any failure that is not
+      `note_not_generated` — an unknown session does not become known by asking
+      again.
+
+  - **`App.tsx`'s completed state carries the session and the launch as two
+    named fields.** This screen is the first in the app to hold both at once,
+    and CLAUDE.md's "A SMART launch is not an encounter session" forbids one
+    field named for either. `session_id` keys the note routes; `launch_id` goes
+    in `X-MedAuth-Launch-Id` and nowhere else. The placeholder comment at the
+    completed branch says TASK-071 will replace it — rewrite it in this change
+    rather than leaving a comment this task has falsified.
+
+  - **`POST /fhir/notes` is browser-facing for the first time and gets a CORS
+    preflight case** in `services/fhir-integration/tests/unit/api/test_cors.py`,
+    with the unlisted-origin counterpart. `POST` and `X-MedAuth-Launch-Id` are
+    both already in `packages/cors-policy`'s fixed lists, so this will pass on
+    the first run — that is exactly why it is worth asserting, per the rule now
+    in CLAUDE.md's testing conventions. Verify it by narrowing `ALLOWED_HEADERS`
+    and watching it fail, as TASK-070 did for its two.
+
+  - No new environment variable: `API_BASE_URL` (track-a-clinical) and
+    `FHIR_INTEGRATION_URL` (fhir-integration) are both already bound and read in
+    `apps/web/src/config.ts`.
+
+  - **The notes client stays in `apps/web`.** One consumer — `apps/mobile` has
+    no note review screen — so extracting it would be guessing at what a second
+    one needs. Same trigger as the transcript parser TASK-070 left in place: a
+    genuine second consumer.
+
   - **Test:** load a note, edit a section, save, verify PATCH called with correct diff
+  - **Test:** a PATCH sends only the fields the provider changed — specifically,
+    editing one SOAP section on a note whose `icd10_codes` is `null` sends no
+    `icd10_codes` key at all, rather than `null` or `[]`
+  - **Test:** "Mark reviewed" sends `reviewed_by_provider: true`, and merely
+    loading the screen sends no PATCH
+  - **Test:** a `note_not_generated` answer renders as "not ready" and polls; a
+    `session_not_found` answer renders differently and does not poll
+  - **Test:** the EHR write is unavailable with an explanation on a visit with no
+    `ehr_encounter_id` and on a page holding no launch, and the two say
+    different things
+  - **Test:** 409 renders the note as already filed rather than as an error, and
+    `EHR_NOTE_RECORD_FAILED` does not leave the button pressable
+  - **Test:** accepting a `comprehend-medical` suggestion re-sends that entry
+    with `source: "provider-accepted"` and no `confidence`
+
 
 - [ ] **TASK-072:** Prior auth status dashboard
   - App: `apps/web`
