@@ -1,5 +1,5 @@
 /**
- * The two routes this app has, and why the note one is where it is (TASK-071).
+ * The routes this app has, and why each is where it is (TASK-071, TASK-072).
  *
  * TASK-070 deferred installing a router and named the condition that would end
  * the deferral: "a requirement that the note review screen be linkable or
@@ -12,6 +12,12 @@
  * can read perfectly well. What they lose by arriving that way is the launch,
  * which is a credential and is never persisted; the chart write says so rather
  * than failing when it is pressed.
+ *
+ * TASK-072's queue follows the same placement for a different reason. It is
+ * outside the gate too, but what it does without a launch is say that signing in
+ * through the EHR is what fills it — because unlike a note, a queue *does* need
+ * an identity, and an empty list would be a claim about the provider's work
+ * rather than about this app's sign-in state.
  */
 
 import { render, screen, waitFor } from '@testing-library/react';
@@ -116,5 +122,30 @@ describe('which note the route reads', () => {
     renderRoute(<NoteReviewRoute completed={same} launchId="launch-7" />);
 
     await waitFor(() => expect(screen.getByTestId('write-to-ehr')).toBeInTheDocument());
+  });
+});
+
+describe('the prior-auth route', () => {
+  /**
+   * The destination TASK-070 predicted when it deferred the router: a screen a
+   * provider arrives at rather than walks to through a visit.
+   */
+  it('renders the queue rather than the visit flow', async () => {
+    renderAt('/prior-auth');
+
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: 'Prior authorizations' })).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId('no-issuer')).not.toBeInTheDocument();
+  });
+
+  it('says what it needs instead of showing an empty queue with no launch', async () => {
+    // An empty list here would tell a provider they have no outstanding
+    // authorizations, which is a different claim from "you are not signed in"
+    // and might be false.
+    renderAt('/prior-auth');
+
+    await waitFor(() => expect(screen.getByTestId('queue-unavailable')).toBeInTheDocument());
+    expect(screen.queryByTestId('queue-empty')).not.toBeInTheDocument();
   });
 });
