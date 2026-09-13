@@ -15,6 +15,15 @@ import { defineConfig } from 'vitest/config';
  * covered like everything else.
  */
 export default defineConfig({
+  // The repository root, not `apps/web`. `.env.example` at the root ships every
+  // `VITE_*` name this app reads, and the runbook tells a developer to copy it
+  // to `.env.local` there — so without this, every one of those values is
+  // silently ignored and the app falls back to the localhost defaults in
+  // `src/config.ts`. That failure is invisible: the app runs, and it runs
+  // against whatever the defaults happen to name rather than what was
+  // configured. One env file for the whole monorepo is the arrangement the root
+  // `.env.example` already assumes; this is what makes it true for Vite.
+  envDir: '../..',
   plugins: [react(), tailwindcss()],
   build: {
     // Never inline the AudioWorklet processor. It is imported with `?url` and
