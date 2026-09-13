@@ -752,6 +752,45 @@ Claude Code should read this before starting any task to understand current stat
     small document still costs one round trip. Full track-b-rag suite: 734
     passed, 93 skipped.
 
+- [ ] **TASK-009:** An injected beacon token defeats `content_hash` on every
+  Aetna document
+  - Found while seeding the dev corpus in TASK-008. Every `text/html` document
+    reports `updated` on every run while every `application/pdf` one correctly
+    reports `unchanged` — so the whole Aetna half of the corpus is re-chunked
+    and re-embedded each time, and `updated` stops meaning "the payer revised
+    the policy".
+  - **Cause, confirmed by fetching one page twice.** The two responses are
+    byte-identical in length and differ on exactly one line: an Akamai mPulse
+    (`s.go-mpulse.net/boomerang/`) RUM `<script>` the CDN injects with a fresh
+    per-request token. The policy text is unchanged. `extract_text()` discards
+    the script entirely, so the *indexed* content is identical every time —
+    only the digest moves.
+  - **This is the failure ADR-0021 already named, applied to the wrong payer.**
+    That ADR rejected crawling rendered CMS pages because "each response carries
+    a per-request CSP nonce, so a digest taken over one changes on every fetch",
+    and then `scripts/seed-policies.py` fetched rendered Aetna pages, which have
+    the same property for a different reason. The reasoning was sound and was
+    simply not carried across.
+  - **Do not fix by hashing the extracted text.** ADR-0021 decided the digest is
+    over raw bytes deliberately, so that two source files with identical text
+    stay distinct documents for audit purposes. Reversing that is an ADR-level
+    change and needs the reversal recorded at the original rule, not a quiet
+    edit to the hash input.
+  - The likely shape is a narrow, declared normalisation *before* hashing for
+    `text/html` only — strip `<script>` and `<style>` elements, which carry no
+    policy text and are already discarded by `markup.py` — leaving the raw-bytes
+    rule intact for PDFs. That is a smaller claim than "hash the text" and keeps
+    two genuinely different HTML files distinct.
+  - **Check the real cost before choosing.** Re-embedding the Aetna documents is
+    about 1,800 chunks per run today. That is minutes locally and is the
+    recurring cost of the nightly scraper, so the question is whether it is
+    cheaper than the risk of a normalisation that hides a real revision.
+  - **Test:** the same Aetna URL fetched twice ingests as `unchanged` the second
+    time
+  - **Test:** two HTML documents differing only inside a `<script>` are one
+    document; two differing in policy prose remain two
+  - **Test:** the PDF path still hashes raw bytes, unchanged
+
 ---
 
 ## Phase 1 — RAG Pipeline (Build This First)
