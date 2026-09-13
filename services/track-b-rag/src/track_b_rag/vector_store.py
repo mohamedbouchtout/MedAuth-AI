@@ -61,6 +61,20 @@ PAYLOAD_FIELDS: Final = ("policy_id", "payer", "plan_type", "state", "chunk_inde
 #: grows.
 INDEXED_PAYLOAD_FIELDS: Final = ("policy_id", "payer", "state")
 
+#: How many points go into one Qdrant upsert request.
+#:
+#: Qdrant's HTTP API rejects a request body over 32 MiB. One point is a
+#: 1024-dimensional vector plus its chunk text, which serialises to roughly 19KB
+#: of JSON, so the cap is reached somewhere around 1,700 points — see
+#: :func:`upsert_points` for the failure this produced before it batched.
+#:
+#: 500 is chosen to sit a comfortable multiple below that rather than just under
+#: it: about 9.5MB per request, so the margin absorbs a larger chunk size, a
+#: wider embedding model, or an extra payload field without anyone having to
+#: recompute this. The cost of a smaller batch is more round trips to a local
+#: service; the cost of too large a one is a failed ingest with nothing indexed.
+UPSERT_BATCH_SIZE: Final = 500
+
 
 @lru_cache(maxsize=1)
 def get_client() -> QdrantClient:
@@ -269,15 +283,35 @@ def delete_policy_points(client: QdrantClient, name: str, policy_id: str) -> Non
 
 
 def upsert_points(client: QdrantClient, name: str, points: Sequence[PointStruct]) -> None:
-    """Write points into the collection, waiting until they are searchable.
+    """Write points into the collection in batches, waiting until each is searchable.
 
     ``wait=True`` because the ingestion endpoint reports how many chunks it
     indexed: returning before the write is visible would make that count a claim
     about the near future rather than a fact, and the dedup tests assert on it.
+    It is passed on every batch, so that property holds for the whole write and
+    not merely for the last part of it.
+
+    **The batching is a bug fix, not a tidiness measure.** Qdrant's HTTP API
+    rejects any request body over 32 MiB, and this function used to send every
+    point of a document in one call. A point is a 1024-dimensional vector plus
+    its chunk text, which serialises to roughly 19KB of JSON, so a document past
+    about 1,700 chunks exceeded the cap and the whole ingest failed:
+
+        UnexpectedResponse: 400 (Bad Request)
+        {"status":{"error":"JSON payload (50746327 bytes) is larger than
+         allowed (limit: 33554432 bytes)."}}
+
+    That is not a rare shape in this corpus. Payer policies are code lists: the
+    Aetna back-pain bulletin that found this is one document, and the BCBSMA
+    Carelon extremity imaging PDF chunks into 4,920. The failure surfaced as a
+    500 from ``POST /policies/ingest`` with nothing indexed, which reads as the
+    document being unparseable rather than as one request being too large.
     """
     if not points:
         return
-    client.upsert(collection_name=name, points=list(points), wait=True)
+    for start in range(0, len(points), UPSERT_BATCH_SIZE):
+        batch = list(points[start : start + UPSERT_BATCH_SIZE])
+        client.upsert(collection_name=name, points=batch, wait=True)
 
 
 def count_policy_points(client: QdrantClient, name: str, policy_id: str) -> int:

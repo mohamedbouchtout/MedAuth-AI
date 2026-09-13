@@ -23,6 +23,7 @@ from track_b_rag.vector_store import (
     INDEXED_PAYLOAD_FIELDS,
     PAYLOAD_FIELDS,
     POINT_NAMESPACE,
+    UPSERT_BATCH_SIZE,
     build_points,
     count_policy_points,
     delete_policy_points,
@@ -316,6 +317,68 @@ def test_upserting_nothing_touches_qdrant_not_at_all() -> None:
     upsert_points(client, COLLECTION, [])  # type: ignore[arg-type]
 
     assert client.upserted == []
+
+
+def _many_points(count: int) -> list[object]:
+    """Build ``count`` cheap points. The vectors are 1-dimensional on purpose —
+    this asserts about batching, not about payload size."""
+    return build_points(
+        policy_id="L1",
+        payer="CMS",
+        plan_type=None,
+        state=None,
+        chunks=[f"chunk {i}" for i in range(count)],
+        vectors=[[float(i)] for i in range(count)],
+    )
+
+
+def test_a_large_document_is_upserted_in_batches() -> None:
+    """Qdrant rejects a request body over 32 MiB, and a long policy exceeds it.
+
+    A payer code list chunks into thousands of points, and one point is a
+    1024-dimensional vector plus its text — so sending them in a single call
+    failed the whole ingest with a 400 and nothing indexed. This is the
+    regression test for that: it counts requests, which is the only thing that
+    distinguishes the fix from the bug.
+    """
+    client = FakeClient()
+    points = _many_points(UPSERT_BATCH_SIZE * 2 + 1)
+
+    upsert_points(client, COLLECTION, points)  # type: ignore[arg-type]
+
+    assert len(client.upserted) == 3
+    assert [len(batch) for batch in client.upserted] == [
+        UPSERT_BATCH_SIZE,
+        UPSERT_BATCH_SIZE,
+        1,
+    ]
+
+
+def test_batching_writes_every_point_exactly_once_and_in_order() -> None:
+    """Batching must not drop, duplicate or reorder a chunk.
+
+    Worth asserting separately from the request count: an off-by-one in the
+    slice would still produce the right number of requests while silently
+    losing a chunk, and a lost chunk is policy text that retrieval can never
+    find again.
+    """
+    client = FakeClient()
+    points = _many_points(UPSERT_BATCH_SIZE + 7)
+
+    upsert_points(client, COLLECTION, points)  # type: ignore[arg-type]
+
+    written = [point for batch in client.upserted for point in batch]
+    assert written == list(points)
+
+
+def test_a_document_that_fits_in_one_batch_still_makes_one_request() -> None:
+    """The fix must not cost a round trip for the ordinary small document."""
+    client = FakeClient()
+    points = _many_points(UPSERT_BATCH_SIZE)
+
+    upsert_points(client, COLLECTION, points)  # type: ignore[arg-type]
+
+    assert len(client.upserted) == 1
 
 
 def test_counting_filters_to_the_one_policy() -> None:
