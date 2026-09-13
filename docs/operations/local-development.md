@@ -34,8 +34,25 @@ Order matters: every service depends on `hipaa-logger`, so its `audit_log`
 migration runs before any service-owned one
 ([ADR-0007](../adr/0007-hipaa-logger-owns-its-table.md)).
 
-> `scripts/setup-dev.sh` and `scripts/seed-synthea.sh` are **stubs until
-> TASK-052**. The commands above are what they will eventually wrap.
+## Bringing it up
+
+```powershell
+./scripts/dev-up.ps1              # all six services + the web app
+./scripts/dev-up.ps1 -Background  # same, logging to .dev-logs/ instead of windows
+./scripts/dev-down.ps1            # stop them; leaves the compose stack up
+```
+
+The script exists for one reason, and it is the direct consequence of the
+Configuration rule below: no service reads a `.env` file, so the values have to
+be in the process environment before a service starts, and Windows has no
+`source .env.local`. `dev-up.ps1` is that missing step. It also refuses to start
+anything when `JWT_SIGNING_KEY`, `DATABASE_URL` or `SMART_WEB_RETURN_URL` is
+empty, because the services that need those refuse to start anyway and a named
+failure beats three tracebacks.
+
+An empty variable in `.env.local` is left unexported rather than exported as an
+empty string, matching how every `Settings` class already reads one — see
+Configuration below.
 
 ## Backing services
 
@@ -65,19 +82,38 @@ docker compose up -d --wait postgres redis qdrant
 
 ```bash
 cd services/track-b-rag
-uv run uvicorn src.main:app --reload --port 8002
+uv run uvicorn track_b_rag.main:app --reload --port 8002
 ```
 
-| Port | Service |
-|---|---|
-| 8001 | audio-ingestion |
-| 8002 | track-b-rag |
-| 8003 | track-a-clinical |
-| 8004 | fhir-integration *(scaffold)* |
-| 8005 | nudge-service *(scaffold)* |
+**The module path differs per service, and getting it wrong starts the wrong
+service rather than failing.** Three services have renamed their package;
+three still declare `packages = ["src"]` and therefore install one shared
+top-level `src` into the workspace venv, where whichever sorts first wins
+([ADR-0002](../adr/0002-one-python-uv-workspace.md)). `src.main:app` resolves
+correctly for those three *only because* uvicorn is launched from that service's
+own directory, which puts it ahead of the installed one. From anywhere else it
+loads audio-ingestion.
 
-Every service has working local-dev defaults for its settings, so it starts
-against `docker compose up` with no environment set at all.
+| Port | Service | uvicorn target |
+|---|---|---|
+| 8001 | audio-ingestion | `src.main:app` |
+| 8002 | track-b-rag | `track_b_rag.main:app` |
+| 8003 | track-a-clinical | `track_a_clinical.main:app` |
+| 8004 | fhir-integration | `src.main:app` |
+| 8005 | nudge-service | `src.main:app` |
+| 8007 | prior-auth | `prior_auth.main:app` |
+
+Most settings have working local-dev defaults, but **four have none and the
+services that need them refuse to start without them**, deliberately:
+
+| Variable | Needed by | Why it has no default |
+|---|---|---|
+| `JWT_SIGNING_KEY` | audio-ingestion, track-a-clinical, nudge-service | A signing key with a default is a signing key everyone shares. Minimum 32 bytes. |
+| `DATABASE_URL` | every service with a database | Guessing a database to write PHI into is worse than refusing. |
+| `SMART_WEB_RETURN_URL` | fhir-integration | Validated at startup so a bad value surfaces there rather than at the end of an OAuth redirect chain, after a human has already logged in. |
+| `SMART_MOBILE_RETURN_URI` | fhir-integration | The same, for the mobile return target. |
+
+`dev-up.ps1` checks the first three before it starts anything.
 
 The first `track-b-rag` request that embeds anything downloads
 `BAAI/bge-large-en-v1.5` — roughly 1.3 GB — and takes seconds to load. It is a
@@ -102,12 +138,66 @@ so one value works for every consumer.
 
 ```bash
 uv run python scripts/seed-policies.py         # commercial payer policies -> Qdrant
+uv run python -m policy_scraper                # Medicare LCDs -> Qdrant
 uv run python scripts/seed-test-encounters.py  # encounter rows for manual testing
-./scripts/seed-synthea.sh                      # stub until TASK-052
+./scripts/seed-synthea.sh                      # 100 synthetic patients -> HAPI FHIR
+```
+
+`seed-policies.py` needs `track-b-rag` already running: it uploads documents and
+the service does the work.
+
+**Budget a long time for the first run — it is CPU-bound, not network-bound.**
+Ingest chunks each document at 800 characters and embeds every chunk locally with
+`BAAI/bge-large-en-v1.5`. The corpus is payer code lists, and they are enormous:
+the BCBSMA Carelon extremity imaging PDF alone is 2.7 million characters, which
+is **4,920 chunks** from one document. With no GPU that is minutes per document
+and can be the better part of an hour for the corpus. It is a one-time cost —
+ingest's `content_hash` dedup makes every later run a no-op for unchanged
+documents — but the first run looks like a hang if you are not expecting it.
+Watch it progress with:
+
+```bash
+curl -s localhost:6333/collections/insurance_policies | grep -o '"points_count":[0-9]*'
 ```
 
 Seed and ingest under the **publishing licensee's** payer slug (`bcbs-ma`), never
 a generic family bucket ([ADR-0022](../adr/0022-canonical-payer-slugs.md)).
+
+## Driving an encounter without AWS
+
+Transcribe Medical has no local mock, so with no AWS credentials there is no way
+to get a transcript onto the bus from a microphone — and everything downstream of
+the transcript is the product. `scripts/demo-encounter.py` closes that gap by
+publishing a scripted encounter onto `transcription:{session_id}` itself, which
+is the same channel and the same payload shape `audio-ingestion` publishes under:
+
+```bash
+uv run python scripts/demo-encounter.py                      # start a new session
+uv run python scripts/demo-encounter.py --session-id <uuid>  # attach to a UI visit
+uv run python scripts/demo-encounter.py --speed 0            # no pacing delay
+```
+
+It stands in for a producer rather than mocking a service, so everything it
+exercises is real: keyword detection, CPT resolution, the dedup claim, the
+policy dispatch, the `clinical_nudges` write and the WebSocket relay all run
+exactly as they do from a microphone.
+
+What it cannot substitute for is Bedrock. With no credentials the nudge is the
+safe fallback — `requires_auth` true, `missing_criteria` empty, "confirm
+manually" — and **seeding the corpus does not change that**, because retrieval
+feeds Sonnet and it is Sonnet that produces the criteria.
+
+**The CRD tier does not rescue it either, which is worth stating because it looks
+like it should.** The Reference Implementation is local, needs no AWS and is
+running. But CRD is specified as a patient-specific coverage check and our
+request carries a placeholder subject by design
+([ADR-0018](../adr/0018-crd-request-carries-no-patient.md)), so the RI answers
+"unable to process" — no determination, and the RAG path answers alone. Verified
+by running it. TASK-059 is what closes that, and it is gated on real `Patient`
+and `Coverage` resources.
+
+So a local demo without AWS proves the spine, not the intelligence. That is a
+real and useful thing to be able to see; it is just not the whole product.
 
 ## Resetting the vector store
 
