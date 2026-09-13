@@ -174,6 +174,30 @@ main() {
         selected+=("services/$s")
       fi
     done
+
+    # The seed scripts are tested from the service whose endpoint each one
+    # drives, not from a suite of their own: scripts/seed-policies.py from
+    # services/track-b-rag (it calls POST /policies/ingest) and
+    # scripts/seed-test-encounters.py from services/track-a-clinical (it writes
+    # that service's tables through its mapped classes). Those suites import the
+    # script file directly by path.
+    #
+    # Nothing under scripts/ selected any job before this, so editing one of
+    # them broke its own test with CI green — the same silent hole as the
+    # OpenAPI specs above, which is the precedent this copies. Same rule once
+    # more: a test that guards two things has to re-run when either of them
+    # moves.
+    #
+    # Only the two scripts that have tests are listed. scripts/demo-encounter.py
+    # and the two dev-*.ps1 launchers deliberately select nothing, because
+    # nothing tests them — listing them here would claim a coverage that does
+    # not exist. Add a line when a script gains a test, in the same change.
+    if changed_matches '^scripts/seed-policies\.py$'; then
+      selected+=("services/track-b-rag")
+    fi
+    if changed_matches '^scripts/seed-test-encounters\.py$'; then
+      selected+=("services/track-a-clinical")
+    fi
   fi
 
   # Several rules above can select the same member — a service whose own
