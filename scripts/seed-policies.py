@@ -65,6 +65,32 @@ USER_AGENT: Final = "MedAuthAI-PolicyScraper/1.0 (+mohamedbouchtout@gmail.com)"
 DELAY_SECONDS: Final = 1.5
 TIMEOUT_SECONDS: Final = 60.0
 
+#: Ingest gets its own, much longer budget, and it is not the same kind of wait
+#: as the fetch above.
+#:
+#: Fetching is a network round trip to a payer's web server and 60s is generous
+#: for one. ``POST /policies/ingest`` is CPU-bound work on this machine: it
+#: chunks the document and embeds every chunk with ``BAAI/bge-large-en-v1.5``
+#: locally, and a long policy PDF is hundreds of chunks. On a laptop with no GPU
+#: that runs for minutes, so the fetch timeout applied to ingest fails on the
+#: first real document -- which is what it did, as an uncaught ``ReadTimeout``
+#: that took the whole run down with it.
+#:
+#: The number is measured rather than guessed, because the first value here was
+#: guessed and was wrong. 900s came from a throughput measurement on this
+#: machine -- 7.4 chunks/s with the service under load, so 4,920 chunks is about
+#: 11 minutes -- and both Carelon documents still timed out at 15. The estimate
+#: was of embedding alone; a real ingest also parses a 7.6MB PDF, chunks 2.7M
+#: characters and writes to Qdrant, and it does all of that while competing with
+#: whatever else holds the CPU.
+#:
+#: So: an hour, which is not a throughput estimate at all. It is a bound chosen
+#: to be far larger than any single document in this corpus can plausibly need,
+#: on the principle that the only thing this timeout must still catch is an
+#: ingest that is genuinely stuck rather than one that is merely slow. Raising
+#: it costs nothing when documents succeed; too low a value costs the corpus.
+INGEST_TIMEOUT_SECONDS: Final = 3600.0
+
 DEFAULT_TRACK_B_RAG_URL: Final = "http://localhost:8002"
 
 
@@ -321,11 +347,24 @@ async def seed_one(
     if not body.strip():
         raise SeedFailed(f"{policy.policy_id} fetched as an empty document")
 
-    response = await ingest_client.post(
-        f"{base_url}/policies/ingest",
-        data=_form_fields(policy),
-        files={"file": (policy.filename, body, policy.content_type)},
-    )
+    # The transport failure is converted here rather than left to propagate.
+    # `seed()` deliberately keeps going when one document fails -- a payer
+    # reorganising a single URL must not cost the whole corpus -- and it does
+    # that by catching `SeedFailed`. An `httpx` error escaping this function
+    # walks straight past that handler and aborts the run, which is precisely
+    # what a slow ingest used to do.
+    try:
+        response = await ingest_client.post(
+            f"{base_url}/policies/ingest",
+            data=_form_fields(policy),
+            files={"file": (policy.filename, body, policy.content_type)},
+        )
+    except httpx.HTTPError as exc:
+        raise SeedFailed(
+            f"Ingest of {policy.policy_id} did not complete: {exc!r}. "
+            f"Is track-b-rag running on {base_url}?"
+        ) from exc
+
     if response.status_code != httpx.codes.OK:
         raise SeedFailed(
             f"Ingest of {policy.policy_id} failed with HTTP {response.status_code}: "
@@ -361,7 +400,7 @@ async def seed(base_url: str, policies: tuple[SeedPolicy, ...] = SEED_POLICIES) 
             delay_seconds=DELAY_SECONDS,
             timeout_seconds=TIMEOUT_SECONDS,
         ) as fetcher,
-        httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as ingest_client,
+        httpx.AsyncClient(timeout=INGEST_TIMEOUT_SECONDS) as ingest_client,
     ):
         for policy in policies:
             try:
