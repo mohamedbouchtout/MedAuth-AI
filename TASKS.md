@@ -713,6 +713,17 @@ Claude Code should read this before starting any task to understand current stat
     resulting `httpx` error escaped `seed_one`, walking past the per-document
     handler that exists so one bad URL cannot cost the corpus. Ingest now has
     its own budget and its transport failures become `SeedFailed`.
+  - **`upsert_points` exceeded Qdrant's 32 MiB request cap**, found by seeding
+    the corpus for the first time. It sent every point of a document in one
+    call, and a point is a 1024-dimensional vector plus its chunk text — about
+    19KB of JSON — so a document past roughly 1,700 chunks was rejected with
+    `JSON payload (50746327 bytes) is larger than allowed` and nothing indexed.
+    Not a rare shape here: payer policies are code lists, and the BCBSMA Carelon
+    extremity PDF chunks into 4,920. It surfaced as a 500 from
+    `POST /policies/ingest`, which reads as an unparseable document rather than
+    as one oversized request. Batched at 500 points, which is a comfortable
+    multiple below the cap rather than just under it, so a larger chunk size or
+    a wider embedding model cannot silently re-break it.
   - **A change under `scripts/` selected no CI job**, while
     `services/track-b-rag/tests/integration/test_seed_policies.py` tests one of
     those scripts by path. Editing it broke its own test with CI green — the
@@ -734,6 +745,12 @@ Claude Code should read this before starting any task to understand current stat
     nothing. 76 passed.
   - **Test:** `test_seed_policies.py` still passes against the retimed script
     (75 passed, 13 live-gated skips)
+  - **Test:** the Qdrant batching has three cases, mutation-tested — restoring
+    the single call fails the batching one. The other two cover what a request
+    count alone would miss: that nothing is dropped, duplicated or reordered
+    (a lost chunk is policy text retrieval can never find again), and that a
+    small document still costs one round trip. Full track-b-rag suite: 734
+    passed, 93 skipped.
 
 ---
 
