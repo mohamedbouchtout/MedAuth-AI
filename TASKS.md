@@ -745,6 +745,12 @@ Claude Code should read this before starting any task to understand current stat
     nothing. 76 passed.
   - **Test:** `test_seed_policies.py` still passes against the retimed script
     (75 passed, 13 live-gated skips)
+  - **End state: the corpus seeds completely.** 13 of 13 documents, 12,378
+    Qdrant points, 13 `insurance_policies` rows across two payer slugs
+    (`aetna` 9, `bcbs-ma` 4). A policy query for `bcbs-ma/commercial/MA`
+    CPT 73721 now reaches Bedrock and fails only on
+    `ProfileNotFound: medauth-dev` — the credential gap — rather than on an
+    empty retrieval. That is the whole pipeline proven up to the AWS boundary.
   - **Test:** the Qdrant batching has three cases, mutation-tested — restoring
     the single call fails the batching one. The other two cover what a request
     count alone would miss: that nothing is dropped, duplicated or reordered
