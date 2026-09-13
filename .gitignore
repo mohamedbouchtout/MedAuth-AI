@@ -121,3 +121,6 @@ transcripts/
 .DS_Store
 Thumbs.db
 *.swp
+
+# Logs from scripts/dev-up.ps1 -Background
+.dev-logs/
