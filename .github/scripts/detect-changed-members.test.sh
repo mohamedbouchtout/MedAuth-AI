@@ -67,7 +67,29 @@ assert_members 'two specs select both services' \
   "$(printf 'docs/api/track-b-rag.yaml\ndocs/api/audio-ingestion.yaml')" \
   '["services/audio-ingestion","services/track-b-rag"]'
 
+section 'seed scripts are tested from the service they drive'
+assert_members 'seed-policies.py selects track-b-rag' \
+  'scripts/seed-policies.py' '["services/track-b-rag"]'
+assert_members 'seed-test-encounters.py selects track-a-clinical' \
+  'scripts/seed-test-encounters.py' '["services/track-a-clinical"]'
+# The pairing has to survive alongside the rules that fan out, or a change
+# touching both would quietly drop one of them.
+assert_members 'seed-policies.py alongside its own service stays deduped' \
+  "$(printf 'scripts/seed-policies.py\nservices/track-b-rag/src/track_b_rag/ingestion.py')" \
+  '["services/track-b-rag"]'
+# A script nothing tests must select nothing. Selecting a service for it would
+# claim a coverage that does not exist, which is the same lie in the other
+# direction as the under-selection this suite exists to catch.
+assert_members 'demo-encounter.py selects nothing' \
+  'scripts/demo-encounter.py' '[]'
+assert_members 'the dev launcher selects nothing' \
+  'scripts/dev-up.ps1' '[]'
+
 section 'must not over-select — the anchors are what make these pass'
+assert_members 'a nested lookalike seed path selects nothing' \
+  'services/x/scripts/seed-policies.py' '[]'
+assert_members 'a seed script suffix selects nothing' \
+  'scripts/seed-policies.py.bak' '[]'
 assert_members 'an unrelated docs file selects nothing' \
   'docs/adr/0003-redis-pubsub-not-kafka.md' '[]'
 assert_members 'a spec for a service with no job selects nothing' \
