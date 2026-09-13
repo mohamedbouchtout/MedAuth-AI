@@ -67,17 +67,35 @@ configured with the `medauth-dev` profile.
 
 ```bash
 cp .env.example .env.local     # fill in; never commit this file
-docker compose up -d           # postgres, redis, qdrant, HAPI FHIR
+docker compose up -d           # postgres, redis, qdrant, HAPI FHIR, CRD RI
 uv sync --all-packages         # install every Python workspace member
 npm install                    # install the frontends
 ```
 
-Run a single service:
+Then bring the whole thing up — this loads `.env.local` into the environment,
+starts all six services and the web app, and waits for their health endpoints:
+
+```powershell
+./scripts/dev-up.ps1           # Windows; ./scripts/dev-down.ps1 to stop
+```
+
+Open <http://localhost:5173>. To watch the nudge pipeline run without AWS
+credentials, play a scripted encounter onto the transcript bus:
+
+```bash
+uv run python scripts/demo-encounter.py
+```
+
+Run a single service by hand:
 
 ```bash
 cd services/track-b-rag
-uv run uvicorn src.main:app --reload --port 8002
+uv run uvicorn track_b_rag.main:app --reload --port 8002
 ```
+
+The module path is **not** the same for every service, because only some have
+renamed their package away from a bare `src`. See the table in
+[docs/operations/local-development.md](./docs/operations/local-development.md#running-a-service).
 
 ### Local ports
 
@@ -86,9 +104,11 @@ uv run uvicorn src.main:app --reload --port 8002
 | 8080 | HAPI FHIR (synthetic EHR) | 5432 | PostgreSQL |
 | 8001 | audio-ingestion | 6379 | Redis |
 | 8002 | track-b-rag | 6333 | Qdrant |
-| 8003 | track-a-clinical | — | — |
+| 8003 | track-a-clinical | 8006 | Da Vinci CRD RI (simulated payer) |
 | 8004 | fhir-integration | — | — |
 | 8005 | nudge-service | — | — |
+| 8007 | prior-auth | — | — |
+| 5173 | web (Vite dev server) | — | — |
 
 ## Stack
 

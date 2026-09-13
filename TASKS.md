@@ -671,6 +671,70 @@ Claude Code should read this before starting any task to understand current stat
       without blocking a merge. Both are in the list now. Strictly outside this
       task's scope, kept because it is the same silent-hole defect one layer up.
 
+- [x] **TASK-008:** Make the stack runnable and demonstrable without AWS
+  - Built. The repository reached Phase 7 with every service implemented and no
+    way for a developer to watch any of it run: the documented start commands
+    were wrong, four settings had no defaults and no loader, and the one input
+    the whole product hangs off — a transcript — could not be produced without
+    AWS Transcribe Medical, which has no local mock.
+  - **`scripts/dev-up.ps1` / `dev-down.ps1`** load `.env.local` into the process
+    environment and start all six services plus Vite. The loader exists because
+    of the Configuration rule, not in spite of it: no service reads a `.env`
+    file, which is correct for a system handling PHI and leaves Windows with no
+    `source`. An empty variable is left unexported rather than exported as `""`,
+    matching how every `Settings` class already reads one.
+  - **`scripts/demo-encounter.py`** publishes a scripted encounter onto
+    `transcription:{session_id}`, standing in for `audio-ingestion` rather than
+    mocking anything. It imports that service's own `encode_segment`, so what it
+    publishes is the shape the real producer publishes, and asserts the import
+    resolved to audio-ingestion — three services still install a top-level `src`
+    and a reshuffle would otherwise publish a payload no consumer understands.
+  - **Verified end to end with no AWS credentials:** the scripted knee-MRI
+    mention raised one nudge, CPT 73721, written to `clinical_nudges` and
+    relayed over the WebSocket. Detection, CPT resolution, the dedup claim, the
+    policy dispatch and the relay are all real.
+  - **What a no-AWS run cannot show, stated so nobody reads the fallback as a
+    bug:** the nudge is the safe fallback, and **seeding the corpus does not
+    change that** — retrieval feeds Sonnet, and Sonnet is what produces the
+    criteria. The CRD tier does not rescue it either, which is the
+    counter-intuitive part: the Reference Implementation is local and needs no
+    AWS, but our request carries a placeholder subject by design (ADR-0018), so
+    it answers "unable to process". Verified by running it. TASK-059 is what
+    closes that.
+  - **`apps/web` never read `.env.local`.** Vite resolves env files against its
+    own root, so every `VITE_*` value in the repository-root file this repo tells
+    you to create was silently ignored and the app ran on the fallbacks in
+    `src/config.ts`. `envDir` now points at the root. The failure was invisible
+    by construction — a configured app and an unconfigured one both just run.
+  - **Two real bugs in `scripts/seed-policies.py`**, both hit on first use. The
+    fetch timeout was being applied to ingest, which is CPU-bound local
+    embedding rather than a network round trip — the BCBSMA Carelon PDF is 2.7M
+    characters and 4,920 chunks, so it blew a 60s budget every time. And the
+    resulting `httpx` error escaped `seed_one`, walking past the per-document
+    handler that exists so one bad URL cannot cost the corpus. Ingest now has
+    its own budget and its transport failures become `SeedFailed`.
+  - **A change under `scripts/` selected no CI job**, while
+    `services/track-b-rag/tests/integration/test_seed_policies.py` tests one of
+    those scripts by path. Editing it broke its own test with CI green — the
+    same silent hole as the `docs/api` specs, and the same rule: a test that
+    guards two things must re-run when either moves. Only the two scripts that
+    have tests are listed; `demo-encounter.py` and the launchers select nothing,
+    because claiming coverage that does not exist is the same lie in the other
+    direction.
+  - **Not fixed here, and worth knowing before the AWS step:** Docker Desktop's
+    port proxy wedged twice during this work — Redis, Qdrant and the CRD RI each
+    reported healthy to their in-container probes while refusing connections
+    from the host, which surfaces as every service reporting a dependency error
+    at once. `docker compose restart <service>` clears it. Nothing in this
+    repository can detect it, because from inside the container nothing is
+    wrong.
+  - **Test:** `detect-changed-members.test.sh` gains seven cases — each seed
+    script selects its own service, the pairing survives alongside a change to
+    that service, and the untested scripts plus two lookalike paths select
+    nothing. 76 passed.
+  - **Test:** `test_seed_policies.py` still passes against the retimed script
+    (75 passed, 13 live-gated skips)
+
 ---
 
 ## Phase 1 — RAG Pipeline (Build This First)
