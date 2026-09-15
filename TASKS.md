@@ -771,6 +771,13 @@ Claude Code should read this before starting any task to understand current stat
     per-request token. The policy text is unchanged. `extract_text()` discards
     the script entirely, so the *indexed* content is identical every time —
     only the digest moves.
+  - **Re-confirmed on all nine Aetna CPBs** before writing any code, fetching
+    each twice through the seed script's own `PoliteClient`: same length, one
+    differing line, inside that one inline script (`ak.ak`, `ak.rid`, `ak.t`…),
+    and identical extracted text 9 of 9. The rest of each page — 8 scripts, 1
+    style, 4 `<noscript>`, 52 comments, 11 inline event handlers — is identical
+    across fetches, so stripping script and style covers everything that varies
+    today.
   - **This is the failure ADR-0021 already named, applied to the wrong payer.**
     That ADR rejected crawling rendered CMS pages because "each response carries
     a per-request CSP nonce, so a digest taken over one changes on every fetch",
@@ -782,20 +789,66 @@ Claude Code should read this before starting any task to understand current stat
     stay distinct documents for audit purposes. Reversing that is an ADR-level
     change and needs the reversal recorded at the original rule, not a quiet
     edit to the hash input.
-  - The likely shape is a narrow, declared normalisation *before* hashing for
-    `text/html` only — strip `<script>` and `<style>` elements, which carry no
-    policy text and are already discarded by `markup.py` — leaving the raw-bytes
-    rule intact for PDFs. That is a smaller claim than "hash the text" and keeps
-    two genuinely different HTML files distinct.
-  - **Check the real cost before choosing.** Re-embedding the Aetna documents is
-    about 1,800 chunks per run today. That is minutes locally and is the
-    recurring cost of the nightly scraper, so the question is whether it is
-    cheaper than the risk of a normalisation that hides a real revision.
-  - **Test:** the same Aetna URL fetched twice ingests as `unchanged` the second
-    time
+  - **The fix: for `text/html` only, cut the exact byte ranges of `<script>`
+    and `<style>` elements out before hashing.** PDFs keep the pure raw-bytes
+    digest. This is a smaller claim than "hash the text" and keeps two
+    genuinely different HTML files distinct.
+  - **Byte-range removal, never parse-and-rewrite — non-negotiable.** Script-free
+    HTML must hash to exactly its raw bytes. A parser that re-serialised the
+    document would change every stored CMS digest, and would leave
+    policy-scraper's pre-upload skip (`PolicyDocument.content_hash`) comparing
+    against a digest ingest no longer produces — an upload every night, forever,
+    each answered `unchanged`.
+  - **One definition, in a new package `packages/html-digest`.** Three things
+    decide "which bytes are script or style": track-b-rag's `content_digest()`
+    (authoritative), policy-scraper's `content_hash` (the skip), and
+    `markup.py`'s text extraction. They call one scanner rather than three
+    matchers that agree today and diverge at an edge case. The scanner is our
+    own and works on bytes, not on `html.parser`: the stdlib tokenizer's
+    script handling has changed between patch releases, CI runs 3.12 while dev
+    runs 3.13, and a digest must not move because the interpreter did.
+    `markup.py` keeps `html.parser` for text, strips with the shared scanner
+    first, and warns if the stdlib ever sees a script the scanner missed.
+  - **Residual risk, stated rather than solved:** the digest still covers tag
+    markup, attributes, comments and `<noscript>`. A rotating token injected
+    into any of those defeats the hash again. That fails in the wasteful
+    direction (a re-embed), never by hiding a revision, and none of them varies
+    on any Aetna page today. The nightly live check below is what notices if
+    one starts.
+  - **The cost question is closed without a benchmark.** The normalisation
+    removes a subset of what extraction already discards, so it cannot hide a
+    change that reaches the index.
+  - **Rollout:** stored Aetna digests are over raw bytes, so the first ingest of
+    each Aetna document after this lands reports `updated` once, then
+    `unchanged`. That is the fix taking effect, not the bug persisting. CMS
+    rows do not move, because CMS fragments carry no script.
+  - **ADR-0021 is amended in place**, not noted in a comment: its raw-bytes rule
+    is narrowed for HTML, and the reason goes where the rule is.
+  - **Every place stating the old rule is rewritten in this change:**
+    `documents.py`'s docstrings, the `content_hash` description in
+    `api/schemas.py` and `docs/api/track-b-rag.yaml` (both still say "PDF
+    bytes", stale since HTML landed), policy-scraper's `documents.py`,
+    `docs/design/policy-corpus-ingestion.md`, `docs/architecture/data-model.md`
+    and TASK-011's text below.
+  - **Test:** track-b-rag's and policy-scraper's digests agree — one test in
+    `packages/html-digest` that feeds the same inputs through both services'
+    own entry points, not two suites that separately pass.
+    `detect-changed-members.sh` selects it when either service's `src/` moves,
+    as it does session-auth's issuer contract test.
+  - **Test:** two real captured fetches of one Aetna CPB digest identically, and
+    ingest against real Qdrant and Postgres as `created` then `unchanged`. Real
+    captures, because a hand-written page would not have carried the injected
+    script that caused this.
   - **Test:** two HTML documents differing only inside a `<script>` are one
     document; two differing in policy prose remain two
+  - **Test:** script-free HTML hashes to exactly its raw bytes, including real
+    CMS fragments
   - **Test:** the PDF path still hashes raw bytes, unchanged
+  - **Test:** `markup.py` extracts the same text from the real Aetna pages
+    before and after it strips through the shared scanner
+  - **Test (live, `RUN_PAYER_LIVE_TESTS`):** each Aetna URL fetched twice
+    digests identically — run by the nightly `commercial-payer-policies` job,
+    which already opens that gate
 
 ---
 
