@@ -758,7 +758,7 @@ Claude Code should read this before starting any task to understand current stat
     small document still costs one round trip. Full track-b-rag suite: 734
     passed, 93 skipped.
 
-- [ ] **TASK-009:** An injected beacon token defeats `content_hash` on every
+- [x] **TASK-009:** An injected beacon token defeats `content_hash` on every
   Aetna document
   - Found while seeding the dev corpus in TASK-008. Every `text/html` document
     reports `updated` on every run while every `application/pdf` one correctly
@@ -849,6 +849,33 @@ Claude Code should read this before starting any task to understand current stat
   - **Test (live, `RUN_PAYER_LIVE_TESTS`):** each Aetna URL fetched twice
     digests identically — run by the nightly `commercial-payer-policies` job,
     which already opens that gate
+  - **Built.** `packages/html-digest` holds one byte-level scanner for script
+    and style elements, and track-b-rag's `content_digest`, policy-scraper's
+    `content_hash` and `markup.py` all call it. ADR-0021 carries the
+    amendment; `docs/operations/local-development.md` carries the rollout note.
+    - **Proven end to end on the dev corpus**, through a patched track-b-rag:
+      the first seed run reported the four BCBSMA PDFs `unchanged` and the nine
+      Aetna documents `updated` once, and the run straight after reported all
+      13 `unchanged` in 24 seconds.
+    - **The bug cost more than this task's first draft said.** "About 1,800
+      chunks" came from TASK-008's notes. The measured one-time re-embed was
+      4,941 chunks and took 17m40s on CPU — 2,236 of them CPB 0016 alone — and
+      every seed run before this fix paid it.
+    - **Extraction did not change:** all 18 captured Aetna fetches extract to
+      identical text before and after `markup.py` moved onto the shared
+      scanner.
+    - **One tokenizer rule was caught while writing the scanner:** HTML also
+      closes a comment at `--!>`. A scanner that knew only `-->` would have
+      treated the rest of the page as comment and kept a script a browser runs.
+    - **A commented-out `<script>` in Aetna's template stays in the digest**, as
+      any comment does; the stdlib parser agrees it is not an element.
+    - uv accepts the dev-only cycle (html-digest's tests depend on both
+      services, which depend on html-digest at runtime); nothing in `src/`
+      imports either service.
+    - **Test:** html-digest 58 passed, 100% coverage; track-b-rag unit 666 and
+      ingestion integration 26, including the captured pair `created` then
+      `unchanged`; policy-scraper 125 at 99%; `detect-changed-members.test.sh`
+      80; the live check 9 of 9 against aetna.com.
 
 ---
 
@@ -960,9 +987,11 @@ The insurance policy RAG is the technical core. Build and validate before other 
     there, not in the compliance table.
   - PDF parsing via PyMuPDF (fitz) — handles multi-column medical policy docs
   - Chunking: RecursiveCharacterTextSplitter, chunk_size=800, overlap=150
-  - `content_hash` = SHA-256 hex digest of the raw PDF bytes (not the extracted
+  - `content_hash` = SHA-256 hex digest of the uploaded bytes (not the extracted
     text — two PDFs with identical text but different formatting should still be
-    treated as distinct source files for audit purposes)
+    treated as distinct source files for audit purposes). For HTML, `<script>`
+    and `<style>` elements are cut out of those bytes first — amended by
+    TASK-009, see ADR-0021.
   - **Qdrant payload schema and indexes — decide here, not in TASK-012.** Payload
     fields per point: `policy_id`, `payer`, `plan_type`, `state`, `effective_date`,
     `chunk_index`, `text`. Create payload indexes on `policy_id` (needed by this
@@ -1081,14 +1110,16 @@ The insurance policy RAG is the technical core. Build and validate before other 
       both readers hand `chunk_text()` plain text with blank lines at block
       boundaries, and policy prose is not shaped differently for having been
       published as HTML.
-    - **The digest still covers the raw uploaded bytes**, which is what makes
-      the HTML path safe to re-scrape nightly. Rendering HTML to a PDF so this
+    - **The digest still covers the uploaded bytes**, which is what makes the
+      HTML path safe to re-scrape nightly. Rendering HTML to a PDF so this
       route could stay PDF-only was rejected on measurement: PyMuPDF's output is
       not byte-deterministic, so the same document rendered twice yields two
       digests, every scrape reads as an update, and the corpus re-embeds daily.
       The live MCD page is not byte-stable either — it carries a per-request CSP
-      nonce — so a live-page fallback would have to hash extracted text, never
-      the HTTP body.
+      nonce — so its HTTP body could not be hashed as fetched. TASK-009 later
+      met the same problem on Aetna's pages (a CDN-injected script) and did not
+      hash extracted text: it cuts `<script>` and `<style>` elements out of the
+      bytes before hashing, which keeps two genuinely different files distinct.
     - TASK-011's own tests were extended rather than duplicated: the three dedup
       claims (created, unchanged, updated) are parametrised over both formats in
       `tests/integration/test_ingestion.py`, so the HTML path proves them
