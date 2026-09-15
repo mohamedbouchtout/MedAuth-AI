@@ -16,6 +16,11 @@ dependencies = [
     "medauth-api-envelope",
     "medauth-bedrock-client",
     "medauth-hipaa-logger",
+    # TASK-009. content_digest hashes HTML without its script and style, and
+    # markup.py discards the same elements before extracting text. Both call
+    # this package so they cannot disagree about which bytes those are — and
+    # nor can policy-scraper, which computes the same digest to skip uploads.
+    "medauth-html-digest",
     "medauth-logging-policy",
     # TASK-016. The payer slug is what the Qdrant filter matches on and what the
     # rag: cache key is built from, so ingest and query have to agree about it.

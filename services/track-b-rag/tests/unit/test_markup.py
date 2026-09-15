@@ -6,10 +6,23 @@ section as the Medicare Coverage Database export carries it — not whole pages.
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 import pytest
 
+from track_b_rag import markup
 from track_b_rag.documents import DocumentParseError
 from track_b_rag.markup import HtmlParseError, extract_text
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+
+#: Two real consecutive fetches of Aetna CPB 1009, captured for TASK-009. They
+#: live with the package that defines what is stripped; any change under
+#: packages/ re-tests every service, so editing them re-runs this file too.
+AETNA_FIXTURES = REPO_ROOT / "packages" / "html-digest" / "tests" / "fixtures" / "aetna"
+AETNA_FIRST_FETCH = AETNA_FIXTURES / "cpb-1009-first-fetch.html"
+AETNA_SECOND_FETCH = AETNA_FIXTURES / "cpb-1009-second-fetch.html"
 
 
 def test_a_fragment_needs_no_surrounding_document() -> None:
@@ -76,6 +89,68 @@ def test_script_and_style_contents_are_dropped() -> None:
     )
 
     assert text == "Real criterion."
+
+
+def test_extraction_discards_what_the_digest_ignores_using_the_same_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One definition of script and style, not two matchers (TASK-009): the
+    bytes the parser sees are the ones html_digest's scanner left."""
+    seen: list[bytes] = []
+
+    def recording_strip(data: bytes) -> bytes:
+        seen.append(data)
+        return data.replace(b"<script>x()</script>", b"")
+
+    monkeypatch.setattr(markup, "strip_non_text", recording_strip)
+
+    assert extract_text(b"<p>A</p><script>x()</script>") == "A"
+    assert seen == [b"<p>A</p><script>x()</script>"]
+
+
+def test_the_parser_guard_suppresses_and_warns_if_the_scan_misses_one(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """If the stdlib ever finds a script the shared scanner did not, its source
+    must still stay out of the index — and the disagreement must be visible."""
+    monkeypatch.setattr(markup, "strip_non_text", lambda data: data)
+
+    with caplog.at_level(logging.WARNING, logger="track_b_rag.markup"):
+        text = extract_text(b"<p>Criterion.</p><script>var lcdLink = 1;</script>")
+
+    assert text == "Criterion."
+    assert "survived html_digest's scan" in caplog.text
+
+
+def test_two_real_aetna_fetches_extract_to_the_same_text() -> None:
+    assert extract_text(AETNA_FIRST_FETCH.read_bytes()) == extract_text(
+        AETNA_SECOND_FETCH.read_bytes()
+    )
+
+
+def test_stripping_first_extracts_what_the_parser_alone_extracted_from_a_real_page() -> None:
+    """Moving script and style removal to the shared scanner changed nothing the
+    index holds: the parser's own suppression, run on the unstripped page, gives
+    the same text."""
+    page = AETNA_FIRST_FETCH.read_bytes()
+    parser_alone = markup._TextExtractor()
+    parser_alone.feed(page.decode("utf-8"))
+    parser_alone.close()
+
+    assert extract_text(page) == parser_alone.text()
+
+
+def test_the_scanner_and_the_parser_agree_on_a_real_page(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Eight elements, a commented-out script and four noscript blocks, and not
+    one reaches the parser's guard — on whichever Python runs this."""
+    with caplog.at_level(logging.WARNING, logger="track_b_rag.markup"):
+        text = extract_text(AETNA_FIRST_FETCH.read_bytes())
+
+    assert caplog.records == []
+    assert "go-mpulse" not in text
+    assert "Risankizumab" in text
 
 
 def test_a_stray_closing_tag_does_not_suppress_the_rest() -> None:
