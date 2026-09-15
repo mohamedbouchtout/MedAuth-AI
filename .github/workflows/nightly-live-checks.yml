@@ -135,13 +135,18 @@ jobs:
 
       - run: uv sync --all-packages
 
-      # These fetch from the payers and assert each URL still resolves to a
-      # document of the type SEED_POLICIES declares. They need no database and
-      # no Qdrant: nothing is ingested here, the point is only whether the
-      # curated URLs still point at what they claim to.
+      # These fetch from the payers and assert two things. Each URL still
+      # resolves to a document of the type SEED_POLICIES declares. And each
+      # HTML page fetched twice digests the same (TASK-009): Aetna's CDN
+      # injects a script carrying a per-request token, which the digest cuts
+      # out, and anything else that starts varying per request would make
+      # every seed run re-embed that policy again. Neither needs a database or
+      # Qdrant: equal digests are exactly when ingest answers "unchanged".
       #
-      # A failure means a payer moved, renamed or withdrew a policy. Fix the
-      # entry in SEED_POLICIES; do not widen the assertion to make it pass.
+      # A failure of the first kind means a payer moved, renamed or withdrew a
+      # policy: fix the entry in SEED_POLICIES. Of the second, look at what now
+      # differs between the two fetches before widening packages/html-digest
+      # to hide it. Either way, do not relax the assertion to make it pass.
       - name: Live Aetna and BCBSMA document checks
         working-directory: services/track-b-rag
         run: uv run pytest tests/integration/test_seed_policies.py -v -k Live --no-cov
