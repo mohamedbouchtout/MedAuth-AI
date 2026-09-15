@@ -7,6 +7,7 @@ claims about determinism here are the ones the whole schedule rests on.
 from __future__ import annotations
 
 import datetime
+import hashlib
 
 from policy_scraper.documents import build_lcd, build_ncd
 from tests.fixtures import LCD_ROWS, NCD_ROWS
@@ -112,6 +113,33 @@ class TestContentHash:
             build_lcd(restamped, states=["MA"], coverage_db_base_url=BASE_URL).content_hash  # type: ignore[union-attr]
             == lcd().content_hash  # type: ignore[union-attr]
         )
+
+    def test_a_script_free_document_hashes_to_the_sha256_of_its_bytes(self) -> None:
+        """What keeps every CMS digest already stored valid across TASK-009:
+        export fragments carry no script, so nothing is cut and the digest is
+        exactly the one taken before the change."""
+        documents = [
+            lcd(0),
+            lcd(1),
+            build_ncd(NCD_ROWS[0], coverage_db_base_url=BASE_URL),
+        ]
+
+        for document in documents:
+            assert document is not None
+            assert document.content_hash == hashlib.sha256(document.body).hexdigest()  # type: ignore[attr-defined]
+
+    def test_a_script_in_a_fragment_does_not_reach_the_digest(self) -> None:
+        """The same rule ingest applies, so the pre-upload skip still matches it."""
+        tokens = [
+            {**LCD_ROWS[0], "indication": f"<p>Six weeks.</p><script>t='{token}'</script>"}
+            for token in ("a1", "b2")
+        ]
+        first, second = (
+            build_lcd(row, states=["MA"], coverage_db_base_url=BASE_URL) for row in tokens
+        )
+
+        assert first is not None and second is not None
+        assert first.content_hash == second.content_hash
 
     def test_the_jurisdiction_does_not_reach_the_digest(self) -> None:
         """The digest identifies the document. A contractor gaining a state is a
