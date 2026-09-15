@@ -5,6 +5,17 @@ description = "Which bytes of an HTML policy document are script or style, and t
 requires-python = ">=3.12"
 dependencies = []
 
+[dependency-groups]
+dev = [
+    # Test-only, and only for tests/unit/test_service_agreement.py: it proves
+    # the two services that compute this digest agree by calling each one's own
+    # function rather than this package's. Deliberately NOT runtime
+    # dependencies — nothing in src/ imports either service, and nothing
+    # should: both of them depend on this package.
+    "medauth-policy-scraper",
+    "medauth-track-b-rag",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

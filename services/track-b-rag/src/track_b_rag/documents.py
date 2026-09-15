@@ -14,15 +14,21 @@ byte-deterministic, so the same document rendered on two nights produces two
 digests, every nightly scrape reads as an update, and the entire corpus is
 re-embedded daily. That is exactly the cost ``content_hash`` exists to avoid.
 
-The digest is still taken over the raw uploaded bytes, never over the extracted
-text (TASK-011). Two documents whose text happens to match but whose bytes
-differ are distinct source files for audit purposes.
+The digest is taken over the uploaded bytes, never over the extracted text
+(TASK-011): two documents whose text happens to match but whose bytes differ
+are distinct source files for audit purposes. For HTML, every ``<script>`` and
+``<style>`` element is cut out of those bytes first (TASK-009). A CDN injects a
+script with a fresh token into every Aetna response, so a digest over the raw
+HTTP body changed on every fetch of a policy whose text had not moved. See
+ADR-0021 for the rule and its amendment.
 """
 
 from __future__ import annotations
 
 import hashlib
 from typing import Final, Literal, get_args
+
+from html_digest import html_digest
 
 #: The content types ``POST /policies/ingest`` accepts. Declared by the caller
 #: rather than sniffed: a caller always knows what it fetched, and guessing
@@ -44,8 +50,8 @@ class DocumentParseError(ValueError):
     """
 
 
-def content_digest(raw_bytes: bytes) -> str:
-    """Return the SHA-256 hex digest of the raw uploaded bytes.
+def content_digest(raw_bytes: bytes, content_type: ContentType) -> str:
+    """Return the SHA-256 hex digest that identifies an uploaded document.
 
     This is the value stored as ``insurance_policies.content_hash`` and the one
     the scraper (TASK-013) compares against to decide whether to re-ingest. It
@@ -53,7 +59,17 @@ def content_digest(raw_bytes: bytes) -> str:
     this service derives from them — a digest of our own rendering of a document
     changes when our rendering does, which would re-embed a corpus that never
     changed.
+
+    A PDF is hashed exactly as uploaded. HTML goes through
+    :func:`html_digest.html_digest`, which cuts script and style elements out as
+    byte ranges and never re-serialises what is left, so HTML with neither
+    digests to the SHA-256 of its raw bytes, just as it did before TASK-009.
+    policy-scraper calls the same function for its pre-upload skip, and
+    ``packages/html-digest/tests/unit/test_service_agreement.py`` proves the two
+    agree.
     """
+    if content_type == "text/html":
+        return html_digest(raw_bytes)
     return hashlib.sha256(raw_bytes).hexdigest()
 
 

@@ -1,13 +1,15 @@
 """The format-independent half of reading a document: its digest, and dispatch.
 
 Both claims here are the ones TASK-011's dedup rests on, now that two formats
-reach it: the digest is over the bytes the payer published, and a document is
-read by the reader its declared type names.
+reach it: the digest is over the bytes the payer published — for HTML, less its
+script and style elements (TASK-009) — and a document is read by the reader its
+declared type names.
 """
 
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 import pymupdf
 import pytest
@@ -42,39 +44,70 @@ def document(request: pytest.FixtureRequest) -> tuple[bytes, ContentType]:
     return (build_pdf() if content_type == "application/pdf" else HTML_POLICY, content_type)
 
 
-def test_the_digest_is_sha256_over_the_raw_bytes(
-    document: tuple[bytes, ContentType],
-) -> None:
-    raw, _ = document
+#: Two real consecutive fetches of Aetna CPB 1009, captured for TASK-009. They
+#: live with the package that defines what is stripped; any change under
+#: packages/ re-tests every service, so editing them re-runs this file too.
+AETNA_FIXTURES = (
+    Path(__file__).resolve().parents[4] / "packages" / "html-digest" / "tests" / "fixtures"
+) / "aetna"
 
-    assert content_digest(raw) == hashlib.sha256(raw).hexdigest()
+
+def test_a_pdf_digests_to_the_sha256_of_its_raw_bytes() -> None:
+    raw = build_pdf()
+
+    assert content_digest(raw, "application/pdf") == hashlib.sha256(raw).hexdigest()
+
+
+def test_a_pdf_is_never_stripped() -> None:
+    """Only HTML is scanned. Bytes that look like a script inside a PDF are the
+    PDF's own, and a digest that skipped them could merge two distinct files."""
+    raw = build_pdf() + b"<script>x()</script>"
+
+    assert content_digest(raw, "application/pdf") == hashlib.sha256(raw).hexdigest()
+
+
+def test_script_free_html_digests_to_the_sha256_of_its_raw_bytes() -> None:
+    """Every HTML digest stored before TASK-009 was taken over bytes like these,
+    so not one of them moves."""
+    assert content_digest(HTML_POLICY, "text/html") == hashlib.sha256(HTML_POLICY).hexdigest()
+
+
+def test_html_differing_only_inside_a_script_is_one_document() -> None:
+    first = HTML_POLICY + b'<script>token="a1b2"</script>'
+    second = HTML_POLICY + b'<script>token="c3d4"</script>'
+
+    assert content_digest(first, "text/html") == content_digest(second, "text/html")
+
+
+def test_html_differing_in_policy_prose_is_two_documents() -> None:
+    """The fix narrows the digest; it must not make it blind to the policy."""
+    first = b"<p>Six weeks of therapy.</p><script>t=1</script>"
+    second = b"<p>Twelve weeks of therapy.</p><script>t=1</script>"
+
+    assert content_digest(first, "text/html") != content_digest(second, "text/html")
 
 
 def test_the_same_bytes_digest_the_same_way(document: tuple[bytes, ContentType]) -> None:
-    raw, _ = document
+    raw, content_type = document
 
-    assert content_digest(raw) == content_digest(raw)
-
-
-def test_different_bytes_digest_differently() -> None:
-    assert content_digest(b"<p>one</p>") != content_digest(b"<p>two</p>")
+    assert content_digest(raw, content_type) == content_digest(bytes(raw), content_type)
 
 
-def test_the_digest_ignores_the_declared_type() -> None:
-    """It identifies the source file. The same bytes are the same file whatever
-    a caller says they are, which is what keeps a re-declared upload from
-    re-embedding a corpus that did not change."""
-    assert content_digest(HTML_POLICY) == content_digest(HTML_POLICY)
+def test_script_free_bytes_digest_the_same_whichever_type_is_declared() -> None:
+    """What the old "the digest ignores the declared type" claim still holds
+    for: with nothing to strip, a re-declared upload does not re-embed."""
+    assert content_digest(HTML_POLICY, "text/html") == content_digest(
+        HTML_POLICY, "application/pdf"
+    )
 
 
-def test_html_extraction_is_byte_stable_across_calls() -> None:
-    """The property the rejected render-to-PDF approach lacked: identical input
-    gives an identical digest every time, so a nightly scrape of an unchanged
-    document reports "unchanged" rather than re-indexing it (TASK-013)."""
-    first = content_digest(HTML_POLICY)
-    second = content_digest(bytes(HTML_POLICY))
+def test_two_real_fetches_of_an_aetna_page_are_one_document() -> None:
+    """TASK-009's cause, on the capture: the raw bytes differ, the digest does not."""
+    first = (AETNA_FIXTURES / "cpb-1009-first-fetch.html").read_bytes()
+    second = (AETNA_FIXTURES / "cpb-1009-second-fetch.html").read_bytes()
 
-    assert first == second
+    assert hashlib.sha256(first).digest() != hashlib.sha256(second).digest()
+    assert content_digest(first, "text/html") == content_digest(second, "text/html")
 
 
 # --- dispatch --------------------------------------------------------------

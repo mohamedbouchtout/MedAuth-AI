@@ -142,7 +142,7 @@ async def ingest_policy(
         EmptyDocumentError: The document is readable but holds no extractable
             text.
     """
-    digest = content_digest(document_bytes)
+    digest = content_digest(document_bytes, metadata.content_type)
     existing = await session.scalar(
         sa.select(InsurancePolicy).where(InsurancePolicy.policy_id == metadata.policy_id)
     )

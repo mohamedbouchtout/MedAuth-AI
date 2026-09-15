@@ -30,7 +30,7 @@ def test_the_digest_covers_the_file_not_the_text() -> None:
     second = build_pdf(["Identical policy text.", ""])
 
     assert extract_text(first) == extract_text(second)
-    assert content_digest(first) != content_digest(second)
+    assert content_digest(first, "application/pdf") != content_digest(second, "application/pdf")
 
 
 def test_extracted_text_carries_every_page() -> None:

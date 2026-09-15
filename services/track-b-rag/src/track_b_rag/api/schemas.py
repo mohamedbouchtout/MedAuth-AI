@@ -202,7 +202,13 @@ class IngestPolicyData(BaseModel):
             "'unchanged' when the document was already indexed."
         ),
     )
-    content_hash: str = Field(description="SHA-256 hex digest of the uploaded PDF bytes.")
+    content_hash: str = Field(
+        description=(
+            "SHA-256 hex digest identifying the uploaded document: over its raw bytes "
+            "for a PDF, and for HTML over its bytes with script and style elements "
+            "removed."
+        ),
+    )
     chunks_indexed: int = Field(
         ge=0,
         description="Chunks written by this call. Zero when the document was unchanged.",

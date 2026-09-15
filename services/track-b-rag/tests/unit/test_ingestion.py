@@ -156,10 +156,11 @@ async def test_the_declared_content_type_reaches_the_reader(
 async def test_the_digest_is_over_the_bytes_whatever_the_format(
     qdrant: FakeQdrant, content_type: ContentType
 ) -> None:
-    """One dedup rule for both formats: it identifies the file, not the parse."""
+    """One dedup rule for both formats: it identifies the file, not the parse —
+    by the digest documents.py defines for the type that was declared."""
     result = await ingest(FakeSession(), qdrant, content_type=content_type)
 
-    assert result.content_hash == content_digest(DOCUMENT)
+    assert result.content_hash == content_digest(DOCUMENT, content_type)
 
 
 @pytest.mark.parametrize("content_type", ["application/pdf", "text/html"])
@@ -168,7 +169,7 @@ async def test_an_unchanged_document_is_skipped_whatever_the_format(
 ) -> None:
     """TASK-011's three dedup claims hold on the HTML path too, rather than being
     inherited from the PDF path — this is the one the nightly scrape depends on."""
-    session = FakeSession(FakeRow(content_digest(DOCUMENT)))
+    session = FakeSession(FakeRow(content_digest(DOCUMENT, content_type)))
 
     result = await ingest(session, qdrant, content_type=content_type)
 
@@ -304,7 +305,7 @@ def test_every_medicare_spelling_indexes_under_one_slug(spelling: str) -> None:
 async def test_the_result_carries_the_digest_of_the_uploaded_bytes(qdrant: FakeQdrant) -> None:
     result = await ingest(FakeSession(), qdrant)
 
-    assert result.content_hash == content_digest(DOCUMENT)
+    assert result.content_hash == content_digest(DOCUMENT, "application/pdf")
 
 
 async def test_the_result_names_the_collection(qdrant: FakeQdrant) -> None:
@@ -326,7 +327,7 @@ async def test_the_row_is_written_and_committed(qdrant: FakeQdrant) -> None:
 
 
 async def test_a_matching_digest_is_unchanged(qdrant: FakeQdrant) -> None:
-    session = FakeSession(FakeRow(content_digest(DOCUMENT)))
+    session = FakeSession(FakeRow(content_digest(DOCUMENT, "application/pdf")))
 
     result = await ingest(session, qdrant)
 
@@ -334,7 +335,7 @@ async def test_a_matching_digest_is_unchanged(qdrant: FakeQdrant) -> None:
 
 
 async def test_an_unchanged_policy_does_no_qdrant_work(qdrant: FakeQdrant) -> None:
-    session = FakeSession(FakeRow(content_digest(DOCUMENT)))
+    session = FakeSession(FakeRow(content_digest(DOCUMENT, "application/pdf")))
 
     await ingest(session, qdrant)
 
@@ -343,7 +344,7 @@ async def test_an_unchanged_policy_does_no_qdrant_work(qdrant: FakeQdrant) -> No
 
 async def test_an_unchanged_policy_writes_no_row(qdrant: FakeQdrant) -> None:
     """Skipping means skipping: last_ingested_at is not bumped for a no-op."""
-    session = FakeSession(FakeRow(content_digest(DOCUMENT)))
+    session = FakeSession(FakeRow(content_digest(DOCUMENT, "application/pdf")))
 
     await ingest(session, qdrant)
 
@@ -352,7 +353,7 @@ async def test_an_unchanged_policy_writes_no_row(qdrant: FakeQdrant) -> None:
 
 
 async def test_an_unchanged_policy_reports_zero_chunks(qdrant: FakeQdrant) -> None:
-    session = FakeSession(FakeRow(content_digest(DOCUMENT)))
+    session = FakeSession(FakeRow(content_digest(DOCUMENT, "application/pdf")))
 
     result = await ingest(session, qdrant)
 
@@ -360,11 +361,11 @@ async def test_an_unchanged_policy_reports_zero_chunks(qdrant: FakeQdrant) -> No
 
 
 async def test_an_unchanged_policy_still_reports_its_digest(qdrant: FakeQdrant) -> None:
-    session = FakeSession(FakeRow(content_digest(DOCUMENT)))
+    session = FakeSession(FakeRow(content_digest(DOCUMENT, "application/pdf")))
 
     result = await ingest(session, qdrant)
 
-    assert result.content_hash == content_digest(DOCUMENT)
+    assert result.content_hash == content_digest(DOCUMENT, "application/pdf")
 
 
 # --- updated ---------------------------------------------------------------
