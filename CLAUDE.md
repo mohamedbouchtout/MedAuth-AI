@@ -43,6 +43,7 @@ medauth-ai/
 │   ├── session-auth/     # Session-token validation for every real-time endpoint
 │   ├── cors-policy/      # The one CORS policy, installed by browser-facing services
 │   ├── payer-vocab/      # Canonical payer slugs + USPS jurisdiction codes
+│   ├── html-digest/      # Which HTML bytes are script/style; the policy digest without them
 │   ├── bedrock-client/   # Shared Bedrock access — client construction + reading replies
 │   └── crypto-utils/     # AES-256 helpers used across services
 ├── infrastructure/
@@ -1295,7 +1296,8 @@ Rules:
   contract). Keep the filename convention.
 - **A test that guards two things must be re-run when either of them moves** — e.g.
   track-a-clinical changes select audio-ingestion and session-auth for the JWT
-  contract test.
+  contract test; track-b-rag and policy-scraper `src/` changes select html-digest,
+  whose agreement test proves both still compute one policy digest (TASK-009).
 - **The selection rules live in `.github/scripts/detect-changed-members.sh`** (pure
   function: paths on stdin, outputs on stdout), tested by
   `.github/scripts/detect-changed-members.test.sh` — add a case with every rule change.
