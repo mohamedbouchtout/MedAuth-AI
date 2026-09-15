@@ -16,6 +16,15 @@ Extraction is stdlib :mod:`html.parser` rather than a parsing library. The job
 is to get prose out of ``<p>``, ``<ul>`` and ``<table>`` markup with its
 structure turned into blank lines, and adding BeautifulSoup to this service to
 do that would be a dependency the work does not need.
+
+**Script and style are cut out before parsing, by the scanner the digest uses.**
+``content_digest`` ignores exactly the bytes :func:`html_digest.strip_non_text`
+removes (TASK-009), so extraction removes exactly those too, with the same
+function. Were this module to keep a matcher of its own, the two could disagree
+at an edge case, and a change the digest cannot see could reach the index. The
+parser's own suppression of script and style stays as a guard, and logs if it
+ever fires: that would mean the stdlib found an element the shared scanner did
+not.
 """
 
 from __future__ import annotations
@@ -24,6 +33,7 @@ import logging
 from html.parser import HTMLParser
 from typing import Final
 
+from html_digest import NON_TEXT_ELEMENTS, strip_non_text
 from track_b_rag.documents import DocumentParseError
 
 logger = logging.getLogger(__name__)
@@ -43,11 +53,6 @@ _BLOCK_ELEMENTS: Final = frozenset(
     ).split()
 )
 
-#: Elements whose *contents* are not document text. A policy fragment rarely
-#: carries either, but a fragment lifted from a rendered page can, and script
-#: source read as prose would be chunked and embedded like any other sentence.
-_NON_TEXT_ELEMENTS: Final = frozenset({"script", "style"})
-
 _BLOCK_SEPARATOR: Final = "\n\n"
 
 
@@ -62,13 +67,22 @@ class _TextExtractor(HTMLParser):
         self._suppressed = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _NON_TEXT_ELEMENTS:
+        if tag in NON_TEXT_ELEMENTS:
+            # Script source read as prose would be chunked and embedded like any
+            # other sentence, so it is still suppressed here. But the shared
+            # scanner has already cut every such element out, so reaching this
+            # line means the two disagree about this document.
+            logger.warning(
+                "A <%s> element survived html_digest's scan; the stdlib parser and "
+                "the digest disagree about where it is",
+                tag,
+            )
             self._suppressed += 1
         elif tag in _BLOCK_ELEMENTS:
             self._parts.append(_BLOCK_SEPARATOR)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in _NON_TEXT_ELEMENTS:
+        if tag in NON_TEXT_ELEMENTS:
             # Clamped at zero: a stray closing tag in a fragment must not leave
             # the extractor suppressing everything that follows it.
             self._suppressed = max(0, self._suppressed - 1)
@@ -103,6 +117,10 @@ def extract_text(html_bytes: bytes) -> str:
     Raises:
         HtmlParseError: The bytes are not decodable as text.
     """
+    # Stripped as bytes, before decoding: the scanner works on the bytes the
+    # digest is taken over, and every character it matches on is ASCII, so the
+    # boundaries are the same whichever of the two encodings below applies.
+    html_bytes = strip_non_text(html_bytes)
     try:
         # errors="strict" on UTF-8 first: a mis-decoded policy is worse than a
         # rejected one, because it embeds cleanly and fails only at retrieval.
