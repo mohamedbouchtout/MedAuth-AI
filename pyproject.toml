@@ -24,6 +24,7 @@ exclude = [
 medauth-api-envelope = { workspace = true }
 medauth-bedrock-client = { workspace = true }
 medauth-hipaa-logger = { workspace = true }
+medauth-html-digest = { workspace = true }
 medauth-logging-policy = { workspace = true }
 medauth-cors-policy = { workspace = true }
 medauth-crypto-utils = { workspace = true }
@@ -64,6 +65,7 @@ known-first-party = [
     "bedrock_client",
     "cors_policy",
     "hipaa_logger",
+    "html_digest",
     "logging_policy",
     "crypto_utils",
     "fhir_types",

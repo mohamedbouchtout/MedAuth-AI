@@ -1,0 +1,8 @@
+# Captured upstream responses whose exact bytes are the thing under test.
+#
+# packages/html-digest's fixtures are two real fetches of an Aetna policy page,
+# and its tests assert which bytes differ between them and what their digests
+# are. With core.autocrlf on (the Windows default) git would rewrite their line
+# endings on checkout, silently turning a byte-exact capture into something the
+# payer never published. -text switches that conversion off for them alone.
+packages/html-digest/tests/fixtures/aetna/*.html -text
