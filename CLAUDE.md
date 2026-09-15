@@ -56,8 +56,8 @@ medauth-ai/
 
 ## Tech Stack
 
-### Python Services (audio-ingestion, track-a-clinical, track-b-rag, prior-auth, nudge-service, policy-scraper)
-- **Runtime:** Python 3.12
+### Python Services (all of `services/`, including fhir-integration)
+- **Runtime:** Python 3.12, one uv workspace for every service and package
 - **Package manager:** uv (NOT pip, NOT poetry)
 - **Web framework:** FastAPI with uvicorn
 - **Async:** asyncio throughout — no sync blocking calls in async contexts
@@ -68,23 +68,13 @@ medauth-ai/
 - **Medical NLP:** boto3 Comprehend Medical
 - **Message bus:** Redis pub/sub (NOT Kafka — added when >20 providers)
 - **Database:** PostgreSQL via asyncpg + SQLAlchemy 2.0 (async)
+- **FHIR client (fhir-integration):** fhirclient (pip package)
 - **Testing:** pytest + pytest-asyncio, httpx for async client testing
-
-### fhir-integration service
-- **Runtime:** Python 3.12 (same as all other services — one uv workspace)
-- **Framework:** FastAPI with uvicorn
-- **FHIR client:** fhirclient (pip package)
-- **Testing:** pytest + pytest-asyncio + httpx
-- Note: earlier drafts mentioned Node.js for this service — that is incorrect.
-  Python was chosen to keep the entire backend in one uv workspace with
-  consistent tooling, testing, and deployment patterns.
+- fhir-integration is Python, not Node.js — earlier drafts were wrong.
 
 ### Frontend (apps/web)
-- **Framework:** React 19 + TypeScript. Earlier drafts of this file said React
-  18, written before `apps/web` was scaffolded; TASK-023 scaffolded it on 19
-  because `apps/mobile` is already on 19.2.x through Expo SDK 57, and two React
-  majors in one npm workspace root is a cost with nothing to buy — there was no
-  existing web code to migrate.
+- **Framework:** React 19 + TypeScript (matches `apps/mobile`'s React via Expo SDK 57;
+  one React major per npm workspace root).
 - **Build:** Vite
 - **Styling:** Tailwind CSS
 - **State:** Zustand — not installed until a task has state to keep in it.
@@ -92,22 +82,16 @@ medauth-ai/
 - **WebSocket:** native WebSocket API (no socket.io)
 - **Audio:** `getUserMedia` → `AudioContext({ sampleRate: 16000 })` →
   `AudioWorkletNode`, with the float-to-int16 conversion and 250ms framing in
-  `packages/audio-wire`. **Not MediaRecorder**, which cannot emit raw PCM at
-  all, offers no sample-rate control, and whose `timeslice` chunks are not
-  independently decodable — measured, see TASK-023.
+  `packages/audio-wire`. **Not MediaRecorder** — it cannot emit raw PCM, offers no
+  sample-rate control, and its `timeslice` chunks are not independently decodable
+  (measured, TASK-023).
 - **Testing:** Vitest + React Testing Library
 
 ### Frontend (apps/mobile)
 - **Framework:** React Native with Expo SDK 57
-- **Audio:** `expo-audio`'s `useAudioStream` for capture — real-time PCM buffers
-  delivered to an `onBuffer` callback, never a recorded file. Earlier drafts of
-  this file and of TASK-022 said `expo-av`; that was written without checking
-  it, the same way the Node.js `fhir-integration` line was. `expo-av` records to
-  a file URI and exposes no PCM callback at all, so it could satisfy neither the
-  "audio never persists" constraint nor the 16kHz-PCM one — and it was removed
-  from Expo entirely in SDK 55. The SDK pin moved from 51 to 57 because
-  `useAudioStream` landed in SDK 56; `apps/mobile` is unscaffolded, so this
-  costs nothing to adopt. See TASK-022 for the capture details.
+- **Audio:** `expo-audio`'s `useAudioStream` — real-time PCM buffers to an `onBuffer`
+  callback, never a recorded file. **Not `expo-av`**: it records to a file URI, has no
+  PCM callback, and was removed in SDK 55. `useAudioStream` needs SDK 56+. See TASK-022.
 - **Testing:** Jest + React Native Testing Library
 
 ### Infrastructure
@@ -120,7 +104,6 @@ medauth-ai/
 
 ### Prerequisites
 ```bash
-# Required
 docker & docker compose
 uv (pip install uv)
 node 24+ & npm  # version lives in .nvmrc; CI reads that file
@@ -144,17 +127,13 @@ uv run uvicorn src.main:app --reload --port 8002
 ```
 8080  HAPI FHIR (synthetic EHR)
 8006  Da Vinci CRD Reference Implementation (simulated payer, TASK-015)
-      Container listens on 8090; published as 8006 because Windows reserves
-      the 8081-8180 range and the container cannot bind 8090 there.
+      Container listens on 8090; published as 8006 because Windows reserves 8081-8180.
 8001  audio-ingestion
 8002  track-b-rag
 8003  track-a-clinical
 8004  fhir-integration
 8005  nudge-service
-8007  prior-auth
-      Assigned in TASK-060, which gave this service its first HTTP surface —
-      a health endpoint, so a stopped bundle assembler is visible. 8006 was
-      already taken by the CRD Reference Implementation above.
+8007  prior-auth (health endpoint, TASK-060; 8006 was taken by CRD)
 5432  PostgreSQL
 6379  Redis
 6333  Qdrant
@@ -164,6 +143,8 @@ uv run uvicorn src.main:app --reload --port 8002
 Copy `.env.example` to `.env.local`. Never commit `.env.local`.
 For local dev, AWS credentials use the `medauth-dev` IAM profile.
 Bedrock is the only AWS service called during local dev (no local mock available).
+A variable in `.env.example` is not wired until a config module reads it — frontends
+read env only in `apps/*/src/config.ts`, services only through their `Settings` class.
 
 ## Code Conventions
 
@@ -199,91 +180,54 @@ Bedrock is the only AWS service called during local dev (no local mock available
 - Unit tests for all business logic (pure functions, no external calls)
 - Integration tests for all API routes using test database and mocked AWS services
 - Moto for mocking AWS services (Bedrock, Transcribe Medical, KMS) — but see
-  "Moto does not implement Comprehend Medical" below before writing a test
-  against that service.
+  "Moto does not implement Comprehend Medical" below.
 - Test files mirror src structure: `src/services/rag.py` → `tests/unit/services/test_rag.py`
 - Minimum 80% coverage on services/packages; CI fails below this
 - **A browser-facing route gets its own preflight case in that service's
-  `test_cors.py`, in the change that makes it browser-facing.** Installed
-  middleware is never evidence that a particular path and method are covered:
-  `packages/cors-policy` fixes the methods and headers repo-wide, so a service
-  can install it correctly and still refuse a browser on a route whose method or
-  header the policy does not list. The full reasoning, and the unlisted-origin
-  counterpart every case needs, are in "CORS and browser reachability" below —
-  this line exists because three consecutive tasks (TASK-041c, TASK-070,
-  TASK-071) each rediscovered the same gap from scratch, which is a sign the
-  rule was not written where someone adding a route would look for it. A route
-  already called from `apps/mobile` still needs a case the first time a browser
-  calls it; mobile preflights nothing.
+  `test_cors.py`, in the change that makes it browser-facing**, with an
+  unlisted-origin counterpart. Installed middleware is never evidence that a
+  particular path and method are covered: `packages/cors-policy` fixes methods and
+  headers repo-wide, so a route can still be refused. A route already called from
+  `apps/mobile` still needs a case the first time a browser calls it; mobile
+  preflights nothing. (Three tasks rediscovered this gap; see "CORS and browser
+  reachability".)
 
 ### Moto does not implement Comprehend Medical (standing exception)
-"Moto for all AWS mocking" (Known Constraints #3 in TASKS.md) cannot be
-satisfied for AWS Comprehend Medical, and this is a permanent property of moto
-rather than something scoped to the task that found it. Verified against moto
-5.2.2 by calling the service under `@mock_aws`:
+Permanent property of moto (verified on 5.2.2): `infer_icd10_cm` under `@mock_aws`
+returns `404 Not yet implemented`. Moto's `comprehend` module is Amazon Comprehend, a
+different service. The 404 is not a bug in the call.
 
-```
->>> boto3.client("comprehendmedical").infer_icd10_cm(Text="...")
-ClientError: An error occurred (404) when calling the InferICD10CM operation:
-Not yet implemented
-```
+**Permitted alternatives** (for this and any other AWS service moto lacks):
+- **A real credentialed call behind an env-var gate**, following the
+  nightly-live-checks.yml rules below — default off, paired with a scheduled run,
+  named after the dependency.
+- **Hand-rolled fixtures explicitly labelled synthetic**, stating in the fixture
+  module that they are approximations and what has never been checked against the
+  real service.
 
-Moto's `comprehend` module is **Amazon Comprehend, not Comprehend Medical** —
-two different services. Its `url_bases` match only
-`comprehend.<region>.amazonaws.com`, `comprehendmedical` appears nowhere in
-moto's `backends.py`, and no `infer_icd10_cm` operation exists. Botocore knows
-the service, so the client constructs and the call is well-formed; it is moto's
-dispatch that has nothing to answer with. Do not read the 404 as a bug in the
-call.
-
-**The two permitted alternatives**, for Comprehend Medical and for any future
-AWS service moto turns out not to cover:
-- **A real credentialed call behind an env-var gate**, following the rules in
-  "nightly-live-checks.yml" above — default off, paired with a scheduled run,
-  named after the external dependency it exercises.
-- **Hand-rolled fixtures that are explicitly labelled as synthetic**, stating in
-  the fixture module that they are hand-written approximations of the service's
-  response and naming what about them has never been checked against the real
-  service.
-
-**What is not permitted is a silent `unittest.mock` patch over the boto3 call
-presented as satisfying the moto rule.** That is the failure this exception
-exists to prevent: a test that looks like every other AWS test in the repo,
-passes for the same reasons they appear to, and is in fact asserting only that
-the code calls a function the test itself defined. If moto cannot cover a
-service, the test must say so where a reader will see it.
+**Not permitted: a silent `unittest.mock` patch over the boto3 call presented as
+satisfying the moto rule.** Such a test asserts only that code calls a function the
+test defined. If moto cannot cover a service, the test must say so visibly.
 
 ### Raw sync boto3 calls in async contexts go through `asyncio.to_thread`
-The Python conventions above require async-first with no sync blocking calls in
-async contexts. Most AWS access in this repository satisfies that incidentally:
-the Bedrock path goes through `langchain_aws.ChatBedrock.ainvoke`, which is
-genuinely async, so nobody had to think about it.
-
-That stops being true for any service called through a raw boto3 client, because
-boto3 is synchronous and has no async variant. Calling one directly from inside
-an asyncio task blocks the event loop for the whole round trip to AWS — and in a
-consumer that is simultaneously accumulating transcript segments for every other
-live encounter on the pod, that stalls unrelated sessions.
-
-So: **every raw synchronous boto3 call made from an async context is wrapped in
-`asyncio.to_thread`.** This is a general rule, not a note attached to the task
-that first hit it (TASK-031's Comprehend Medical call). Apply it when adding any
-new direct AWS SDK call site.
+boto3 is synchronous; calling it inside an asyncio task blocks the event loop for the
+whole AWS round trip and stalls every other live encounter on the pod. (The Bedrock
+path via `ChatBedrock.ainvoke` is genuinely async and unaffected.) **Every raw
+synchronous boto3 call made from an async context is wrapped in
+`asyncio.to_thread`** — a general rule for every new direct AWS SDK call site.
 
 ### Git Commits
-- **50/72 rule.** Subject line 50 characters or fewer; body hard-wrapped at 72
-  columns. The subject must still carry the type, scope, and task number, so keep
-  it terse and put the explanation in the body.
+- **50/72 rule.** Subject ≤ 50 characters; body hard-wrapped at 72 columns. The
+  subject still carries type, scope, and task number, so keep it terse.
 - Subject is imperative mood, no trailing period.
 - Blank line between subject and body. Trailers (`Co-Authored-By:`) go last.
-- **Every commit must pass CI on its own**, not just the tip of the branch. Order
-  the work so tooling and config land before the code that depends on them, and
-  squash or reorder any "fixes the previous commit" commit before opening a PR —
-  history has to stay bisectable.
-- One logical change per commit. A branch that mixes CI changes, docs, and feature
-  code should be three commits, not one.
-- Every commit message should have my sign-off at the end co-authered by you right
-  you contributed to the commit.
+- **Every commit must pass CI on its own**, not just the branch tip. Land tooling
+  and config before the code that depends on them; squash or reorder any "fixes
+  the previous commit" commit before opening a PR — history stays bisectable.
+- One logical change per commit. CI changes, docs, and feature code are three
+  commits, not one.
+- Every commit message should have my sign-off at the end, co-authored by you
+  when you contributed to the commit.
 
 ```
 feat(hipaa-logger): add audit_log [TASK-002]
@@ -298,1108 +242,441 @@ Authored-By: ...
 ## Key Architectural Constraints
 - **Audio never persists.** Process in-memory BytesIO buffers only. Discard immediately after transcription.
 - **Claude is called via AWS Bedrock only** (not Anthropic's direct API). This is the HIPAA-eligible path.
-- **No Kafka until >20 providers.** Redis pub/sub for now. The service interfaces are identical so swapping later is a config change.
-- **Qdrant for vector store.** Do not use Pinecone or Weaviate — we self-host for PHI control even though insurance policy text is not PHI (defense in depth).
+- **No Kafka until >20 providers.** Redis pub/sub for now; interfaces are identical so swapping is a config change.
+- **Qdrant for vector store.** Not Pinecone or Weaviate — self-hosted for PHI control (defense in depth).
 - **Cache the payer-policy half of RAG results in Redis** with 24h TTL keyed by
-  `rag:{payer}:{plan_type}:{state}:{cpt_code}`. This is a major cost lever —
-  implement it from the start. **Cache only the payer-policy fields, never the
-  patient-specific ones.** `/policies/query`'s response mixes two kinds of data:
-  `requires_auth`, `auth_criteria`, `step_therapy_required`, and
-  `step_therapy_details` are properties of the payer's policy and are identical
-  for every patient with that payer/plan/state/CPT — those are what the key
-  above caches. `missing_criteria`, `denial_risk`, and `nudge_message` are
-  properties of *this patient's documentation* and differ per encounter;
-  caching them across patients would serve patient B the gaps computed for
-  patient A. Run that comparison fresh on every call against the cached policy
-  rules. The expensive work (Qdrant search + Sonnet reasoning over retrieved
-  policy text) is the cacheable half, so this preserves the full cost benefit.
-  Adding `clinical_context` to the key instead would be correct but would
-  collapse the hit rate to near zero, defeating the point.
-- **Haiku for extraction tasks, Sonnet for reasoning.** ICD/CPT entity extraction → Haiku. SOAP generation and payer policy analysis → Sonnet. Costs 15x less per extraction call.
+  `rag:{payer}:{plan_type}:{state}:{cpt_code}` — a major cost lever. **Cache only
+  the payer-policy fields** (`requires_auth`, `auth_criteria`,
+  `step_therapy_required`, `step_therapy_details`), which are identical for every
+  patient on that payer/plan/state/CPT. **Never cache** `missing_criteria`,
+  `denial_risk`, `nudge_message` — they describe *this patient's documentation*;
+  caching them would serve patient B the gaps computed for patient A. Recompute
+  them on every call against the cached rules. Do not add `clinical_context` to
+  the key (correct, but collapses the hit rate to zero).
+- **Haiku for extraction tasks, Sonnet for reasoning.** ICD/CPT extraction → Haiku. SOAP generation and payer policy analysis → Sonnet.
 - **Policy lookup is two-tier, and the tiers answer different questions.** For
-  payers covered by the CMS-0057-F mandate (Medicare Advantage, Medicaid managed
-  care, CHIP, ACA marketplace), `/policies/query` (TASK-012) asks the payer's own
-  Da Vinci **CRD** endpoint (TASK-015) *and* runs the RAG/Qdrant/Sonnet path
-  (TASK-010–014), concurrently. CRD decides `requires_auth`, which it states
-  directly and authoritatively; the RAG path supplies `auth_criteria` and the
-  step therapy fields. Commercial employer-sponsored plans — the bulk of what
-  private practices see — are not covered by the mandate and take the RAG path
-  alone. Both arrangements return the same response shape; callers never branch
-  on which one answered.
-  **CRD does not carry the criteria, and this is a property of the standard, not
-  of any one implementation.** The IG's `ext-coverage-information` extension
-  carries `covered`, `pa-needed`, `doc-needed`, `doc-purpose`, `questionnaire`
-  and assorted trace fields — nothing holding criterion text. CRD answers
-  *whether* authorization and documentation are needed and delegates *what must
-  be documented* to a DTR Questionnaire. So a CRD-only answer would hand Stage 2
-  an empty criteria list and a nudge that cannot say what is missing, which is
-  most of the product. Earlier drafts said CRD would let us "skip the RAG path
-  entirely"; that was written before anyone ran a CRD server, and it is wrong.
-  Da Vinci **DTR** is deferred to a later task — it needs a SMART on FHIR app
-  surface that does not exist before Phase 5, and its Questionnaire items are
-  largely administrative form fields (name, NPI, signature) that would poison
-  the Stage 2 matcher if mapped into `auth_criteria` as they are.
-  **Silence from a payer is never "no authorization required."** An empty card
-  list, a card that only reports documentation requirements, and the
-  "unable to process" card a payer returns when its rule needs more than we sent
-  all mean *no determination*, and the RAG path then answers alone. Reading any
-  of them as a negative determination would tell a provider an unauthorized
-  order is clear — the one direction TASK-012 forbids failing in.
-  **The CRD request carries no patient.** Stage 1 holds none by construction, so
-  the request is built from payer, plan type, state and procedure code with a
-  placeholder subject. CRD is specified as a patient-specific coverage check, so
-  a payer rule keyed on age or sex simply cannot answer us — it returns "unable
-  to process" and RAG answers instead. Fabricating a patient to make such a rule
-  respond would produce a confident determination about someone who does not
-  exist. Closing that gap is TASK-059, and it is gated on TASK-052 supplying
-  real `Patient` and `Coverage` resources. Note what changes when it lands: a
-  patient-carrying CRD request is a PHI disclosure to a third party, so TLS
-  stops being a deployment convention, the endpoint has to be verified per
-  payer rather than read from one `CRD_BASE_URL`, and the disclosure needs its
-  own audit row. None of that applies to the patient-free request built today.
-- **A CRD answer is never cached; a RAG answer is.** The `rag:` key exists
-  because a Qdrant search plus a Sonnet call is expensive and its result is
-  identical for every patient on that payer/plan/state/CPT — a day of staleness
-  is an accepted trade for that. CRD is a different kind of answer: its entire
-  value over RAG is being live and authoritative from the payer's own system at
-  the moment of the order, so caching it for 24h discards the only property that
-  justifies the second tier. The CRD path neither reads nor writes the `rag:`
-  key. If CRD latency ever threatens the nudge budget, the answer is a short
-  seconds-scale TTL of its own, never the 24h payer-policy key.
+  CMS-0057-F mandate payers (Medicare Advantage, Medicaid managed care, CHIP, ACA
+  marketplace), `/policies/query` (TASK-012) asks the payer's Da Vinci **CRD**
+  endpoint (TASK-015) *and* runs the RAG path (TASK-010–014) concurrently. CRD
+  decides `requires_auth`; RAG supplies `auth_criteria` and step therapy fields.
+  Commercial employer plans take the RAG path alone. Same response shape either
+  way; callers never branch on which answered.
+  - **CRD does not carry the criteria** — a property of the standard: its
+    `ext-coverage-information` extension has `covered`, `pa-needed`, `doc-needed`,
+    etc., but no criterion text (that lives in a DTR Questionnaire). So RAG is never
+    skipped. Da Vinci **DTR** is deferred: it needs a Phase 5 SMART app surface, and
+    its items are mostly administrative fields that would poison the Stage 2 matcher.
+  - **Silence from a payer is never "no authorization required."** An empty card
+    list, a documentation-only card, and an "unable to process" card all mean *no
+    determination*; RAG then answers alone. Reading any as negative would clear an
+    unauthorized order — the one direction TASK-012 forbids failing in.
+  - **The CRD request carries no patient.** It is built from payer, plan type,
+    state and procedure code with a placeholder subject; age/sex-keyed rules return
+    "unable to process" and RAG answers. Never fabricate a patient. Closing this is
+    TASK-059 (gated on TASK-052); once a patient is sent it becomes a PHI disclosure
+    needing TLS, per-payer endpoint verification, and its own audit row.
+- **A CRD answer is never cached; a RAG answer is.** CRD's value is being live and
+  authoritative at order time. The CRD path neither reads nor writes the `rag:` key.
+  If CRD latency threatens the nudge budget, use a short seconds-scale TTL of its
+  own, never the 24h key.
 
 ### Session Lifecycle & JWT Issuance (read before Phase 1/2/3/4 tasks)
-This is the one piece every real-time service depends on but nothing explicitly
-creates until now — Phase 2's audio-ingestion task validates a "session JWT" that
-otherwise has no issuer. Fixed here:
-- `services/track-a-clinical` owns session lifecycle, because it owns the
-  `encounters` table (TASK-005).
-- `POST /sessions/start` — body: `{patient_id, provider_id, ehr_encounter_id}`.
-  Creates an `encounters` row (`status='active'`, wire field `patient_id` maps
-  to the model's `patient_fhir_id` column), mints a short-lived JWT with claims
-  `{session_id, provider_id, exp}` — no `iss`/`aud` claims for v1, even though
-  `.env.example` has `JWT_ISSUER`/`JWT_AUDIENCE` vars sitting unused from an
-  earlier scaffold pass. Adding them means TASK-020's and TASK-041's validators
-  grow too — defer that to a later hardening task rather than expanding the
-  claim set here. Lifetime is driven by `SESSION_TTL_SECONDS` (default 900,
-  i.e. 15 min) — not a hardcoded literal. `session_id` is generated server-side
-  (UUID), never client-supplied, per the UUID convention in Code Conventions.
-  Returns `{session_id, jwt}`. This is what apps/web and apps/mobile call when
-  a provider taps "start visit." It also publishes the new `session_id` to the
-  fixed `sessions:started` channel — added in TASK-021, because a consumer of
-  `transcription:{session_id}` has to learn a session exists before it can
-  subscribe to that channel by name, and the alternative is a wildcard
-  subscription across the channels carrying speech. The publish precedes the
-  response, so the JWT a client needs to open its audio socket cannot exist
-  before a consumer is listening. A failed publish is a 503 and the session is
-  not usable: an encounter nobody watches raises no nudges and looks exactly
-  like an encounter with nothing to flag.
-- `POST /sessions/{session_id}/end` — sets `encounters.status='completed'`,
-  `ended_at=NOW()`, and publishes `session:ended:{session_id}` to Redis
-  (empty payload — it's a signal, not a data carrier). This is the trigger
-  TASK-030 (SOAP generation) and TASK-060 (prior auth bundle assembly) both
-  subscribe to. Semantics: unknown or soft-deleted `session_id` → 404.
-  Repeat-ending an already-completed session → 200, idempotent, does NOT
-  publish a second Redis signal (TASK-030 and TASK-060 both react to that
-  signal — a duplicate publish would trigger duplicate SOAP generation or
-  duplicate bundle assembly, so idempotency here isn't just tidiness).
-- The JWT is what `audio-ingestion` (TASK-020) and `nudge-service` (TASK-041)
-  validate before accepting a WebSocket connection. Signing secret is
-  `JWT_SIGNING_KEY` in `.env.example` — symmetric (HS256) is fine for v1,
-  every service is first-party.
-- This session-start/session-end pair did not exist as its own task in earlier
-  drafts of this file — it is now **TASK-006**, added to Phase 0, and it is a
-  prerequisite for TASK-020, TASK-021, TASK-030, TASK-041, and TASK-060. Do not
-  start those without TASK-006 done first.
+Implemented as **TASK-006** (prerequisite for TASK-020, 021, 030, 041, 060).
+- `services/track-a-clinical` owns session lifecycle, because it owns `encounters`.
+- `POST /sessions/start` — body `{patient_id, provider_id, ehr_encounter_id}`.
+  Creates an `encounters` row (`status='active'`; wire `patient_id` → column
+  `patient_fhir_id`), mints a JWT with claims `{session_id, provider_id, exp}` — no
+  `iss`/`aud` in v1 (the unused `JWT_ISSUER`/`JWT_AUDIENCE` vars wait on a later
+  hardening task that must also grow the validators). Lifetime from
+  `SESSION_TTL_SECONDS` (default 900). `session_id` is a server-generated UUID.
+  Returns `{session_id, jwt}`. **Publishes `session_id` to `sessions:started`
+  before responding**, so a consumer is subscribed before the client can open its
+  audio socket. A failed publish is a 503 — an unwatched encounter raises no nudges
+  and looks like one with nothing to flag.
+- `POST /sessions/{session_id}/end` — sets `status='completed'`, `ended_at=NOW()`,
+  publishes `session:ended:{session_id}` (empty payload; the trigger for TASK-030
+  SOAP generation and TASK-060 bundle assembly). Unknown/soft-deleted → 404.
+  Repeat-ending a completed session → 200, idempotent, **no second publish** (it
+  would duplicate SOAP generation and bundle assembly).
+- `audio-ingestion` (TASK-020) and `nudge-service` (TASK-041) validate the JWT
+  before accepting a WebSocket. Signing secret `JWT_SIGNING_KEY`, HS256.
 
 **A visit outlasting the token re-mints; the encounter never ends because a
-token expired.** `SESSION_TTL_SECONDS` is 15 minutes and a real orthopedic or
-dermatology encounter routinely runs longer, so this is an ordinary case rather
-than an edge one. It is settled here, once, because both session screens hit it
-identically — TASK-025 on mobile and TASK-070 on web — and two apps each
-deciding it alone is how they end up disagreeing. Both cite this section;
-neither re-derives it.
+token expired.** Visits routinely exceed 15 minutes. Both apps (TASK-025 mobile,
+TASK-070 web) follow these rules and do not re-derive them.
 
-- **The token bounds connection establishment, not stream lifetime.** Every
-  real-time endpoint validates the JWT once, before completing the handshake,
-  and never re-validates a connection that is already open — see
-  `audio_stream()` in `services/audio-ingestion/src/api/websocket.py`, where
-  `_authenticate` runs ahead of `accept()` and nothing in the receive loop
-  revisits it. So an audio socket opened at minute 0 keeps streaming at minute
-  40. Expiry only bites when a *new* socket must be opened: a reconnect after a
-  drop, or the nudge socket (TASK-041) opening later than the audio socket.
+- **The token bounds connection establishment, not stream lifetime.** Endpoints
+  validate once before the handshake (`_authenticate` before `accept()` in
+  `services/audio-ingestion/src/api/websocket.py`) and never re-validate an open
+  connection. Expiry only matters when a *new* socket opens (reconnect, or the
+  nudge socket opening later).
 - **Re-mint for the same `session_id`. Never by calling `POST /sessions/start`
-  again.** A second start creates a second `encounters` row with a new
-  server-generated `session_id`, which forks one visit into two encounters:
-  the transcript splits across two `transcription:{session_id}` channels,
-  TASK-030 generates two partial SOAP notes from two partial buffers, TASK-060
-  assembles a bundle from whichever half it saw, and the `procedure_seen:` set
-  no longer dedups across the visit, so one procedure raises a nudge twice.
-  Nothing errors anywhere along that path — it is the failure this bullet
-  exists to prevent, and it is exactly the shortcut a client reaches for when
-  the only endpoint it has is `/sessions/start`.
+  again.** A second start forks one visit into two encounters: split transcript
+  channels, two partial SOAP notes, a half bundle, and `procedure_seen:` no longer
+  dedups — all silently.
 - **The endpoint that re-mints without starting a session is
-  `POST /sessions/{session_id}/token`** (TASK-006b), and it exists. It returns
-  `{session_id, jwt}` in the standard envelope with **200, not 201** — nothing is
-  created, which is the whole distinction from `/sessions/start`. It writes no
-  row beyond its audit trail and publishes nothing, because no consumer learns
-  anything from a re-mint and a second `sessions:started` would make TASK-021
-  re-subscribe to a channel it already holds. An unknown or soft-deleted
-  `session_id` is a 404; an encounter already `completed` is a **409**, because a
-  finished visit must not be able to reopen an audio socket.
+  `POST /sessions/{session_id}/token`** (TASK-006b). Returns `{session_id, jwt}`
+  with **200, not 201**; writes nothing beyond its audit row; publishes nothing.
+  Unknown/soft-deleted → 404; `completed` encounter → **409** (a finished visit
+  must not reopen an audio socket).
 - **Refresh proactively and reactively**: before opening any new socket when the
-  held token is close to `exp`, and on `AUTH_REJECTED` from a socket that failed
-  to open. Clients already hold `exp` — a claim in the token they were given —
-  so the proactive check costs nothing.
+  held token is near `exp`, and on `AUTH_REJECTED` from a socket that failed to open.
 - **The credential is the session's own token, in an `Authorization: Bearer`
-  header, expired or not.** Only the header carrier is accepted here; the
-  `Sec-WebSocket-Protocol` carrier below exists because the native `WebSocket`
-  constructor cannot set headers, and a plain POST can. Validation is everything
-  `audio-ingestion`'s validator does — signature under `JWT_SIGNING_KEY`,
-  required claims, and the token's `session_id` claim equal to the path's —
-  except that expiry is not fatal within `SESSION_REMINT_GRACE_SECONDS` past
-  `exp`. **That default of 3600 is an assumption, not a measurement** — accepted
-  as a starting value when TASK-006b was built and not since validated against a
-  real visit. Treat it as provisional rather than as a settled constant.
-  Why that strength and no more: **a re-mint endpoint should be exactly as strong
-  as the sockets its tokens open.** `validate_token()` in audio-ingestion also
-  proves only possession, no provider-authentication mechanism exists anywhere in
-  this repo yet, and `POST /sessions/start` itself takes `provider_id` as an
-  unauthenticated body field. Demanding a stronger credential to refresh a token
-  than to use one would be ceremony, and would block the endpoint on
-  infrastructure that does not arrive before SMART on FHIR in Phase 5.
-  What the grace window actually bounds is **how long one captured token stays
-  useful** — not how long a live client may keep refreshing, which is expected
-  and is no stronger than holding one socket open. It matters because nothing
-  auto-completes an abandoned encounter: `/sessions/{id}/end` is the only writer
-  of `status='completed'`, so without the window a token leaked from a visit
-  nobody remembered to end would authorise a re-mint indefinitely.
-  **Re-minting revokes nothing** — tracked as issue #51. With no `jti` and no
-  server-side token store, every token issued for a session inside the window
-  stays equally acceptable, including one a later re-mint superseded. That is
-  inherent in accepting a bearer token as its own refresh credential; revisit it
-  when real provider authentication lands, and do not assume otherwise in the
-  meantime. Ending the encounter is the only revocation available today, and it
-  is all-or-nothing.
+  header, expired or not** (header carrier only). Validation matches
+  audio-ingestion's — signature, required claims, `session_id` claim equals path —
+  except expiry is tolerated within `SESSION_REMINT_GRACE_SECONDS` past `exp`
+  (**default 3600 is an unvalidated assumption; treat as provisional**). A re-mint
+  endpoint is exactly as strong as the sockets its tokens open; no provider auth
+  exists before Phase 5. The grace window bounds how long a *captured* token stays
+  useful, since nothing auto-completes an abandoned encounter.
+  **Re-minting revokes nothing** (issue #51): no `jti`, no token store, so every
+  token in the window stays valid. Ending the encounter is the only revocation.
 - **The provider comes from the `encounters` row, never from the presented
-  token's claim.** The row is what `/sessions/start` recorded, so a re-mint
-  cannot alter or widen the identity the original token was issued for.
-- **A refreshed token does not extend the encounter.** The encounter ends when
-  the provider ends it, via `POST /sessions/{session_id}/end`. Token lifetime
-  and visit lifetime are independent, and conflating them is what produced the
-  question in the first place.
+  token's claim.**
+- **A refreshed token does not extend the encounter.** Token lifetime and visit
+  lifetime are independent; only `/end` ends a visit.
 
 **Session-scoped routes are keyed on `session_id`, and the note routes carry no
-credential in v1.** Settled here rather than inside TASK-032 because it is the
-answer Known Constraints #8 asks for — the rule that nothing invents a parallel
-auth mechanism only works if the real answer is written down where the next task
-will look for it.
-
-- **`session_id` is the only identifier this service exposes to clients.**
-  `POST /sessions/start` returns `{session_id, jwt}` and nothing hands out
-  `encounters.id`, so `GET`/`PATCH /notes/{session_id}` (TASK-032) key on the
-  session like every route and every Redis channel here. Surfacing the encounter
-  primary key for one route would give clients two names for one visit and
-  guarantee they eventually disagree about which to send.
-- **Those two routes take no session token in v1, and `actor_id` comes from the
-  `encounters` row.** That matches the strength of everything around them:
-  `POST /sessions/start` accepts `provider_id` as an unauthenticated body field,
-  `validate_token()` proves possession only, and no provider-authentication
-  mechanism exists in this repository before SMART on FHIR in Phase 5. The
-  provider recorded on the encounter is the actor, never a claim presented by
-  the caller — the same rule the re-mint endpoint follows.
-- **`validate_remint_credential` is deliberately *not* reused here, and the
-  reason is structural rather than stylistic.** It answers 409 for an encounter
-  whose status is `completed`, because a finished visit must not be able to
-  reopen an audio socket. But note review happens *only* on completed
-  encounters — TASK-030 generates the note from the `session:ended` signal — so
-  requiring that credential would make every note unreadable by construction.
-  Do not "fix" the note routes by adding it. A real credential for them arrives
-  with provider authentication in Phase 5, and it will have to treat a completed
-  encounter as the normal case rather than as the error one.
-- **Note access is still PHI and is still audited**, as `READ_NOTE` and
-  `UPDATE_NOTE` from the action vocabulary below. Absent authentication is a
-  reason the audit trail matters more, not less.
+credential in v1.** (Answers Known Constraints #8.)
+- **`session_id` is the only identifier this service exposes to clients.** Nothing
+  hands out `encounters.id`; `GET`/`PATCH /notes/{session_id}` (TASK-032) key on the
+  session. Exposing both would give clients two names for one visit.
+- **Those routes take no session token in v1, and `actor_id` comes from the
+  `encounters` row** — matching the strength of everything around them (unauthed
+  `provider_id` on start, possession-only tokens, no provider auth before Phase 5).
+- **`validate_remint_credential` is deliberately *not* reused here.** It 409s on
+  completed encounters, and notes exist *only* on completed encounters. Do not
+  "fix" the note routes by adding it; Phase 5's credential must treat completed as
+  the normal case.
+- **Note access is still PHI and is still audited** (`READ_NOTE`, `UPDATE_NOTE`).
 
 **A route keyed on a resource rather than a session follows the same v1 rule.**
-The bullets above are written for `GET`/`PATCH /notes/{session_id}`, whose path
-names the session. `PATCH /nudges/{nudge_id}/acknowledge` (TASK-041b) does not:
-it is keyed on the `clinical_nudges` primary key, because `nudge_id` is the only
-identifier the nudge payload hands a client. Settled here rather than inside
-TASK-041b because TASK-042 and TASK-043 call that endpoint from two platforms,
-and two clients each deciding it alone is how they end up disagreeing.
-
-- **The v1 pattern is unchanged: no credential, and audit instead.** It covers a
-  browser-facing route acting on one encounter's data whether or not its path
-  carries a `session_id`. Nothing in the note routes' reasoning depended on the
-  path shape — it rested on `POST /sessions/start` accepting `provider_id` as an
-  unauthenticated body field, and on `validate_token()` proving possession only.
-  Both are still true here.
-- **`packages/session-auth` genuinely does not fit this shape, which is why
-  reusing it is not the cheaper answer.** Its check is that the token's
-  `session_id` claim equals the `session_id` in the path, and this path has no
-  such segment to compare against. Putting one there purely to make the
-  validator fit would hand clients two names for one nudge, which the first
-  bullet of this section rejects for the same reason it rejects exposing
-  `encounters.id`.
-- **`actor_id` is resolved through the resource to the `encounters` row** —
-  `nudge_id` → `clinical_nudges.encounter_id` → `encounters.provider_id` — and
-  never taken from the caller. The same rule the note routes and the re-mint
-  endpoint follow, one join further away.
-- **The route still audits.** Absent authentication is a reason the trail
-  matters more, not less, exactly as for note access.
-- **The eventual fix is a *resolved* `session_id`, and it is deliberately not
-  built for one route.** Generalising `packages/session-auth` to validate a
-  token's claim against the session a resource belongs to — looking up which
-  encounter owns the nudge, then comparing — is the honest version of this
-  check. Take that direction when a second or third non-session-keyed browser
-  route makes audit-only feel thin, or when provider authentication lands in
-  Phase 5, whichever comes first. This is a judgement between two reasonable
-  options rather than the only defensible one: v1 buys lower complexity, and the
-  price is written down here instead of being discovered later.
-- **This settles credentials and says nothing about CORS.** Two separate
-  questions; neither answers the other. CORS is settled on its own terms in
-  "CORS and browser reachability" below, which is what actually makes a
-  browser-facing route reachable from `apps/web`.
+`PATCH /nudges/{nudge_id}/acknowledge` (TASK-041b) is keyed on the
+`clinical_nudges` PK (the only id the nudge payload gives a client).
+- **No credential, and audit instead** — the reasoning never depended on path shape.
+- **`packages/session-auth` does not fit**: it compares the token's `session_id` to
+  one in the path, which this path lacks. Do not add a path segment just to fit it.
+- **`actor_id` is resolved through the resource** — `nudge_id` →
+  `clinical_nudges.encounter_id` → `encounters.provider_id` — never from the caller.
+- **The eventual fix is a *resolved* `session_id`**: generalise session-auth to
+  compare the token's claim to the session owning the resource. Do it when a second
+  or third non-session-keyed browser route appears or Phase 5 auth lands. Not built
+  for one route — a deliberate v1 trade.
+- **This settles credentials and says nothing about CORS** — see "CORS and browser
+  reachability".
 
 **How the JWT reaches a WebSocket endpoint — either carrier, never both
-required.** A WebSocket endpoint accepts the session token in *either* of two
-places, and one is enough:
+required.**
 
 ```
-Authorization: Bearer <jwt>                         # header carrier
+Authorization: Bearer <jwt>                                     # header carrier
 Sec-WebSocket-Protocol: medauth.session.v1, medauth.jwt.<jwt>   # subprotocol carrier
 ```
 
-The header is the obvious carrier and it is what service-to-service callers and
-tests use. It is not available to a browser: the native `WebSocket` constructor
-takes a URL and a subprotocol list and nothing else, and `apps/web` is required
-by the Frontend section above to use the native API rather than a library that
-tunnels its own handshake. That is a platform constraint, not an implementation
-gap to route around, so the second carrier exists for it. Every real-time
-endpoint therefore supports both, and this is the canonical mechanism rather
-than something TASK-020 settled locally: TASK-041's nudge socket inherits it by
-reference, and TASK-023's browser capture has to send the subprotocol form
-because nothing else is open to it.
-
-The implementation of all of this is `packages/session-auth`, imported by every
-real-time endpoint rather than reimplemented per service — see that package's
-design decisions below.
-
-Rules that make the two carriers behave identically:
-- **Validation is the same whichever carrier was used** — signature against
-  `JWT_SIGNING_KEY`, `exp` in the future, and the token's `session_id` claim
-  equal to the `session_id` in the URL path. Where the token arrived from is not
-  an input to any of those checks.
-- **Reject before the handshake completes.** Validation runs before the
-  connection is accepted, never after, so an unauthenticated peer never reaches
-  a state where it can send a frame. The close code is 4401.
-- **The server echoes `medauth.session.v1` and never the token.** A browser
-  aborts a connection whose handshake response does not name one of the
-  subprotocols it offered, so the accept must select one — and selecting the
-  `medauth.jwt.` entry would write the credential into the response headers, and
-  from there into every proxy access log on the path. Offer the version marker
-  first for exactly this reason: it gives the server something safe to echo.
-- **A token carried this way is still a credential.** It is never logged, never
-  put in an error message, and never placed in the URL query string, which is
-  the third thing browsers can carry and the one place a credential is certain
-  to be logged by intermediaries. The 15-minute `SESSION_TTL_SECONDS` lifetime
-  bounds the damage; TLS is what actually protects the handshake.
-
-Note what a close code cannot do. Below the ASGI layer, a connection refused
-*before* the handshake completes has no WebSocket frame to carry a code in, so a
-real server answers the upgrade request with an HTTP status — the 4401 is what
-the application emits and what an ASGI-level test observes, and a browser client
-sees a failed upgrade rather than an `onclose` with 4401. This is the correct
-trade: accepting an unauthenticated handshake purely so the rejection reads
-nicely is worse than the client having to distinguish a failed upgrade from a
-normal close.
-
+The header is for service callers and tests. Browsers cannot set headers on the
+native `WebSocket`, so the subprotocol carrier exists for them (TASK-023 must use
+it). Every real-time endpoint supports both, implemented once in
+`packages/session-auth`.
+- **Validation is identical whichever carrier was used** — signature against
+  `JWT_SIGNING_KEY`, `exp` in the future, `session_id` claim equals URL path.
+- **Reject before the handshake completes.** Close code 4401. (Below ASGI a
+  pre-handshake refusal is an HTTP status on the upgrade, so browsers see a failed
+  upgrade rather than `onclose` 4401 — the correct trade.)
+- **The server echoes `medauth.session.v1` and never the token** — echoing the
+  `medauth.jwt.` entry would write the credential into response headers and proxy
+  logs. Clients offer the version marker first so there is something safe to echo.
+- **A token carried this way is still a credential**: never logged, never in an
+  error message, never in a URL query string.
 
 ### A SMART launch is not an encounter session (cross-cutting)
-Settled here rather than inside TASK-051 because TASK-052b and TASK-070 both
-depend on the answer, and because a task that settles it implicitly by choosing
-a Redis key name in isolation has decided a repository-wide vocabulary question
-by accident.
+**Three identifiers, never equal, none derivable from another, three lifetimes:**
+- **`session_id` — the encounter session.** Minted only by `POST /sessions/start`
+  (track-a-clinical). Keys every Redis channel, real-time endpoint and
+  session-keyed route. Lives for the visit; only `/end` ends it.
+- **`launch_id` — the SMART on FHIR OAuth launch.** Minted by `GET /fhir/launch`
+  (fhir-integration, TASK-051). Names one authorization flow and its EHR token;
+  lives as long as the EHR says.
+- **`ehr_encounter_id` — the encounter as the EHR knows it.** Minted by the EHR,
+  passed to `/sessions/start`, stored on `encounters.ehr_encounter_id`. Outlives both.
 
-**There are three identifiers. No two of them are the same value, none is
-derivable from another, and they have three different lifetimes.**
-
-- **`session_id` — the encounter session.** Minted server-side by
-  `POST /sessions/start` in `track-a-clinical` (TASK-006), which is the only
-  issuer. It names one clinical visit. Every Redis channel in the canonical list
-  below, every real-time endpoint, and every session-keyed route is keyed on it.
-  Its lifetime is the visit, and only `POST /sessions/{session_id}/end` ends it.
-- **`launch_id` — the SMART on FHIR OAuth launch.** Minted server-side by
-  `GET /fhir/launch` in `fhir-integration` (TASK-051) when an EHR hands us `iss`
-  and `launch`. It names one authorization flow and the EHR access token that
-  flow produces. Its lifetime is the EHR's access token lifetime, which is the
-  EHR's to decide and not ours.
-- **`ehr_encounter_id` — the encounter as the EHR knows it.** Minted by the
-  **EHR**, not by us, and handed to `POST /sessions/start` in the request body,
-  which stores it on `encounters.ehr_encounter_id`. Its lifetime is the EHR's
-  record, which outlives both of the others: the chart entry is still there
-  years after the visit, the session and the launch are both long gone.
-
-**How the third one relates to the other two, stated rather than inferred.**
-`session_id` and `ehr_encounter_id` name *the same clinical visit* in two
-namespaces — ours and the EHR's — which is exactly what makes them easy to
-conflate and expensive to conflate. `launch_id` names something else entirely.
-Three consequences follow, and none of them is optional:
-
-- **It is the EHR's namespace, so it is only unique within one EHR.** Two
-  vendors can both issue `Encounter/1`, the same property that puts an
-  EHR-asserted practitioner reference in `fhir_practitioner_ref` as an absolute
-  URL rather than a bare id. Never treat an `ehr_encounter_id` as globally
-  unique, and never key anything of ours on it alone.
-- **Every `/fhir/*` route keyed on an encounter takes this one**, never
-  `session_id` — `GET /fhir/encounter/{encounter_id}` and
-  `/coverage-context` already do, and the note write-back does too. The rule is
-  the one this section already states: a route takes one identifier and says
-  which, and giving it the wrong one is a 404 rather than a lookup that misses.
-- **It is nullable, and a null is a real state rather than an oversight.** A
-  session started outside a SMART launch has none, and anything that needs one
-  — the note write-back above all — must answer for its absence explicitly
-  instead of assuming a visit recorded here corresponds to a chart entry there.
-
-**Why conflating them would be wrong, concretely.** A SMART launch happens when
-a provider opens MedAuth from a chart; an encounter starts when they tap "start
-visit." The launch therefore precedes the encounter, and at the moment
-`GET /fhir/callback` must store the access token there is no `session_id` in
-existence to key it on. In the other direction, one launch can outlive several
-encounters, and an access token can expire and be renewed in the middle of a
-visit without the visit ending — the same independence already settled above for
-the MedAuth session token, arriving from the EHR's side.
-
-**The Redis keys are therefore `fhir_launch:{state}` and
-`fhir_token:{launch_id}`.** Earlier drafts of this document named them
-`fhir_session:{state_param}` and `fhir_token:{session_id}`, written before
-anyone traced which session was meant. `session_id` in this repository already
-names one thing, and reusing it for the OAuth flow is the collapse the note
-routes reject — "two names for one visit" — arriving from the other direction:
-one name for two things. The word `session` does not appear in the FHIR OAuth
-flow's vocabulary at all, so the collision cannot be reintroduced by a later
-reader reaching for the obvious word.
-
-What follows, for the tasks that depend on this:
-- **TASK-052b was the first place two of them were in scope at once.** It runs
-  at SMART launch and writes `insurance_payer`, `insurance_plan_type` and
-  `state` onto an `encounters` row, so it needs an explicit recorded mapping
-  from an encounter to the `launch_id` it was created under. An explicit mapping
-  is the whole point; an assumption that the two values are equal is the failure
-  this section exists to prevent.
-- **TASK-070 holds both at once.** The web app receives `launch_id` from
-  `/fhir/callback` and `session_id` from `/sessions/start`, and sends whichever
-  one the route it is calling is keyed on. A route takes one or the other and
-  says which; nothing accepts "the session id" unqualified.
-- **TASK-053 holds all three at once**, which is what forced the third one into
-  this section. Writing a note back to the chart needs `session_id` to find the
-  note, `launch_id` to hold the EHR credential, and `ehr_encounter_id` to say
-  which chart entry the note belongs to — three values, three parameters, no
-  defaulting of one from another.
-- **None is derivable from another, and no route accepts them
-  interchangeably.** A route keyed on `launch_id` given a `session_id` is a 404,
-  not a lookup that happens to miss.
-- **The three never share a key namespace.** `fhir_*` keys belong to the OAuth
-  flow; everything keyed on `{session_id}` in the canonical list belongs to the
-  encounter; an `ehr_encounter_id` keys nothing of ours at all — it is a value
-  we store and hand back to the EHR, never a key we look anything up by.
+`session_id` and `ehr_encounter_id` name the same visit in two namespaces;
+`launch_id` names something else. Consequences:
+- **`ehr_encounter_id` is unique only within one EHR** — never treat it as global
+  or key anything of ours on it alone.
+- **Every `/fhir/*` route keyed on an encounter takes `ehr_encounter_id`**, never
+  `session_id` (`GET /fhir/encounter/{encounter_id}`, `/coverage-context`, note
+  write-back).
+- **It is nullable** — a session started outside a SMART launch has none, and
+  anything needing it (note write-back) must handle absence explicitly.
+- A launch precedes the encounter (no `session_id` exists at `/fhir/callback`), one
+  launch can outlive several encounters, and an EHR token can renew mid-visit.
+- **Redis keys are `fhir_launch:{state}` and `fhir_token:{launch_id}`** — never
+  `fhir_session:*` or anything keyed on `session_id`. The word `session` stays out
+  of the OAuth flow's vocabulary.
+- TASK-052b records an explicit encounter → `launch_id` mapping (never assumes
+  equality). TASK-070 holds both and sends whichever the route is keyed on. TASK-053
+  holds all three — three parameters, no defaulting one from another.
+- **No route accepts them interchangeably** — the wrong one is a 404.
+- **They never share a key namespace.** `ehr_encounter_id` keys nothing of ours.
 
 ### Handing a completed SMART launch back to a client (cross-cutting)
-Settled by TASK-051f, and settled here rather than inside it because both client
-apps consume the result — TASK-025c on mobile and TASK-070 on web — and the rule
-for that case applies: two apps each deciding one cross-cutting question
-separately is how they come to disagree. Both cite this section; neither
-re-derives it.
+Settled by TASK-051f; TASK-025c (mobile) and TASK-070 (web) cite this.
 
-**The gap.** `GET /fhir/callback` answers with `{launch_id, ehr_type,
-expires_in}` as JSON, rendered in whatever browser the EHR redirected. That is a
-correct answer for a service-to-service caller and no answer at all for an
-application: the browser displays the JSON and the app that started the launch
-never sees it. So no client could obtain a `launch_id`, and every launch-keyed
-route — the TASK-052 reads, TASK-051d's launch context, TASK-025b's patient
-search — was unreachable from both apps.
-
-**What the obvious fix would have cost.** Redirecting to the client with
-`?launch_id=...` puts a capability handle in a URL. A `launch_id` resolves to an
-EHR access token, so holding one is enough to read a chart, and this document
-already refuses that class of value in a query string — "the one place a
-credential is certain to be logged by intermediaries". A fragment is not an
-answer either: it survives a browser but not a native `WebBrowser` result, and
-it still lands in history.
+**The gap:** `GET /fhir/callback` answers `{launch_id, ehr_type, expires_in}` as
+JSON in the browser, which no app can read. **Never redirect with
+`?launch_id=...`** — a `launch_id` resolves to an EHR token (a capability handle)
+and must not be in a URL; a fragment is no better.
 
 #### The callback keeps its JSON answer and gains a second delivery
-**The callback has two genuinely different callers, not one caller needing a
-different shape.** The service-to-service caller is already served correctly
-today, so the JSON answer is supplemented rather than replaced. Replacing it
-would break a working consumer in order to serve a new one.
-
-**Which answer a launch gets is declared by whoever initiated it — never
-inferred, and never chosen as a default.** `GET /fhir/launch` takes an explicit
-`delivery` parameter naming how the completed launch should be handed back. It
-is recorded on the `fhir_launch:{state}` record, and so it reaches the callback
-on the callback's own request, through the `state` the authorization server
-sends back. The callback reads it off the claimed record and answers
-accordingly.
-
-- **The vocabulary is closed** — `LaunchDelivery`, a `StrEnum`, for the third
-  reason this repository has already made one: the value round-trips through
-  Redis, so a free-form string would put the write side and the read side in two
-  modules with nothing holding them in step. Same argument as `EHRType`,
-  `AuditAction` and the payer slugs.
-- **`delivery=json`** is the existing answer, unchanged.
-- **`delivery=web`** and **`delivery=mobile`** redirect the browser to that
-  platform's configured return target, carrying a claim code rather than the
-  `launch_id`.
-- **An absent `delivery` means no client is waiting for this launch**, which is
-  exactly true of an EHR-initiated launch — where the EHR, not one of our apps,
-  opens the launch URL — and of a service-to-service caller. It answers JSON.
-  That is not a default chosen between two candidates; it is the unchanged
-  behaviour of the only caller that existed before this section, and it is why
-  an EHR launch nobody's app started does not redirect into an app that is not
-  running.
-- **Nothing sniffs the request to decide.** Not `Accept`, not `User-Agent`, not
-  the presence of some other parameter. A caller that cannot see how its
-  response shape was chosen cannot tell a wrong guess from a correct answer.
+- **Which answer a launch gets is declared by whoever initiated it — never
+  inferred, and never chosen as a default.** `GET /fhir/launch` takes an explicit
+  `delivery` param, stored on the `fhir_launch:{state}` record and read back by the
+  callback from the claimed record.
+- **Closed vocabulary `LaunchDelivery` (`StrEnum`)** — it round-trips through Redis.
+- **`delivery=json`**: existing answer, unchanged.
+- **`delivery=web` / `delivery=mobile`**: redirect to that platform's configured
+  return target carrying a claim code, not the `launch_id`.
+- **Absent `delivery`** = no client is waiting (EHR-initiated or service caller) →
+  JSON. This is the unchanged original behaviour, not a chosen default.
+- **Nothing sniffs the request** (`Accept`, `User-Agent`, etc.).
 
 #### The handoff is a single-use claim code, exchanged over POST
-The shape is the one this flow already uses for the launch itself, because the
-threat model is identical: `fhir_launch:{state}` is minted server-side, held
-briefly, and consumed atomically by the callback so a replay finds nothing.
-
-- **`fhir_launch_claim:{claim}`** holds `launch_id`, `ehr_type` and the access
-  token's expiry, under a short TTL bounding a browser redirect reaching an app
-  rather than anything a human does.
-- **`POST /fhir/launch/claim`** exchanges the code for the same
-  `{launch_id, ehr_type, expires_in}` body the JSON delivery returns. A POST,
-  never a GET: the code is redeemed in a request body, not a URL.
-- **Redemption is atomic and single-use**, through the same `GETDEL` that
-  `claim_launch()` uses. A redeemed code is gone, so a second attempt is a 404 —
-  never a second working handle. Unknown, expired and already-redeemed are one
-  answer, as they already are for an unknown `state`, so a caller probing codes
-  learns nothing about which ones were real.
-- **The claim code is not the capability handle.** It names one launch for a few
-  seconds and dies on first use, which is what makes it safe to carry in a
-  redirect where a `launch_id` is not. This is the same distinction OAuth itself
-  draws between the authorization `code` already arriving in this service's own
-  callback query string and the access token that code buys.
-- **Everything TASK-051 protects stays protected.** No access token, refresh
-  token or scope reaches the client; the response carries only what the JSON
-  delivery already carried. Nothing logs the `launch_id`, and nothing logs the
-  claim code either — a short-lived credential is still a credential.
-
-**What this does not defend against, stated rather than left to be found.** A
-claim code intercepted between the redirect and the app — a hostile app
-registering the same custom URI scheme on Android is the real case — could be
-redeemed by the interceptor within the TTL. What makes that narrow rather than
-open: the window is seconds, the code dies on first use so a race is visible as
-a failed launch rather than a silent one, and `openAuthSessionAsync` returns the
-redirect to the app that opened the session. The upgrade path if that stops
-being enough is to bind the claim to a client-generated verifier the way PKCE
-already binds the authorization code, reusing `src/smart/pkce.py` unchanged. It
-is deliberately not built now, and the condition to revisit it is a real vendor
-or platform where scheme interception is demonstrated, not a hypothetical.
+- **`fhir_launch_claim:{claim}`** holds `launch_id`, `ehr_type`, access-token
+  expiry under a short TTL.
+- **`POST /fhir/launch/claim`** exchanges it for `{launch_id, ehr_type,
+  expires_in}` — POST, never GET.
+- **Redemption is atomic and single-use** (`GETDEL`, as `claim_launch()`). Unknown,
+  expired and already-redeemed are one 404 answer.
+- **The claim code is not the capability handle** — like OAuth's code vs. token.
+- No access token, refresh token or scope reaches the client. Neither `launch_id`
+  nor claim code is ever logged.
+- **Known limit:** a claim code intercepted in the redirect (hostile app
+  registering the same URI scheme on Android) could be redeemed within the TTL.
+  Narrow because the window is seconds and a race shows as a failed launch. Upgrade
+  path: bind the claim to a client verifier reusing `src/smart/pkce.py`. Not built;
+  revisit only when interception is demonstrated on a real platform.
 
 #### Two return targets, two settings, both bound and both validated
-**A mobile app URI scheme and a web HTTPS URL are not one setting with an
-assumed format**, and modelling them as one would mean a value whose validity
-depends on which client happens to use it. They are separate, explicitly named,
-and read from a config class rather than sitting in `.env.example` with no
-reader — the failure this repository has already found three times.
-
-- **`SMART_WEB_RETURN_URL`** — an absolute `https://` URL. `http://` is accepted
-  only for `localhost` and `127.0.0.1`, which is what local development and CI
-  actually run; TLS everywhere applies to everything else.
-- **`SMART_MOBILE_RETURN_URI`** — a custom scheme URI such as
-  `medauth://launch`. `http`/`https` is refused here: a scheme the OS routes
-  back to the app that opened the auth session is the whole point, and an https
-  URL in this setting would open a web page instead of returning to the app.
-- **Neither may carry a query string or a fragment**, because the claim code is
-  appended as one and a target that already has a query would silently produce
-  two.
-
-**Both are validated at startup and a bad or missing one refuses to boot.** The
-alternative surfaces as a dead-end at the end of an OAuth redirect chain — after
-discovery, after a human has logged in, after a token exchange — which is the
-single worst place in this system to discover a configuration error, because the
-launch has already spent a real credential and the browser is sitting on a page
-nobody can act on. A startup failure names the variable instead. This does mean
-a deployment that serves only one platform still configures both; that is
-accepted deliberately, because a return target is a deployment-wide constant
-rather than a per-launch one and the cost of setting it is one line.
+- **`SMART_WEB_RETURN_URL`** — absolute `https://`; `http://` only for `localhost`
+  / `127.0.0.1`.
+- **`SMART_MOBILE_RETURN_URI`** — custom scheme (e.g. `medauth://launch`);
+  `http`/`https` refused.
+- **Neither may carry a query string or fragment** (the claim code is appended).
+- **Both are validated at startup and a bad or missing one refuses to boot** —
+  otherwise the error surfaces at the end of an OAuth chain after a real credential
+  is spent. Single-platform deployments still set both.
 
 #### This route touches no PHI, so it logs and does not audit
-`POST /fhir/launch/claim` returns a `launch_id`, a vendor name and a number of
-seconds. None of it is patient data, and Known Constraints #6 is an
-if-and-only-if in both directions: an operational write in `audit_log` makes
-"who accessed patient X" a query you have to filter rather than one you can just
-run. It logs at INFO through `logging.getLogger(__name__)`, exactly as
-`GET /fhir/callback` already does for the same reason and as
-`POST /policies/ingest` does for its own. The PHI reads made *under* the
-resulting launch audit as they already do.
+`POST /fhir/launch/claim` returns a `launch_id`, vendor name and seconds — logs at
+INFO, no `audit_log()` (Known Constraints #6 is if-and-only-if). PHI reads under the
+launch audit as usual.
 
 #### A failed launch is delivered the same way, and carries no claim code
-Settled by TASK-051g, which found the gap while building TASK-070. Everything
-above this subsection describes a launch that *completed*. A launch that does
-not complete was left raising `ApiHTTPException` identically whatever `delivery`
-its record declared, which means a `delivery=web` launch the provider declines
-renders a JSON error document on `fhir-integration`'s own origin. The provider
-is left looking at a page that is not MedAuth, with no link back to it, and the
-app that started the launch never learns the launch ended.
-
-**It is worse on web than on mobile, which is why it surfaced there.**
-`openAuthSessionAsync` hands control back to `apps/mobile` whatever the browser
-did, so mobile observes a cancellation as `cancel` and reports it. A browser
-launch navigates the page away entirely: no observer is left in the tab, and
-nothing `apps/web` can do from its own side closes the gap. Without a failure
-delivery that app cannot distinguish "the provider declined at the EHR" from
-"the provider is still signing in" from "the launch failed" — all three look
-like a load that carried no claim code.
-
-- **The failure follows the success delivery's shape and does not invent a
-  second mechanism.** A failure on a launch whose record declared `web` or
-  `mobile` redirects to that platform's configured return target, exactly as a
-  completed one does, carrying a fixed error code instead of a claim code.
-- **`delivery=json`, and an absent `delivery`, keep raising unchanged.** That is
-  the service-to-service caller, which is served correctly today and must not be
-  broken to serve a new consumer — the same "supplement, never replace" argument
-  this section already makes for the JSON success answer.
-- **A failure carries no claim code and writes no `fhir_launch_claim:` record.**
-  There is no launch to name, and issuing a code that resolves to nothing would
-  put a credential-shaped value in a redirect with no credential behind it.
-- **The error vocabulary is closed — `LaunchFailure`, a `StrEnum` — and is not a
-  diagnostic channel.** It is closed for the reason this repository has now
-  reached four times, after `payer-vocab`'s slugs, `AuditAction`, `EHRType` and
-  `LaunchDelivery` beside it: the value is matched by string equality, and here
-  it crosses into another language, where `apps/web` narrows it. What it carries
-  is enough to say "the launch did not complete, start again" and no more. The
-  operational detail stays in this service's log, where it already is.
-- **The EHR's own refusal reason is dropped at this boundary, deliberately.** An
-  OAuth `error` code is a string from a third party, and rendering it in our UI
-  puts it somewhere a provider reads as ours. It is logged and not forwarded.
-- **Two members rather than one, and the second is not a diagnostic.**
-  `declined` means the authorization server reported that the launch was
-  refused; `failed` means it did not complete for any other reason. They are
-  kept apart because a provider who cancelled deliberately and a provider whose
-  token exchange broke are in genuinely different situations, and telling the
-  first that something went wrong is as misleading as telling the second that
-  they cancelled. Both still end in "launch again", which is why there is no
-  third member: a distinction the provider cannot act on differently does not
-  earn a value here.
-- **Note what this does *not* copy from `POST /fhir/launch/claim`.** Unknown,
-  expired and already-redeemed are one answer there because telling them apart
-  would tell a caller probing codes which ones were real. That reasoning does
-  not transfer: the person at this browser already knows whether they clicked
-  "deny", so collapsing the two here would be taking the mechanism without the
-  justification for it.
+Settled by TASK-051g. Without it, a declined `delivery=web` launch strands the
+provider on a JSON error page on fhir-integration's origin, and the web app cannot
+tell "declined" from "still signing in" from "failed".
+- **A failure on a `web`/`mobile` launch redirects to that platform's return
+  target** carrying a fixed error code instead of a claim code.
+- **`delivery=json` and absent `delivery` keep raising unchanged.**
+- **No claim code and no `fhir_launch_claim:` record on failure.**
+- **Closed vocabulary `LaunchFailure` (`StrEnum`), not a diagnostic channel.** Two
+  members: `declined` (the authorization server refused) and `failed` (anything
+  else). Both mean "launch again"; no third member.
+- **The EHR's own refusal reason is dropped at this boundary** — logged, never
+  forwarded to our UI.
+- Unlike the claim route, `declined` vs `failed` are *not* collapsed: the person at
+  the browser already knows whether they clicked "deny".
 
 **One failure structurally cannot redirect, and no code may be added that makes
-it.** `GET /fhir/callback` claims the launch record through `claim_launch()`
-before it reaches any other failure, so when that returns `None` — an unknown,
-expired or replayed `state` — there is no record, and `delivery` is not merely
-unread but *unknowable*. That path keeps raising for every launch, `web` and
-`mobile` included. The wrong fix is to take `delivery` off the callback's own
-request instead: that is precisely the inference this section refuses for the
-success answer, and it would let anyone who can reach the callback choose where
-this service redirects a browser. The three failures that *can* be delivered are
-the ones after the record is in hand — the authorization server refused, no
-authorization code arrived, and the token exchange failed.
+it.** When `claim_launch()` returns `None` (unknown/expired/replayed `state`) there
+is no record, so `delivery` is unknowable and the callback raises for every launch.
+Never read `delivery` off the callback's own request — that would let anyone choose
+where this service redirects a browser. Only failures after the record is in hand
+(AS refused, no code, token exchange failed) are delivered.
 
-**Both apps render an error delivery as a failed launch**, distinct from what
-each of them previously showed. On web those two were the same screen — the
-sign-in screen with no message — and the whole point of this delivery is that
-they stop being the same thing. On mobile the shape a failure arrives in, a
-redirect carrying no claim code, already meant something else: a return URI the
-app and the service disagree about. So the failure must be read *before* that
-message, or the first provider the EHR refuses is told to contact an
-administrator about configuration.
-
-**The vocabulary is shared through `packages/fhir-client`; the URL parsing and
-the wording are not.** Both apps narrow the same value, and narrowing it twice
-is how they come to disagree about what an unrecognised member means — which is
-the one case where getting it wrong restores the original silence. What stays
-per-app is how a URL is read, because a browser's `location.search` and a
-custom-scheme URI React Native's partial `URL` mis-splits are genuinely
-different reads, and what the provider is told, because that package holds no
-UI. Same split, and the same trigger — a second consumer — as the three
-TypeScript packages that already exist.
+**Both apps render an error delivery as a failed launch**, distinct from the plain
+sign-in screen (web) and read *before* the "return URI misconfigured" message
+(mobile). **The vocabulary is shared through `packages/fhir-client`; the URL
+parsing and the wording are not** (browser `location.search` vs. React Native's
+partial `URL` differ; the package holds no UI).
 
 ### Which EHR a client-initiated standalone launch targets (cross-cutting)
-Settled by TASK-025c, and settled here rather than inside it because TASK-070
-performs the same launch from `apps/web` and the cross-cutting rule applies: two
-apps each deciding one question separately is how they come to disagree.
-
-**The question only exists for a standalone launch.** An EHR-initiated launch
-reaches `GET /fhir/launch` carrying `iss` — the EHR names itself and no client
-chooses anything. A standalone launch is a provider opening MedAuth directly, so
-the app itself has to say which EHR it is launching against, and neither app has
-ever held that value.
-
-**`iss` is read from configuration — `EXPO_PUBLIC_SMART_ISS` on mobile,
-`VITE_SMART_ISS` on web when TASK-070 lands — never a literal in source.** It is
-not a credential: an `iss` is a public FHIR base URL, and it is the `aud` an
-authorization request is bound to rather than anything that authorises access,
-so Expo inlining it into the shipped bundle costs nothing. An app whose variable
-is unset offers no standalone launch and says so, on the same terms as
-`patientSelectionUnavailable` reporting that no patient can be identified —
-never a launch against an empty issuer, which fails at SMART discovery in a way
-that reads as the EHR being down.
-
-**One configured `iss` per deployment is a deliberate scope limit tied to the
-current pilot stage. It is not an architectural choice, and must not be read as
-one.** Unlike `FHIR_INTEGRATION_URL` or `SMART_MOBILE_RETURN_URI`, which
-genuinely are deployment-wide constants, an issuer is per-practice as well as
-per-vendor: two practices on the same EHR have two different FHIR base URLs, and
-the EHR priority order above anticipates five vendors. Today there is one
-pilot-relevant target — Athenahealth, first in that order — so a single
-configured value serves every real caller, and building a selection mechanism
-now would be guessing at a shape nobody has yet.
-
-**The trigger to revisit is the second EHR-or-practice combination being
-onboarded, and at that point this stops being configuration at all.** Which
-practice a provider is launching against becomes a provider-facing choice made
-at launch time rather than a deployment-wide constant, so the value moves out of
-the build's environment and into a selection the app presents — and both apps
-take it from wherever that selection is recorded. Nothing here decides against
-that; the single-value arrangement is what one target costs today.
+Settled by TASK-025c; TASK-070 follows it. Only standalone launches need this (an
+EHR-initiated launch carries `iss`).
+- **`iss` is read from configuration — `EXPO_PUBLIC_SMART_ISS` on mobile,
+  `VITE_SMART_ISS` on web — never a literal in source.** It is a public FHIR base
+  URL, not a credential. If unset, the app offers no standalone launch and says so —
+  never a launch against an empty issuer.
+- **One configured `iss` per deployment is a deliberate scope limit tied to the
+  current pilot stage. It is not an architectural choice, and must not be read as
+  one.** Issuers are per-practice and per-vendor; today there is one pilot target
+  (Athenahealth).
+- **The trigger to revisit is the second EHR-or-practice combination being
+  onboarded**, at which point the issuer becomes a provider-facing selection at
+  launch time rather than build-time configuration.
 
 ### Writing clinical data out to the EHR (cross-cutting)
-Everything in this document before this section describes data coming *in* from
-an EHR, or moving between our own services. TASK-053 is the first write in the
-other direction — a generated SOAP note becoming a `DocumentReference` on a real
-patient's chart — and TASK-054 follows it with a prior-authorization submission
-to a payer. Settled here rather than inside TASK-053 because the rules below are
-about *leaving this system*, and the second and third outbound writer must not
-each decide them again.
+Applies to TASK-053 (note → `DocumentReference`), TASK-054 (prior-auth submission)
+and every later outbound writer.
 
-**Nothing a machine merely suggested may leave this system.** Every outbound
-writer filters `icd10_codes` and `cpt_codes` on `source` and sends only
-`llm-extraction` and `provider-accepted` entries. A `comprehend-medical` entry
-is a code the validating pass surfaced that no provider ever stated — the shape
-contract below already forbids TASK-060 from putting one in a payer bundle, and
-a patient's permanent chart is the more consequential artifact of the two, so
-the rule applies here with more force rather than less. The way such a code
-becomes sendable is unchanged and is the whole point of the `provider-accepted`
-value: a provider accepts it through `PATCH /notes/{session_id}`, which rewrites
-its `source`. Apply the filter by default in any new outbound path, and name
-this section at the filter site so a later reader finds a rule rather than an
-unexplained omission.
-
-**An outbound write is its own audited event, under its own action.**
-`AuditAction.WRITE_NOTE` means a note was generated and stored *here*; putting a
-note onto a chart is a different event with different consequences, and
-collapsing the two would make "was this note ever sent to the EHR" unanswerable
-from the audit trail. Add a distinct member — the same discipline that keeps
-`STREAM_AUDIO`, `WRITE_NUDGE` and `QUERY_POLICY` apart — in the change that
-writes it, per the action-vocabulary rule below.
-
-**One outbound write produces an audit row in each service that acted, and that
-is not double counting.** `fhir-integration` records that a note was sent to an
-EHR; `track-a-clinical` records that a `clinical_notes` row was mutated to carry
-the resulting document id. Two services made two distinct accesses to PHI and
-each records its own, with `service_name` telling them apart — the alternative,
-one service auditing on another's behalf, is the "one obligation in two places"
-arrangement this document rejects elsewhere. Each keeps its own actor rule
-unchanged: `fhir_practitioner_ref` from the launch on the `fhir-integration`
-side, `encounters.provider_id` on the `track-a-clinical` side.
-
-**A write-back never sets a provider-attestation flag.** `reviewed_by_provider`
-records that a human read and accepted the note, and sending the note somewhere
-is not a human reading it. This is the same rule as "loading the note screen
-does not mark it reviewed", one layer out, and it is written down before the
-first outbound writer exists rather than after one has quietly set the flag.
-
-**The service that owns the table records the result, over HTTP.** The write
-itself happens in `fhir-integration`, which holds the EHR credential and opens
-no database connection of its own; the resulting document id belongs on
-`clinical_notes`, which `track-a-clinical` owns. So the writer calls a
-**server-to-server route on the owning service** to record it. Neither service's
-existing constraint is relaxed to avoid the hop: `fhir-integration` does not grow
-a database connection it has deliberately never had, and `PATCH /notes/{session_id}`
-does not stop forbidding server-owned fields so that a client could send one.
-The two-service split is the correct shape, not a workaround — it is the same
-arrangement, and the same argument, as `track-a-clinical` calling
-`fhir-integration` over HTTP for coverage context, with the direction reversed.
-
-**PHI takes the shortest path, which means the server fetches it.** The note
-text and codes are read by `fhir-integration` from `track-a-clinical` over HTTP,
-never round-tripped through the browser, even though the review screen already
-holds them. A client that posts the note body back makes the content cross the
-network twice more and puts a chart write's payload under the control of the
-least trusted participant in it. The audit consequence is the one that settles
-it: read over HTTP and the owning service's route writes the `READ_NOTE` row
-that every other read of that data writes; accept it from a client and there is
-no such row, because from that service's point of view nothing was read.
-
-**A cross-service call needs a bound setting, not an `.env.example` line.** Any
-new service-to-service caller reads its target's base URL from its own config
-class. An entry that exists in `.env.example` and is read by nothing is a
-setting that looks configured and is not — the failure already found twice in
-the client apps' configuration, and once in this service's own
-`FHIR_INTEGRATION_URL`, which sat unread from TASK-001 until TASK-052b bound it.
-
-**Order an outbound write so the recoverable failure is the one that happens.**
-The external write goes first and the local record second. Both orders can fail
-in the middle, so the question is only which wreckage is findable: an EHR
-document that exists with nothing here pointing at it can be found on the chart,
-reconciled by its id, and is visible to the clinician who needs it, whereas a
-local row claiming a document exists when the write never happened is a silent
-lie that no query can distinguish from success. Same reasoning as the write
-ordering in TASK-011. When the second step fails, say so explicitly — name the
-created document's id in the error and log at ERROR — rather than reporting the
-whole operation as failed, which would invite a retry that duplicates it.
-
-**Duplicate clinical documentation is a real harm, so a repeat write is
-refused.** A note that already carries an EHR document id is not written again:
-the request is rejected before any call to the EHR, and never quietly turned
-into a second chart entry. Two copies of one encounter's note on a chart is not
-untidiness — it is a clinician reading one version while another is amended, and
-a downstream system counting one visit twice. If a genuine replacement is ever
-needed it is an explicit operation with its own name, using FHIR's own
-`status`/`relatesTo` machinery to supersede the first document; it is not what a
-provider clicking a button a second time should get.
+- **Nothing a machine merely suggested may leave this system.** Every outbound
+  writer filters `icd10_codes`/`cpt_codes` on `source`, sending only
+  `llm-extraction` and `provider-accepted`. A `comprehend-medical` entry becomes
+  sendable only when a provider accepts it via `PATCH /notes/{session_id}`. Apply
+  the filter by default and cite this section at the filter site.
+- **An outbound write is its own audited event, under its own action** — distinct
+  from `WRITE_NOTE` (stored here), added to `AuditAction` in the change that writes it.
+- **One outbound write produces an audit row in each service that acted** —
+  fhir-integration (sent to EHR; actor `fhir_practitioner_ref`) and
+  track-a-clinical (row mutated; actor `encounters.provider_id`). Not double counting.
+- **A write-back never sets a provider-attestation flag** (`reviewed_by_provider`).
+- **The service that owns the table records the result, over HTTP.**
+  fhir-integration (no DB connection, deliberately) calls a server-to-server route
+  on track-a-clinical to store the document id. `PATCH /notes` keeps forbidding
+  server-owned fields.
+- **PHI takes the shortest path, which means the server fetches it.** fhir-integration
+  reads the note from track-a-clinical over HTTP (which audits `READ_NOTE`); the
+  client never posts the note body back.
+- **A cross-service call needs a bound setting, not an `.env.example` line** — the
+  target base URL is read by the caller's config class.
+- **Order an outbound write so the recoverable failure is the one that happens.**
+  External write first, local record second. If the second step fails, name the
+  created document id in the error and log at ERROR — do not report total failure
+  (it invites a duplicating retry).
+- **Duplicate clinical documentation is a real harm, so a repeat write is
+  refused** before any EHR call. A genuine replacement would be a separately named
+  operation using FHIR `status`/`relatesTo`.
 
 ### CORS and browser reachability — decided once, in the services (cross-cutting)
-Settled by TASK-041c. `apps/web` is the first browser caller in this repository:
-every route before it was service-to-service, so nothing ever needed to answer a
-preflight, and nothing did. TASK-042 and TASK-043 cite this section rather than
-each deciding it, the same arrangement as the credential rule above and for the
-same reason — two clients deciding one cross-cutting question separately is how
-they come to disagree.
+Settled by TASK-041c; TASK-042/043 and all browser work cite it.
 
 **The policy is `CORSMiddleware` installed in each service from one shared
-package.** Not an ingress, not a gateway, and not per-service hand-rolled
-allow-lists. Allowed origins, methods, headers and whether credentials are
-permitted are all configuration read per environment from
-`CORS_ALLOWED_ORIGINS` — never a hardcoded literal, and never `*` on a service
-that answers with PHI.
-
-- **One shared package, imported — not middleware each service configures for
-  itself.** That is the same answer this repository has already given twice to
-  "how is a repo-wide concern solved once": `packages/api-envelope` for the
-  response envelope and error handlers, `packages/session-auth` for token
-  validation, each imported by every consumer rather than copied. A hand-written
-  allow-list per service is the thing TASK-041c explicitly refuses, because a
-  permissive middleware added in one service is exactly how a repo-wide policy
-  gets set by accident.
-- **It is a new package rather than an addition to `api-envelope`, and that is
-  not a stylistic choice.** That package's scope note is locked and says in
-  terms that it is not a place for shared routes, authentication, dependencies,
-  or middleware. Bolting CORS onto it would make it the shared web framework it
-  declares it is not. A separate package gets its own path-filter entry, its own
-  CI job and the same 80% gate, per the packages rule in GitHub Actions above.
-- **Only the services that answer HTTP to a browser install it.** Four do:
-  `track-b-rag` (TASK-041b's acknowledge route), `track-a-clinical`
-  (`GET`/`PATCH /notes/{session_id}`, and the session lifecycle routes
-  `apps/web` calls from TASK-070), `fhir-integration` (the launch handoff and
-  the two routes that identify a patient) and `prior-auth`. This bullet named
-  only the first two until TASK-070, which was already wrong by two services
-  when it was read — check the call sites rather than this list.
-  `audio-ingestion` and `nudge-service` expose WebSocket surfaces plus
-  `/health`, and a browser applies no CORS to a WebSocket upgrade, so middleware
-  there would protect nothing. Add it to a service when that service grows a
+package (`packages/cors-policy`).** Not an ingress, gateway, or per-service
+allow-lists. Origins, methods, headers and credentials come from per-environment
+config (`CORS_ALLOWED_ORIGINS`) — never hardcoded, never `*` on a PHI service.
+- **One shared package, imported** — same pattern as api-envelope and session-auth.
+- **A new package, not part of `api-envelope`**, whose locked scope excludes
+  middleware. It has its own path filter, CI job and 80% gate.
+- **Only the services that answer HTTP to a browser install it**: track-b-rag,
+  track-a-clinical, fhir-integration and prior-auth (check call sites rather than
+  trusting this list). `audio-ingestion` and `nudge-service` serve WebSockets +
+  `/health`; browsers apply no CORS to upgrades. Add it when a service grows a
   browser-facing HTTP route, not pre-emptively.
-- **Installing it is not covering a route.** The policy's methods and headers
-  are fixed repo-wide, so a service can import the package, call `install_cors`,
-  and still refuse a browser on a route whose method or header the policy does
-  not list. Each installing service therefore keeps a `test_cors.py` asserting
-  the specific path-and-method combinations its browser callers use, with an
-  unlisted-origin counterpart so the assertion cannot pass against a permissive
-  policy. A route that is browser-facing for the first time gets a case there in
-  the same change — including one already called from `apps/mobile`, which is
-  not a browser and preflights nothing.
-- **The deciding argument against an ingress was the dev and CI environment, not
-  architectural taste.** Local development is `docker compose`, which runs no
-  proxy, and `apps/web` talks straight to service ports (`VITE_AUDIO_WS_URL`
-  defaults to `ws://localhost:8001`) with no Vite dev proxy configured. CI runs
-  that same compose stack. An ingress-only policy would therefore leave dev and
-  CI with no CORS answer at all, so TASK-042 could not be verified end to end
-  against a running service — which is the single thing TASK-041c exists to
-  unblock. Closing that would mean a second proxy in compose: one policy
-  implemented twice in two technologies, a worse fragmentation than the one the
-  task set out to prevent.
-- **The gateway question is deferred to Phase 6, not answered "unnecessary".**
-  An ingress is very likely the right eventual home for TLS termination,
-  routing, and rate limiting — "TLS everywhere" in Key Architectural Constraints
-  has no implementation anywhere in this tree today. What makes it a deferral
-  rather than a rejection is that its real justifications are those, not CORS;
-  and that as of TASK-041c `infrastructure/terraform/` is empty and
-  `infrastructure/kubernetes/` holds one CronJob, so there is no cluster for an
-  ingress to sit in. Standing all of that up for the first time to answer a
-  preflight is a disproportionate lift, and it is separately true that it would
-  still not answer one in local development.
-- **When a gateway does arrive, the middleware comes out in the same change.**
-  Two layers both setting CORS headers produce a duplicated
-  `Access-Control-Allow-Origin`, which browsers reject outright — so the failure
-  mode of a half-done migration is that every browser-facing route stops
-  working, not that the policy is merely stated twice. Recorded here now because
-  whoever adds the ingress will not otherwise have this reasoning, and the
-  removal is the easy half to forget.
+- **Installing it is not covering a route.** Each installing service keeps a
+  `test_cors.py` asserting its browser callers' path-and-method combinations, with
+  an unlisted-origin counterpart. New browser-facing routes get a case in the same
+  change — including routes already used by mobile.
+- **Why not an ingress:** local dev and CI run `docker compose` with no proxy and
+  `apps/web` talks straight to service ports, so ingress-only CORS would leave dev
+  and CI without an answer.
+- **The gateway question is deferred to Phase 6, not answered "unnecessary"** — an
+  ingress is the likely home for TLS termination, routing and rate limiting.
+- **When a gateway does arrive, the middleware comes out in the same change** —
+  duplicated `Access-Control-Allow-Origin` headers make browsers reject every route.
 
 **Choosing per-service CORS forecloses nothing about where authentication
-lands.** This is the part of the decision most likely to be second-guessed
-later, so the reasoning is written down rather than left as an unexamined
-default. A gateway is the conventional home for CORS *and* authentication
-together, and the fair version of the objection is: if CORS goes in the services
-now and a gateway arrives later for auth, that is two repo-wide concerns solved
-in two places at two times.
-
-- **The check this repository actually needs cannot live in a gateway.** The
-  eventual fix named above — generalising `packages/session-auth` to validate a
-  token's claim against a *resolved* `session_id` — resolves
-  `nudge_id` → `clinical_nudges.encounter_id` → `encounters.provider_id`. That
-  is a join against domain tables. A gateway can only perform it by taking its
-  own database credentials or by making a subrequest back into the service, and
-  both are worse than the service doing a read it is already connected to make.
-  So the resource-relative half of authentication lands in the service whether
-  or not a gateway ever exists.
-- **A gateway could therefore only split authentication, never unify it.** It
-  could own the coarse half — signature and expiry — leaving the resolved-id
-  half in the service. That is the two-layer outcome the objection warns about,
-  and it is a property of introducing the gateway rather than a cost of
-  declining to.
-- **So the two questions are genuinely independent**, and this section decides
-  only CORS. Nothing here should be read as having pre-judged Phase 5's provider
-  authentication or the resolved-`session_id` work.
+lands.** The auth check this repo needs (resolved `session_id` via
+`nudge_id` → `clinical_nudges.encounter_id` → `encounters.provider_id`) is a
+domain-table join that belongs in the service regardless; a gateway could only
+split auth, never unify it. This section decides only CORS.
 
 **WebSocket handshakes are outside CORS, and the `Origin` check added here is
-defence in depth rather than a fix.** Browsers do not apply CORS to a WebSocket
-upgrade, so neither the nudge socket (TASK-041) nor the audio socket (TASK-020)
-is affected by anything above. Two separate facts follow, and a later reader
-needs both, because collapsing them turns a precaution into an implied history
-of a vulnerability that never existed:
-
-- **Why the absence of a check was not a hole.** The classic cross-site
-  WebSocket hijacking attack works because the browser attaches ambient
-  credentials — cookies — to an upgrade request a hostile page initiates. This
-  repository has none: the session JWT travels in an `Authorization` header or
-  the `medauth.jwt.` subprotocol, both of which a hostile page would have to
-  already possess in order to use. There is nothing ambient to ride, so a page
-  that does not hold a token cannot open a socket by pointing a browser at one.
-- **Why the check is added anyway.** It is nearly free once
-  `CORS_ALLOWED_ORIGINS` exists, and the sockets `nudge-service` serves are
-  where a browser reaches a live stream of PHI. Defence in depth is the entire
-  justification, and it does not depend on the reasoning above being wrong.
-  There are two such sockets as of TASK-041d — the nudge stream and the
-  transcript stream, which carries what was actually said in the encounter and
-  is the larger disclosure of the two. This bullet named only the nudge socket
-  until then, and both go through one `serve_stream`, so the check is applied in
-  one place and the tests for it run against every path the service serves.
-- **What a future reader must not conclude.** That the check was added because
-  tokens were reachable some other way, or that removing it would restore a
-  vulnerability. What would change that: if the credential ever moves to a
-  cookie, the first bullet stops holding and this check stops being optional.
-  That is the condition to watch, and it is not true today.
+defence in depth rather than a fix.**
+- **Why the absence of a check was not a hole:** cross-site WebSocket hijacking
+  rides ambient credentials (cookies); ours travel in a header or subprotocol a
+  hostile page would already need to hold.
+- **Why the check is added anyway:** nearly free given `CORS_ALLOWED_ORIGINS`, and
+  nudge-service's sockets (nudge stream and transcript stream, both through one
+  `serve_stream`) carry live PHI.
+- **Do not conclude** it fixed a vulnerability or that removing it reopens one.
+  **If the credential ever moves to a cookie, the check stops being optional.**
 
 ### Redis Key Naming — Canonical List
-Every task below should use these exact patterns, not invent variants:
+Use these exact patterns; do not invent variants:
 ```
-transcription:{session_id}      pub/sub — raw transcript segments, published by
-                                 audio-ingestion (TASK-020), consumed by
-                                 track-a-clinical (TASK-030), track-b-rag
-                                 (TASK-021) and nudge-service (TASK-041d),
-                                 which relays it to a browser verbatim and
-                                 parses nothing. Payload shape is fixed in "The
-                                 transcript segment payload — one shape" above;
-                                 one writer and several readers, one of them in
-                                 another language. `text` is PHI and never
-                                 reaches a log line on this path.
-nudges:{session_id}              pub/sub — nudge events, published by track-b-rag
-                                 (TASK-040), consumed by nudge-service (TASK-041).
-                                 Payload shape is fixed in "The nudge payload —
-                                 one shape" above; five tasks read or write it.
-session:ended:{session_id}       pub/sub — empty-payload signal, published by
-                                 track-a-clinical (TASK-006), consumed by
-                                 track-a-clinical itself (TASK-030),
-                                 prior-auth (TASK-060) and track-b-rag's
-                                 transcript consumer (TASK-021)
-sessions:started                 pub/sub — the one fixed channel here, carrying
-                                 {"session_id": ...} as its payload because the
-                                 channel name has no room for it. Published by
-                                 track-a-clinical (TASK-006), consumed by
-                                 track-b-rag (TASK-021). It exists so a
-                                 consumer can subscribe to one session's
-                                 transcript channel by name; the alternative
-                                 was pattern-subscribing transcription:*, a
-                                 wildcard over the channel family that carries
-                                 speech. Published before /sessions/start
-                                 returns the JWT, so a consumer is always
-                                 listening before the client can open its
-                                 audio socket. Note that re-minting a session's
-                                 token (TASK-006b) publishes to no channel at
-                                 all — a re-mint tells no consumer anything it
-                                 does not already know, and a second
-                                 sessions:started would make TASK-021
-                                 re-subscribe to a channel it already holds.
-procedure_seen:{session_id}      set, 4h TTL — the procedure keys already
-                                 queried during one encounter, so a procedure
-                                 named three times raises one nudge and not
-                                 three (TASK-021). Members are `cpt:{code}`
-                                 where a CPT code resolves and
-                                 `keyword:{keyword}` where none does
-                                 (TASK-024), so two keywords naming one
-                                 procedure share a claim — a knee MRI and a hip
-                                 MRI are both 73721 and are one order. Claimed
-                                 with SADD, which reports first-add atomically;
-                                 deleted on session:ended, with the TTL only
-                                 bounding a visit that never ends.
+transcription:{session_id}    pub/sub — transcript segments. Published by
+                              audio-ingestion (TASK-020); consumed by
+                              track-a-clinical (TASK-030), track-b-rag (TASK-021),
+                              nudge-service (TASK-041d, relays verbatim). Shape:
+                              "The transcript segment payload — one shape". `text`
+                              is PHI and never reaches a log line.
+nudges:{session_id}           pub/sub — nudge events. Published by track-b-rag
+                              (TASK-040); consumed by nudge-service (TASK-041).
+                              Shape: "The nudge payload — one shape".
+session:ended:{session_id}    pub/sub — empty-payload signal from track-a-clinical
+                              (TASK-006); consumed by track-a-clinical (TASK-030),
+                              prior-auth (TASK-060), track-b-rag (TASK-021).
+sessions:started              pub/sub — fixed channel, payload {"session_id": ...}.
+                              Published by track-a-clinical before /sessions/start
+                              returns; consumed by track-b-rag (TASK-021) so it can
+                              subscribe by name instead of wildcarding
+                              transcription:*. A token re-mint (TASK-006b)
+                              publishes nothing.
+procedure_seen:{session_id}   set, 4h TTL — procedure keys already queried this
+                              encounter, so one procedure raises one nudge
+                              (TASK-021). Members `cpt:{code}` or
+                              `keyword:{keyword}` when no CPT resolves (TASK-024).
+                              Claimed via SADD; deleted on session:ended.
 rag:{payer}:{plan_type}:{state}:{cpt_code}
-                                  cache, 24h TTL — payer-policy fields ONLY
-                                  (requires_auth, auth_criteria,
-                                  step_therapy_required, step_therapy_details).
-                                  Never the patient-specific fields
-                                  (missing_criteria, denial_risk,
-                                  nudge_message) — those are recomputed per
-                                  call. See the cache note in Key
-                                  Architectural Constraints. (TASK-012)
-fhir_launch:{state}              cache, TTL = OAuth flow timeout (~10 min) —
-                                  transient SMART launch state: iss, ehr_type,
-                                  the discovered token endpoint and the PKCE
-                                  code_verifier, held only between the
-                                  authorization redirect and the callback that
-                                  consumes it, which deletes it. A state is
-                                  single-use (TASK-051)
-fhir_token:{launch_id}           cache, TTL = the refresh grant's lifetime, NOT
-                                  the access token's — EHR access token +
-                                  refresh token + token_endpoint +
-                                  fhir_base_url + ehr_type, plus the access
-                                  token's own expiry as a field (TASK-051,
-                                  amended by TASK-051b — see "The launch record
-                                  outlives its access token" below).
-                                  Keyed on launch_id, NOT on session_id: a
-                                  SMART launch and an encounter session are two
-                                  different things with two different
-                                  lifetimes, and at callback time no encounter
-                                  exists yet. See "A SMART launch is not an
-                                  encounter session" above.
-fhir_launch_claim:{claim}        cache, short TTL (~2 min) — the single-use
-                                  handoff code that carries a completed launch
-                                  back to the app that started it: launch_id,
-                                  ehr_type and the access token's expiry.
-                                  Written by the callback only when the launch
-                                  declared delivery=web or delivery=mobile,
-                                  and consumed atomically by
-                                  POST /fhir/launch/claim, which deletes it —
-                                  a code is single-use exactly as a state is.
-                                  It exists so a redirect can name a launch
-                                  without carrying the launch_id itself, which
-                                  is a capability handle and never goes in a
-                                  URL (TASK-051f — see "Handing a completed
-                                  SMART launch back to a client" above).
+                              cache, 24h TTL — payer-policy fields ONLY
+                              (requires_auth, auth_criteria, step_therapy_required,
+                              step_therapy_details). Never missing_criteria,
+                              denial_risk, nudge_message. (TASK-012)
+fhir_launch:{state}           cache, ~10 min — transient SMART launch state (iss,
+                              ehr_type, token endpoint, PKCE verifier, delivery).
+                              Single-use; the callback deletes it. (TASK-051)
+fhir_token:{launch_id}        cache, TTL = refresh grant lifetime, NOT the access
+                              token's — access + refresh token, token_endpoint,
+                              fhir_base_url, ehr_type, access_token_expires_at.
+                              Keyed on launch_id, never session_id. (TASK-051/051b)
+fhir_launch_claim:{claim}     cache, ~2 min — single-use handoff code (launch_id,
+                              ehr_type, token expiry) written only for
+                              delivery=web|mobile; consumed atomically by
+                              POST /fhir/launch/claim. (TASK-051f)
 ```
-Lowercase, colon-separated, most-specific segment last. If a task needs a new
-Redis key pattern not listed here, add it to this list in the same PR.
-The `{payer}` segment is the canonical slug from `packages/payer-vocab`, never a
-payer's display name — see "Payer and jurisdiction identity" below for why a raw
-name in this key silently halves the hit rate and hides a retrieval miss.
+Lowercase, colon-separated, most-specific segment last. A new pattern is added to
+this list in the same PR. `{payer}` is always the canonical slug from
+`packages/payer-vocab`, never a display name.
 
 ### The launch record outlives its access token (reverses a TASK-051 rule)
-**This reverses a rule TASK-051 stated deliberately, and the reversal is written
-down here so a later reader recognises a considered fix rather than a
-regression.** TASK-051 held that `fhir_token:{launch_id}` "cannot outlive the
-credential it holds", and set the key's Redis TTL to the EHR's own `expires_in`.
-That was a sound instinct — a record holding a dead credential and a patient
-identifier earns nothing by lingering — and it is wrong for one reason nobody
-had reached yet when it was written: **the record is also the only place the
-refresh token lives.**
-
-The consequence is not a design gap but a shipped defect. The record was deleted
-at the exact moment renewal became necessary, so at the first request after
-expiry `load_launch_token()` returned `None`, the adapter dependency answered
-404 `FHIR_UNKNOWN_LAUNCH`, and the refresh token had already been discarded
-unused. TASK-051b's whole feature was structurally impossible against that
-storage contract, and no amount of refresh code would have made it work. The
-fix is a change to the contract, not an addition on top of it.
+**Deliberate reversal, not a regression.** TASK-051 set `fhir_token:{launch_id}`'s
+TTL to the EHR's `expires_in`, which deleted the only copy of the refresh token at
+the moment renewal was needed — making TASK-051b impossible.
 
 **What holds now:**
-- **The key's TTL bounds the refresh grant, not the access token.** A refresh
-  token outliving the access token it renews is the entire point of having one,
-  so a record that expires with the access token can never carry one usefully.
-- **The access token's own expiry is a field inside the record**
-  (`access_token_expires_at`, absolute UTC), never inferred from the key's
-  remaining TTL. Two different lifetimes cannot both be represented by one TTL,
-  and the reader that needs the access token's expiry is the one deciding
-  whether to refresh.
-- **A launch with no refresh token keeps the old behaviour**, and that is what
-  is preserved from the reversed rule rather than discarded. When the EHR
-  returned no `refresh_token` there is nothing to renew, so the record still
-  expires with the access token: holding patient identifiers and a dead
-  credential for longer would buy nothing and cost exactly what TASK-051 was
-  right to avoid.
-- **The TTL is bounded and configurable, never unbounded.** SMART on FHIR gives
-  no `refresh_expires_in`, so this value is a chosen bound rather than something
-  the EHR told us — `SMART_LAUNCH_RECORD_TTL_SECONDS`, defaulting to 8 hours as
-  a round stand-in for one clinical working day. It is not a measurement. What
-  it actually bounds is how long a compromised Redis yields a usable EHR
-  credential, which is why it is bounded at all and why it should not be raised
-  casually.
-- **The record is still a credential store.** Everything TASK-050 and TASK-051
-  require of an access token applies unchanged to the refresh token: never a log
-  line, never an exception message, never a `repr`.
+- **The key's TTL bounds the refresh grant, not the access token.**
+- **The access token's own expiry is a field** (`access_token_expires_at`,
+  absolute UTC), never inferred from the key's TTL.
+- **A launch with no refresh token keeps the old behaviour** — the record expires
+  with the access token.
+- **The TTL is bounded and configurable**: `SMART_LAUNCH_RECORD_TTL_SECONDS`,
+  default 8h (a round stand-in for a clinic day, not a measurement). It bounds how
+  long a compromised Redis yields a usable credential — do not raise casually.
+- **The record is still a credential store**: the refresh token never appears in a
+  log line, exception message or `repr`.
 
-**Renewal is proactive, at the point the adapter is built.** `get_ehr_adapter`
-in `services/fhir-integration/src/api/fhir.py` refreshes when the stored expiry
-is inside `SMART_TOKEN_REFRESH_SKEW_SECONDS`, before handing back an adapter, so
-no route body and no adapter primitive knows renewal exists. The alternative —
-catching the EHR's 401 and retrying — was considered and not taken: the adapter
-is resolved by a FastAPI dependency that has already returned by the time a
-fetch raises, so a reactive path means a retry wrapper at every fetch call site
-and at every one added later, which is the per-call-site duplication this
-repository refuses elsewhere.
-
-**What proactive refresh cannot catch, stated rather than left to be
-discovered.** A grant revoked by an administrator, and clock skew larger than
-the margin, both reach the EHR as a 401 with no renewal attempted. Those answer
-401 `FHIR_LAUNCH_EXPIRED` and the launch is repeated — the behaviour TASK-051
-already documented, so nothing regresses. This is a judgement between two
-reasonable options rather than the only defensible one, and the condition to
-revisit it is a real vendor whose skew exceeds the margin, not a hypothetical.
+**Renewal is proactive, at the point the adapter is built**: `get_ehr_adapter` in
+`services/fhir-integration/src/api/fhir.py` refreshes when expiry is within
+`SMART_TOKEN_REFRESH_SKEW_SECONDS`, so no route or adapter primitive knows renewal
+exists. (Reactive 401-retry would need a wrapper at every fetch site.) Revoked
+grants and clock skew beyond the margin still yield 401 `FHIR_LAUNCH_EXPIRED` and
+a relaunch; revisit only for a real vendor whose skew exceeds the margin.
 
 **A refresh that fails is two different outcomes, and only one ends the launch.**
-The distinction matters because collapsing them would either strand a working
-launch on a transient network blip, or keep presenting a revoked grant as
-retryable:
-- **An OAuth-level rejection** — the authorization server answered 4xx, e.g.
-  `invalid_grant` for a revoked or already-rotated refresh token — means the
-  grant is gone. The launch must be repeated: 401 `FHIR_LAUNCH_EXPIRED`. The
-  record is rewritten with its refresh token dropped and a short TTL, so the
-  next request answers from what we already know instead of asking a vendor's
-  token endpoint a question it has just refused.
-- **A transport failure or a 5xx** means we do not know. The record is left
-  exactly as it was, nothing about the launch changes, and the caller gets 502
-  `FHIR_TOKEN_REFRESH_UNAVAILABLE` (504 on timeout) — transient, retrying is
-  reasonable. Reading this as a dead grant would end a launch because a network
-  hiccup, which is the same "silence is not a negative determination" error this
-  document rejects in the CRD path.
+- **OAuth-level rejection (4xx, e.g. `invalid_grant`)** → grant gone → 401
+  `FHIR_LAUNCH_EXPIRED`; record rewritten with the refresh token dropped and a
+  short TTL.
+- **Transport failure or 5xx** → unknown → record untouched → 502
+  `FHIR_TOKEN_REFRESH_UNAVAILABLE` (504 on timeout), retryable.
 
-**Refreshing an EHR token neither extends nor ends an encounter.** Token
-lifetime and visit lifetime are independent — the same separation this document
-already draws for the MedAuth session token in "A visit outlasting the token
-re-mints", arriving from the EHR's side. Nothing in the refresh path touches an
-`encounters` row, and `launch_id` never changes: it names the launch, not the
-token, so a client holding one is never made to re-learn it.
-
-**Renewal writes no audit row.** Obtaining a credential is not using it — the
-same test TASK-051 applied to both its own routes. The PHI reads that surround
-it audit as they already do.
+**Refreshing an EHR token neither extends nor ends an encounter**, and `launch_id`
+never changes. **Renewal writes no audit row** — obtaining a credential is not
+using it.
 
 ### The transcript segment payload — one shape (cross-cutting)
-What rides on `transcription:{session_id}` is fixed here rather than inside
-TASK-020, for the same reason the nudge payload below is: one writer, several
-readers, and only the writer knows the shape today. `audio-ingestion` publishes
-it (`encode_segment` in `src/publisher.py`), `track-a-clinical`'s consumer
-accumulates `text` for SOAP generation (TASK-030), `track-b-rag`'s consumer scans
-`text` for procedure keywords (TASK-021), `nudge-service`'s relay forwards the
-raw string without parsing it (TASK-041d), and TASK-070's browser hook parses it
-to render a live transcript.
-
-Settled by TASK-041d, and settled at the point it was rather than deferred,
-because the next reader was about to be the first one in TypeScript, in a
-browser, in a different directory of this repository. The two existing readers
-each hand-rolled their own `json.loads(payload)["text"]` and
-`.get("is_partial")`; a fourth doing the same in another language is how four
-definitions of one contract end up disagreeing about a field nobody re-checked.
-A section written after that reader exists documents the divergence instead of
-preventing it.
+What rides on `transcription:{session_id}`. Writer: `encode_segment` in
+audio-ingestion `src/publisher.py`. Readers: track-a-clinical (TASK-030),
+track-b-rag (TASK-021), nudge-service relay (verbatim, TASK-041d), TASK-070 browser.
 
 ```json
 {
@@ -1414,70 +691,30 @@ preventing it.
 
 | Field | Type | Notes |
 |---|---|---|
-| `session_id` | `str` (UUID) | The encounter this segment belongs to. **Deliberately repeated inside the payload as well as being in the channel name**, so a consumer that multiplexes several sessions onto one connection does not have to parse it back out of the channel it arrived on. |
-| `result_id` | `str` | Transcribe Medical's own identifier for the utterance. Transcribe reuses one `result_id` across the successive revisions of an utterance, and only the final revision is published (below), so in the ordinary case a reader sees each one exactly once. A reader that needs idempotency keys on this rather than on text equality — two utterances can legitimately have identical text. |
-| `text` | `str` | What was said. **Never empty**: `audio-ingestion` drops results carrying no alternative or an empty transcript, which Transcribe emits around silence and which no consumer can act on. |
-| `is_partial` | `bool` | **Always `false` on the bus today, and the field still travels.** See below. |
-| `start_time` | `float \| None` | Seconds from the start of the transcription stream, as Transcribe reported them. Nullable because the value is passed through rather than computed, and a transcriber that reports no timing is not an error. |
-| `end_time` | `float \| None` | The same, for the end of the utterance. |
+| `session_id` | `str` (UUID) | Repeated inside the payload so a multiplexing consumer need not parse the channel name. |
+| `result_id` | `str` | Transcribe Medical's utterance id. Key idempotency on this, not on text equality. |
+| `text` | `str` | What was said. **Never empty** — empty/no-alternative results are dropped. **PHI.** |
+| `is_partial` | `bool` | **Always `false` on the bus today, and the field still travels.** |
+| `start_time` | `float \| None` | Seconds from stream start, passed through from Transcribe. |
+| `end_time` | `float \| None` | Same, for utterance end. |
 
-**`text` is PHI, and this is the payload that carries the most of it in this
-repository.** It is what was said during a clinical encounter. It goes to Redis
-and to the clients the TASK-041d relay serves, and to no log line anywhere on
-that path: every module on it logs a session identifier, a character count or a
-close reason, never content. That rule is already stated in
-`publisher.py`, `relay.py` and both consumers; it is restated here because a new
-reader of this shape is exactly where it would otherwise be forgotten.
-
-**Only stabilized results are published, so `is_partial` is always `false` on
-this channel.** Transcribe emits a partial result for one utterance repeatedly as
-it revises it — the same `result_id`, several times a second — and then one final
-result. `publish_segment` returns `False` without touching Redis for a partial.
-Forwarding them would multiply bus traffic by an order of magnitude and, worse,
-make TASK-021 fire the same procedure keyword over and over as one sentence is
-re-transcribed, turning one order into a stream of duplicate nudges.
-
-The field nevertheless stays in the payload, and no reader may drop it or assume
-its value. It is what lets a later task widen the publisher to forward partials —
-for a live transcript that updates mid-sentence, which is the one place they would
-be worth having — without changing the message shape or any consumer's parse.
-Both existing consumers already skip a segment whose `is_partial` is true, so
-they are correct either way; a new reader should do the same rather than assume
-the field is decorative.
-
-**A reader narrows, it does not trust.** The TypeScript conventions above forbid
-`any` and require narrowing from `unknown`, and that applies with more force to a
-payload crossing a WebSocket into a browser: validate the fields this table names
-and ignore anything else on the object. Do not assume a field absent from this
-table exists because a particular transcriber happened to emit it. If both
-frontends end up reading this shape, it moves into a shared TypeScript package on
-the established trigger — the second consumer, the same one that produced
-`packages/nudge-client` and `packages/session-client` — rather than being defined
-twice.
-
-**Nothing reshapes it in transit.** `nudge-service`'s relay forwards the exact
-string it received and never models it, for the reason that service's `relay.py`
-already gives about nudges: a model there would be a second definition of this
-shape, free to drift from the one that writes it and positioned where nothing
-would notice. So this section binds the writer and the readers that parse, and
-the relay between them is deliberately ignorant of all of it.
-
-**The bus keeps no history.** A reader that subscribes mid-encounter, or
-resubscribes after a drop, receives only what is published from that moment;
-earlier segments are not recoverable from Redis, and the accumulated transcript
-lives in TASK-030's in-memory buffer, which no route exposes. A consumer must not
-present what it received as a complete transcript unless it has been connected
-for the whole encounter — the same rule this document applies to a payer's
-silence and to `validation: null`, one channel over.
+- **`text` is PHI** — the largest body of it in the repo. No log line anywhere on
+  this path; log session ids, character counts or close reasons only.
+- **Only stabilized results are published.** `publish_segment` drops partials
+  (they would multiply traffic and fire duplicate procedure nudges). Readers must
+  still skip `is_partial: true` — it lets a later task forward partials without a
+  shape change.
+- **A reader narrows, it does not trust**: validate the fields above, ignore others.
+  If both frontends read this shape, it moves into a shared TS package.
+- **Nothing reshapes it in transit** — the relay forwards the exact string and
+  never models it.
+- **The bus keeps no history.** A late or reconnected subscriber gets only new
+  segments; never present what was received as a complete transcript unless
+  connected for the whole encounter.
 
 ### The nudge payload — one shape (cross-cutting)
-What rides on `nudges:{session_id}` is fixed here rather than inside TASK-040,
-because five tasks have to agree on it and only one of them writes it: TASK-040
-publishes, TASK-041 relays it verbatim over a WebSocket, TASK-042 and TASK-043
-render it on two platforms, and TASK-044 publishes a second variety of it. Same
-reasoning as the `icd10_codes` shape below — a contract with one writer and four
-readers is fixed before the first message, not migrated after four consumers
-have each guessed.
+What rides on `nudges:{session_id}`. TASK-040 publishes, TASK-041 relays verbatim,
+TASK-042/043 render, TASK-044 publishes a second variety.
 
 ```json
 {
@@ -1494,88 +731,47 @@ have each guessed.
 
 | Field | Type | Notes |
 |---|---|---|
-| `type` | `str` | `PAYER_RULE_ALERT` today. It exists so a client can switch on the kind of nudge rather than inferring it, and TASK-044 is the reason it is not simply assumed. |
-| `nudge_id` | `str` (UUID) | The `clinical_nudges` row's primary key. This is what TASK-041b's `PATCH /nudges/{nudge_id}/acknowledge` takes, so a client can only dismiss a nudge that was actually recorded — which is why the row is written before the publish and not after. |
-| `procedure` | `str` | As the clinician said it, not a canonical descriptor. |
-| `cpt_code` | `str \| None` | **Nullable from the start, though TASK-040 never emits null.** TASK-044 nudges on a keyword that resolved no code, and a client that assumed a string would break on the first one. |
-| `message` | `str` | The provider-facing text, from `gap_analysis.nudge_message()`. Carries the procedure and the payer's criteria and nothing from `clinical_context` — a nudge crosses a WebSocket and is rendered in a browser, which is not a place to put clinical detail that need not be there. |
-| `missing_criteria` | `list[str]` | The payer criteria not yet evidenced. Empty is meaningful: on a fallback answer it means the criteria are *unknown*, not that none are missing. |
+| `type` | `str` | `PAYER_RULE_ALERT` today; clients switch on it (TASK-044 adds another). |
+| `nudge_id` | `str` (UUID) | `clinical_nudges` PK, used by `PATCH /nudges/{nudge_id}/acknowledge`. The row is written **before** the publish. |
+| `procedure` | `str` | As the clinician said it. |
+| `cpt_code` | `str \| None` | **Nullable from the start** (TASK-044 nudges on keywords with no code). |
+| `message` | `str` | From `gap_analysis.nudge_message()`. Procedure + payer criteria, nothing from `clinical_context`. |
+| `missing_criteria` | `list[str]` | Empty on a fallback answer means *unknown*, not *none missing*. |
 | `denial_risk` | `"low" \| "medium" \| "high"` | Drives TASK-042's yellow/orange/red banner. |
-| `haptic` | `bool` | Whether to buzz the device (TASK-043). **Not a synonym for `denial_risk == "high"` — see below.** |
+| `haptic` | `bool` | Buzz the device (TASK-043). **Not a synonym for `denial_risk == "high"`.** |
 
-**`haptic` is a decision, not a restatement of `denial_risk`.** The rule is
-`denial_risk == "high"` **and** the answer is not the safe fallback. TASK-040's
-original wording tied it to the risk level alone, which was written before
-anyone traced what the fallback returns: `query.fallback_answer()` sets
-`denial_risk="high"` for an unreachable Qdrant, a Bedrock error, or a retrieval
-that matched nothing. Under the original rule a single infrastructure outage
-buzzes a physician's device once per procedure in every concurrent encounter,
-and every one of those alerts says only "confirm manually".
+**`haptic` is a decision, not a restatement of `denial_risk`.** Rule:
+`denial_risk == "high"` **and** the answer is not the safe fallback.
+`query.fallback_answer()` returns `high` for an unreachable Qdrant, Bedrock error,
+or empty retrieval; an outage must not buzz every physician's device and teach them
+to ignore real high-risk alerts. The nudge still fires at `high`; only the
+escalation is suppressed. Encode it explicitly in the emitter.
 
-The risk level stays `high` — that is honest, the requirement genuinely is
-unverified — and the nudge still fires. What is suppressed is the escalation.
-The reasoning is about the signal rather than the annoyance: a haptic alert
-earns its interruption by being rare and meaning something, and a physician who
-learns that the buzz usually means "our vendor is down" has been taught to tune
-out the one that means "this order will be denied". An outage must not be able
-to spend the credibility of the channel that genuinely high-risk nudges depend
-on. Encode it in the emitter explicitly, never as an inherited default.
-
-**Whether to nudge at all is decided in one place, and it is not this payload.**
-`gap_analysis` owns it, by returning no message when there is nothing worth
-interrupting a consultation for. The emitter fires if and only if it was given a
-message. See "The nudge trigger is the message" below.
+**Whether to nudge at all is decided in one place, and it is not this payload** —
+see below.
 
 ### The nudge trigger is the message (corrects shipped TASK-012 logic)
-**The bug.** TASK-040 says to nudge when `missing_criteria` is non-empty or
-`denial_risk == "high"`. `gap_analysis` independently decides what to *say*.
-Those are two derivations of one judgement — "is this worth interrupting a
-consultation for" — and they disagree in two cases that ship today:
-
-- **Authorization required, no criteria found.** `denial_risk()` returns
-  `medium` (deliberately: "no criteria" here means *not known*, not *none*) and
-  `missing_criteria` is empty, so neither leg of the trigger fires. Meanwhile
-  `nudge_message()` composes "Prior authorization required for X, but no
-  published criteria were found for this plan — confirm the requirements
-  manually." A message that explicitly asks the provider to act, that nothing
-  will ever show them.
-- **Step therapy only.** `_with_step_therapy_floor` lifts an otherwise clean
-  answer to `medium` with nothing missing, and the message appends the step
-  therapy requirement. Same silence, and step therapy is a prerequisite the
-  payer checks *before* considering the request at all.
-
-Neither is a design gap to be argued about; they are a defect arising from
-deriving one decision in two places, which is exactly how the two drifted
-without anyone noticing.
+**The bug:** TASK-040's trigger (`missing_criteria` non-empty or `denial_risk ==
+"high"`) and `gap_analysis`'s message composition were two derivations of one
+decision and disagreed in two silent cases: (1) auth required but no criteria found
+(`medium`, empty list, yet a "confirm manually" message), and (2) step therapy only
+(`_with_step_therapy_floor` lifts to `medium` with nothing missing).
 
 **The fix: `gap_analysis` decides, and the message carries the decision.**
-`nudge_message()` returns `str | None`, and `None` means there is nothing worth
-interrupting for. The emitter fires if and only if it was handed a message. No
-consumer re-derives the condition from `missing_criteria` or `denial_risk`, and
-`PolicyQueryData.nudge_message` becomes nullable to carry it (a spec change to
-`docs/api/track-b-rag.yaml`, guarded by the existing contract drift test).
+`nudge_message()` returns `str | None`; `None` means nothing worth interrupting for.
+The emitter fires iff it has a message; no consumer re-derives the condition.
+`PolicyQueryData.nudge_message` is nullable (in `docs/api/track-b-rag.yaml`).
+Keying off "non-empty message" without making it nullable would nudge on every
+query, since every branch used to return text.
 
-**Note what does *not* work: keying off "the message is non-empty" while leaving
-`nudge_message()` as it is.** Every one of its branches returns a non-empty
-string — including "No prior authorization required for X." — so that reading
-nudges on literally every policy query, which is worse than the silence it
-replaces. The message only becomes a usable signal once it is allowed to be
-absent. That is the substance of this change; the trigger is downstream of it.
-
-`None` is returned when authorization is not required and no step therapy
-applies, and when authorization is required, the criteria are known, and every
-one of them is documented. Everything else carries a message — including the
-safe fallback, which never reaches `gap_analysis` and always nudges, with
-`haptic` suppressed per the rule above.
-
-This ships as its own bugfix commit against TASK-012's logic, separately from
-TASK-040's new code, with a regression test naming each of the two previously
-silent cases.
+`None` when auth is not required and no step therapy applies, or when auth is
+required, criteria are known, and all are documented. Everything else carries a
+message — including the safe fallback, which always nudges with `haptic`
+suppressed. Shipped as its own bugfix commit with a regression test per silent case.
 
 ### Qdrant Initialization — Must Be Idempotent
-`qdrant.recreate_collection()` deletes and rebuilds the collection — calling it
-on every service startup would wipe all indexed insurance policies every time
-`track-b-rag` restarts. Use a get-or-create pattern instead:
+Never call `recreate_collection()` in startup code — it wipes all indexed policies
+on every restart. Use get-or-create:
 ```python
 from qdrant_client.http.exceptions import UnexpectedResponse
 
@@ -1589,35 +785,22 @@ def ensure_collection(client: QdrantClient, name: str, vector_size: int):
             vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
         )
 ```
-`recreate_collection` is acceptable only in a one-off dev reset script that a
-human runs deliberately — never in application startup code.
+`recreate_collection` is acceptable only in a dev reset script a human runs deliberately.
 
 ### Bedrock Model Assignment (concrete, per call site)
-The "Haiku for extraction, Sonnet for reasoning" rule above, made specific:
 | Call site | Model | Env var | Why |
 |---|---|---|---|
 | TASK-012 policy query analysis | Sonnet | `BEDROCK_MODEL_ID_REASONING` | Multi-step reasoning over retrieved policy text |
 | TASK-030 SOAP note generation | Sonnet | `BEDROCK_MODEL_ID_REASONING` | Long-form structured clinical writing |
-| TASK-030 ICD-10/CPT extraction (LLM pass) | Haiku | `BEDROCK_MODEL_ID_FAST` | Extraction, not reasoning — validated against Comprehend Medical in TASK-031 anyway |
-| TASK-013 policy scraper (if any LLM cleanup used) | Haiku | `BEDROCK_MODEL_ID_FAST` | Simple text cleanup, not analysis |
-The actual `.env.example` vars are `BEDROCK_MODEL_ID_FAST` and
-`BEDROCK_MODEL_ID_REASONING` — an earlier draft of this table named them
-`BEDROCK_MODEL_SONNET`/`BEDROCK_MODEL_HAIKU`, which never matched the repo.
-Fixed here; use the `_FAST`/`_REASONING` names in code, never hardcode a
-model ID string.
+| TASK-030 ICD-10/CPT extraction (LLM pass) | Haiku | `BEDROCK_MODEL_ID_FAST` | Extraction, not reasoning — validated against Comprehend Medical in TASK-031 |
+| TASK-013 policy scraper (if any LLM cleanup used) | Haiku | `BEDROCK_MODEL_ID_FAST` | Simple text cleanup |
+
+Use the `_FAST`/`_REASONING` env var names in code; never hardcode a model ID string.
 
 ### Extracted clinical codes — one JSON shape (cross-cutting)
-`clinical_notes.icd10_codes` and `clinical_notes.cpt_codes` are JSONB, and
-TASK-005 fixed the columns without fixing what goes inside them. Four consumers
-have to agree: TASK-030's Haiku pass writes them, TASK-031 validates the ICD-10
-half against Comprehend Medical and needs somewhere to record what it found,
-TASK-060 reads `icd10_codes` as a bundle's diagnoses, and TASK-071's review
-screen renders both and edits them through TASK-032's `PATCH`. A bare list of
-code strings would have to break every one of them the moment TASK-031 lands, so
-the shape is fixed here before the first row is written rather than migrated
-afterwards.
-
-Both columns hold a **JSON array of objects**, the same shape in each:
+`clinical_notes.icd10_codes` and `clinical_notes.cpt_codes` (JSONB) each hold a
+**JSON array of objects**. Writers/readers: TASK-030 (writes), TASK-031 (validates
+ICD-10), TASK-060 (bundle diagnoses), TASK-071 (renders/edits via TASK-032 `PATCH`).
 
 ```json
 [
@@ -1633,502 +816,207 @@ Both columns hold a **JSON array of objects**, the same shape in each:
 
 | Field | Type | Notes |
 |---|---|---|
-| `code` | `str`, required | ICD-10-CM is stored **dotted** (`M17.11`); CPT is five characters (`73721`). Uppercased, whitespace-stripped, and dot-normalised on write, so every later comparison is plain string equality — the same reasoning as the payer slug above. |
+| `code` | `str`, required | ICD-10-CM stored **dotted** (`M17.11`); CPT five characters. Uppercased, stripped, dot-normalised on write. |
+| `display` | `str \| None` | The source's own description, never invented. |
+| `source` | `"llm-extraction" \| "comprehend-medical" \| "provider-accepted"` | Which pass proposed it, or that a provider accepted it. |
+| `confidence` | `float \| None`, 0.0–1.0 | Proposing source's score. **Always `None` for `llm-extraction`** (a model's self-rating is not a measurement) **and for `provider-accepted`** (a human acceptance is a fact). |
+| `validation` | object \| `None` | Written by TASK-031. |
+| `validation.source` | `"comprehend-medical"` | The validating pass. |
+| `validation.confidence` | `float \| None` | Comprehend's **`ICD10CMConcept.Score`** for the matching code (never the entity-level `Score`, which measures detection, not linkage), or `None` if no such concept. |
+| `validation.confirmed` | `bool` | Produced at or above TASK-031's 0.8 threshold. |
 
 **Storage is dotted, matching is dotless, and both halves are one function.**
-ICD-10-CM has two equally standard spellings of the same code — `M17.11` and
-`M1711` — and different sources emit different ones. A code matched by exact
-string equality against a source that dots differently fails silently and looks
-exactly like a code the other source never proposed. That is the payer-slug bug
-one column over, with the same consequence: TASK-031 would report every code
-unconfirmed and the failure would read as a genuine finding about the codes
-rather than a formatting mismatch.
+Sources disagree on dots (`M17.11` vs `M1711`); every cross-source comparison goes
+through one shared dotless-key function. Never normalise independently.
 
-So the canonical *stored* form is dotted, because that is what a human reads and
-what TASK-060 puts in a bundle, and comparison between sources goes through a
-dotless key derived from it. Neither side of a comparison may normalise
-independently — one function produces the key, and every consumer calls it.
-| `display` | `str \| None` | The source's own description, never one invented to fill the field. |
-| `source` | `"llm-extraction" \| "comprehend-medical" \| "provider-accepted"` | Which pass proposed this code, or that a human did. A `comprehend-medical` entry is one the LLM never proposed — a suggestion rather than a stated diagnosis; see below. A `provider-accepted` entry is one a provider put there deliberately through TASK-032's edit. |
-| `confidence` | `float \| None`, 0.0–1.0 | The proposing source's own score. **`None` for every `llm-extraction` entry** — Haiku is not asked to rate itself, because a number a model invents about its own output is not a measurement and would be indistinguishable from Comprehend's calibrated score once both sit in the same column. **`None` for every `provider-accepted` entry too**, for a different reason: a human acceptance is a fact, not a probability. |
-| `validation` | object \| `None` | Written by TASK-031; absent until it runs. |
-| `validation.source` | `"comprehend-medical"` | The validating pass. |
-| `validation.confidence` | `float \| None` | Comprehend's **`ICD10CMConcept.Score`** for the matching code, or `None` when it returned no such concept at all. Not the entity-level `Score` — see below. |
-| `validation.confirmed` | `bool` | Whether the validating source produced this code at or above TASK-031's 0.8 threshold. |
+- **`validation: null` means "not checked yet" and never "checked and rejected".**
+- **CPT entries keep `validation: null` indefinitely** — Comprehend Medical has no
+  CPT inference.
+- **A `comprehend-medical` entry is a suggestion, not a stated diagnosis:**
+  - keeps `validation: null` permanently (validating Comprehend against itself is
+    circular);
+  - TASK-071 renders it visibly as a machine suggestion;
+  - TASK-060 never puts it in a bundle as a diagnosis;
+  - **a code is one entry, whichever pass found it** — never append a duplicate;
+    compare via the dotless key.
+- **`provider-accepted` is the third source, and it is what a human acceptance
+  looks like:**
+  - **only TASK-032's `PATCH /notes/{session_id}` writes it**; no automated path
+    may promote one;
+  - `confidence` and `validation` are always `None`;
+  - TASK-060 treats it like `llm-extraction` (claimable); TASK-071 renders it as
+    accepted;
+  - acceptance mutates the existing entry's `source` in place — never appends.
+- **`null` and `[]` are different answers on these columns.** `[]` = extraction ran
+  and found nothing (reconciliation runs); `null` = no answer produced
+  (reconciliation does **not** run). See `GeneratedNote` in
+  `services/track-a-clinical/src/track_a_clinical/soap.py`.
+- **So an editing endpoint needs three states, not two**: field omitted, set to
+  `null`, or a list. Use `exclude_unset` (or a sentinel), never a `None` default,
+  and test the omitted-field case.
 
-**`validation.confidence` is the concept score, never the entity score.** The
-`InferICD10CM` response nests two different confidence values, and the botocore
-service model states their meanings apart: `ICD10CMEntity.Score` is "the level
-of confidence ... in the accuracy of the **detection**" — that this span of text
-is a medical condition at all — while `ICD10CMConcept.Score` is "the level of
-confidence ... that the entity is accurately **linked to an ICD-10-CM
-concept**". TASK-031 compares a code against a code, so the concept score is the
-one measuring the thing being asked about. The entity score can be high for a
-correctly-detected condition that was then linked to the wrong code, which is
-precisely the error this validation exists to catch.
-
-**`validation: null` means "not checked yet" and never "checked and rejected".**
-An unconfirmed code and an unvalidated one are different facts, and collapsing
-them makes a code Comprehend Medical actively failed to find look exactly like
-one written before TASK-031 existed. This is the distinction this document
-already insists on for a silent payer — no determination is not a negative
-determination — one layer down and with the same consequence if ignored.
-
-**CPT entries keep `validation: null` indefinitely, and that is not a bug.**
-Comprehend Medical infers ICD-10-CM, RxNorm and SNOMED CT and has no CPT
-inference of any kind, so nothing in the current design can validate the CPT
-half. TASK-031 is scoped to ICD-10 for that reason.
-
-**A `comprehend-medical` entry is a suggestion, not a stated diagnosis, and
-every consumer of the column owes it that reading.** The same request that
-validates the LLM's codes also surfaces ICD-10 codes it never proposed, and
-those are written into `icd10_codes` as their own entries (TASK-030). They are
-written there because that is where a provider will see them, and they stay
-distinguishable by two things at once: `source` says which pass proposed them,
-and they carry a `confidence` that an `llm-extraction` entry structurally
-cannot have. What that obliges:
-
-- **They keep `validation: null` permanently**, for the same reason CPT entries
-  do — there is nothing independent left to check them against. Asking
-  Comprehend to validate a code Comprehend proposed measures self-consistency,
-  which is the circularity that already stops the validating pass from being
-  handed the generated note instead of the transcript.
-- **TASK-071 renders them as suggestions**, visibly attributed to the machine
-  that proposed them, and never mixed indistinguishably into the list a
-  provider is signing.
-- **TASK-060 does not put one in a prior-auth bundle as a diagnosis.** A bundle
-  asserts to a payer what the provider documented; a code nobody stated and no
-  note asserted is not that. It becomes claimable the ordinary way — a provider
-  accepts it through TASK-032's note edit, which writes it as documentation and
-  changes its `source` to `provider-accepted`, below.
-- **A code is one entry, whichever pass found it.** Nothing is ever appended
-  alongside a code already present in the column, and the comparison goes
-  through the dotless matching key above rather than raw string equality, so
-  `M1711` from one source and `M17.11` from another cannot become two entries
-  for one diagnosis.
-
-**`provider-accepted` is the third source, and it is what a human acceptance
-looks like.** The two bullets above leave one thing unrepresentable: a provider
-who reads a `comprehend-medical` suggestion and decides it belongs in the note
-has no way to say so. Rewriting the entry as `llm-extraction` would assert that
-a model proposed it, which is false and would also collide with that source's
-"no confidence" rule the moment the entry carries Comprehend's score. Leaving it
-as `comprehend-medical` keeps TASK-060 refusing to claim a code the provider has
-now documented. So the acceptance is its own source value, fixed here rather than
-in TASK-032 alone, because TASK-060 and TASK-071 both branch on it.
-
-- **Only TASK-032's `PATCH /notes/{session_id}` writes it.** No extraction pass
-  ever produces a `provider-accepted` entry, and no automated path may promote
-  one. The value's entire meaning is that a person decided.
-- **`confidence` is always `None`**, enforced the same way the `llm-extraction`
-  rule is. A human acceptance is a fact, not a probability, and Comprehend's
-  score measured its own linkage, not the provider's judgement. Carrying that
-  number forward would attach a machine's uncertainty to a human's decision, and
-  a later reader could not tell which of the two the number described. The score
-  is not preserved elsewhere either: what the provider accepted is the code, and
-  the suggestion's own audit trail is the note's edit history, not a stale float.
-- **`validation` is always `None`**, permanently, and for the same reason a
-  `comprehend-medical` entry's is. There is nothing independent left to check a
-  provider's own documentation against, and TASK-031's validation pass runs
-  against the transcript before the note is stored — it never revisits a row a
-  provider has since edited.
-- **TASK-060 treats it exactly as it treats `llm-extraction`**: a diagnosis the
-  provider documented, claimable in a bundle. That is the whole point of the
-  value — it is the mechanism by which a suggestion becomes claimable.
-- **TASK-071 renders it as an accepted code, not as a suggestion**, so a
-  provider can see what they have already acted on.
-- **A code is still one entry.** Accepting a suggestion mutates the existing
-  entry's `source` in place; it never appends a second entry for a code the
-  column already holds, under the dotless matching key as always.
-
-**`null` and `[]` are different answers on these columns.** `[]` means the
-extraction pass ran and found no code; `null` means it never produced an answer
-— see `GeneratedNote` in `services/track-a-clinical/src/track_a_clinical/soap.py`.
-The reconciliation above therefore runs on `[]`, which is where a code only
-Comprehend read is worth the most, and does **not** run on `null`: filling that
-column with suggestions would replace "not determined" with a list that reads
-as determined, which is the same collapse `validation: null` exists to avoid one
-level down.
-
-**So an editing endpoint needs three states, not two.** TASK-032's `PATCH`
-accepts partial bodies, and "the client did not mention `icd10_codes`" has to
-stay distinct from "the client set `icd10_codes` to `null`" and from "the client
-sent a list". Reading an absent field as `[]` would let a provider correcting one
-SOAP section silently declare that an encounter has no diagnoses — the exact
-collapse this whole section exists to prevent, arriving through a request body
-rather than through an extraction pass. Use Pydantic's `exclude_unset` (or an
-equivalent sentinel) rather than a `None` default, which cannot tell the two
-apart, and test the omitted-field case specifically.
-
-The Pydantic model for this shape lives beside the mapped classes in
-`services/track-a-clinical/src/track_a_clinical/models/`, for the reason that
-section already gives: the alternative is prior-auth and the web app each
-re-deriving it from the column, which is how two definitions of one contract
-drift apart.
+The Pydantic model lives in `services/track-a-clinical/src/track_a_clinical/models/`.
 
 ### An accumulated transcript exceeds downstream limits (cross-cutting)
-`TranscriptBuffer` in track-a-clinical's consumer is unbounded by design — it
-accumulates every segment of an encounter and joins them only when a note is
-generated. Nothing caps it, and nothing should: truncating an encounter's speech
-to fit a downstream API would silently discard clinical content.
-
-The consequence is that **every consumer of a full transcript has to state what
-it does when the transcript is larger than the service it feeds.** This is not
-hypothetical arithmetic. A routine orthopedic or dermatology visit runs well past
-fifteen minutes (which is why `SESSION_TTL_SECONDS` needed the re-mint path in
-the session section above), and ordinary conversational speech runs on the order
-of 750–1,000 characters per minute. A transcript in the tens of thousands of
-characters is the normal case, not the tail.
-
-Known limits today:
-- **AWS Comprehend Medical `InferICD10CM` accepts at most 10,000 characters.**
-  This is enforced client-side by botocore — the shape metadata is
-  `{'min': 1, 'max': 10000}` — and server-side by a dedicated
-  `TextSizeLimitExceededException`. Note this is *not* the 20,000-byte figure
-  widely quoted for Comprehend Medical; that belongs to `DetectEntitiesV2`, and
-  assuming it here would build chunking against a threshold twice the real one.
-  There is also an asynchronous batch path (`StartICD10CMInferenceJob`) for
-  larger documents, which is S3-based and therefore unsuitable for anything in
-  a live encounter's path.
-- **Bedrock's context window** bounds the SOAP and extraction passes. Far larger
-  than Comprehend's cap and not currently a binding constraint, but the same
-  rule applies to it.
+`TranscriptBuffer` in track-a-clinical is unbounded by design — never truncate
+clinical speech. Visits routinely produce tens of thousands of characters, so
+**every consumer of a full transcript must state what it does when the transcript
+exceeds the service it feeds.**
+- **AWS Comprehend Medical `InferICD10CM` accepts at most 10,000 characters**
+  (botocore `{'min': 1, 'max': 10000}`, server `TextSizeLimitExceededException`).
+  Not the 20,000-byte `DetectEntitiesV2` figure. The async batch path is S3-based and
+  unsuitable for live encounters.
+- **Bedrock's context window** bounds SOAP/extraction; not binding today, same rule.
 
 **The standing rule: chunk and merge, or report reduced coverage — never
-silently truncate.** A partial analysis presented as a complete one is the same
-failure class this document rejects everywhere else: a payer's silence read as a
-negative determination, `validation: null` read as "checked and rejected", an
-empty retrieval indistinguishable from a payer we hold no policy for. A consumer
-that cannot process the whole transcript must make that visible in its output or
-its operational log, naming what was left unexamined.
+silently truncate.** A consumer that cannot process the whole transcript must say
+so in its output or operational log, naming what was left unexamined.
 
 ### Migration Ownership vs. Table Write Access (clarifies TASK-005)
-"Owns the schema" means owns the Alembic migration history for those tables —
-it does not mean only that service may read/write them. `clinical_nudges` is
-migrated by track-a-clinical but written by track-b-rag; `prior_auth_requests`
-is migrated by track-a-clinical but written by prior-auth. Every service
-connects to the same Postgres instance via `DATABASE_URL` and uses SQLAlchemy
-models generated from the same schema — only migration authorship is centralized,
-not query access.
+"Owns the schema" means owns the Alembic migration history, not exclusive write
+access. `clinical_nudges` is migrated by track-a-clinical but written by
+track-b-rag; `prior_auth_requests` is migrated by track-a-clinical but written by
+prior-auth. All services share one Postgres via `DATABASE_URL`.
 
 ### Where the shared SQLAlchemy models live (cross-cutting — applies to every task)
-The mapped classes for the shared tables live in
+Mapped classes for shared tables live in
 `services/track-a-clinical/src/track_a_clinical/models/`, one module per table,
-exported from the package `__init__`. Every service that touches those tables
-imports from there rather than mapping its own class against the same table:
+exported from `__init__`. Every service imports them — never maps its own class:
 
 ```python
 from track_a_clinical.models import ClinicalNudge, Encounter
 ```
 
-A second definition of a table drifts away from the migration history and from
-the first definition, and nothing catches it until a write fails in production.
-TASK-006, TASK-030, TASK-040 and TASK-060 all write these tables and all import
-these classes.
-
-That import path is why `services/track-a-clinical` builds
-`src/track_a_clinical/` rather than a bare `src/`, the way `packages/*` already
-do. Every other service still declares `packages = ["src"]` in its
-`pyproject.toml`, so they all install a top-level module named `src` and shadow
-each other in the shared venv — `import src.models` resolves to whichever
-service sorts first. That is tolerable while nothing imports across service
-boundaries, and each of those services should move to a named package as it
-grows code worth importing. **track-b-rag is that case as of TASK-010**: it
-crosses the boundary one task later (TASK-011 imports the shared SQLAlchemy
-models from `track_a_clinical.models` to write the `insurance_policies` row).
-Rename to `src/track_b_rag/` and declare `medauth-track-a-clinical` as a
-dependency in TASK-010, while the service is still empty — cheaper now than
-as churn after TASK-011 through TASK-015 exist.
+That is why track-a-clinical builds `src/track_a_clinical/` rather than bare `src/`.
+Services still declaring `packages = ["src"]` all install a top-level `src` that
+shadows the others in the shared venv; each moves to a named package when it grows
+code worth importing across the boundary (track-b-rag did so as `src/track_b_rag/`
+in TASK-010).
 
 ### Payer and jurisdiction identity — one canonical vocabulary (cross-cutting)
-**The bug this closes.** `payer` is matched by exact string equality in two
-places: Qdrant's retrieval filter (`FieldCondition(key="payer",
-match=MatchValue(value=payer))` in `track_b_rag/retrieval.py`) and the Redis
-cache key `rag:{payer}:{plan_type}:{state}:{cpt_code}`. Nothing normalises it on
-either side — ingestion stores whatever string the uploader sent, and the query
-endpoint filters on whatever string the caller sent. `state` and `cpt_code` are
-at least uppercased; `payer` is not touched at all. At query time that string
-originates in a FHIR `Coverage` resource's free-text payer display: "Medicare
-Part B", "AETNA", "Aetna Better Health of MA". None of those equals the "CMS" or
-"Aetna" an ingest wrote. The failure is silent — retrieval returns zero chunks,
-the RAG path reports it found no policy, and that is indistinguishable from a
-payer we genuinely hold no policy for.
+**The bug this closes:** `payer` was matched by exact string in the Qdrant filter
+(`track_b_rag/retrieval.py`) and the `rag:` key, with no normalisation, so
+"Medicare Part B" never matched an ingested "CMS" — an empty retrieval
+indistinguishable from "no policy held".
 
 **The rule.** `payer` is a canonical slug everywhere it is stored, matched or
-keyed, and never a display name. Both sides call the same function, from
-`packages/payer-vocab`:
+keyed, never a display name. Both sides use `packages/payer-vocab`:
 
 ```python
 normalize_payer(raw: str) -> str   # "Medicare Part B" -> "cms-medicare"
 is_known_payer(slug: str) -> bool  # False for a name the vocabulary has never seen
 ```
 
-- **Deterministic slugging is the mechanism** — casefold, strip legal suffixes
-  and punctuation, collapse whitespace, hyphenate. It guarantees two spellings
-  of one name cannot become two payers.
-- **An alias table handles what slugging cannot reach.** "Medicare", "Medicare
-  Part A", "Medicare Part B", "Original Medicare" and "CMS" all resolve to
-  `cms-medicare`. This is curated data, not inference — extend the table when a
-  new payer appears rather than making the slug function cleverer.
-- **An unknown payer still queries, but says so.** A payer the vocabulary has
-  never seen is not an error; it gets a slug and runs. The query path logs at
-  WARNING when `is_known_payer()` is false, so "the name did not line up" is
-  visible in the operational trace instead of looking like "no policy found".
-  That distinction is the whole point of this section.
-- **Display names are not discarded** — keep the payer's own spelling in the
-  Postgres row for humans to read. Slugs are for matching, not for display.
-- **A payer family is not one payer.** The Blue Cross Blue Shield Association
-  licenses 33 independent companies that each publish their own
-  prior-authorization criteria, so the vocabulary keeps them apart: Anthem-branded
-  names resolve to `anthem-bcbs`, a licensee we hold policies for gets its own
-  slug (`bcbs-ma` is the first, Massachusetts being the pilot geography), and an
-  unqualified "Blue Cross" or "BCBS" lands in the generic `blue-cross-blue-shield`
-  bucket. Collapsing them would let one licensee's ingested policy answer a query
-  about another — a wrong answer served silently, which is strictly worse than
-  the empty retrieval plus WARNING that this package exists to produce. Seed and
-  ingest under the publishing licensee's slug, never the generic one.
-- **Extend the alias table from observed data, not from plausible spellings.**
-  The rows for `Coventry Healthcare`, `Cigna Health`, `Medi-Cal` and
-  `Humana Medicare Advantage` are there because those exact strings appear in
-  `Coverage.payor.display` on real servers — the Oracle Health (Cerner) open
-  sandbox, the public HAPI R4 server, and Synthea's `insurance_companies.csv`,
-  which is what the local dev HAPI server is seeded from. Names that describe no
-  carrier at all (`SELF PAY`, `Government`, `Dual Eligible`) are deliberately
-  left unmapped: giving them a slug would manufacture a payer identity the source
-  never asserted.
+- **Deterministic slugging** — casefold, strip legal suffixes and punctuation,
+  collapse whitespace, hyphenate.
+- **An alias table handles what slugging cannot reach** ("Medicare", "Original
+  Medicare", "CMS", … → `cms-medicare`). Curated data; extend the table rather than
+  making slugging cleverer.
+- **An unknown payer still queries, but says so** — WARNING when
+  `is_known_payer()` is false.
+- **Display names are kept** in the Postgres row for humans.
+- **A payer family is not one payer.** BCBS's 33 licensees publish separate
+  criteria: Anthem names → `anthem-bcbs`, held licensees get their own slug
+  (`bcbs-ma` first), unqualified "Blue Cross"/"BCBS" → generic
+  `blue-cross-blue-shield`. Seed and ingest under the publishing licensee's slug,
+  never the generic one.
+- **Extend the alias table from observed data, not from plausible spellings**
+  (existing rows come from real `Coverage.payor.display` values on the Cerner
+  sandbox, public HAPI, and Synthea). Non-carrier names (`SELF PAY`, `Government`,
+  `Dual Eligible`) stay unmapped.
 
-It is a package rather than a module inside track-b-rag because the consumers
-span services: `/policies/ingest` and `/policies/query` (TASK-011/012), the
-policy scraper (TASK-013), the seed script (TASK-014), and fhir-integration when
-it turns a `Coverage` resource into a query (Phase 5). Same reasoning as
-api-envelope, and the `rag:` cache key's `{payer}` segment is a canonical slug
-for the same reason.
+Consumers: `/policies/ingest` and `/policies/query` (TASK-011/012), policy scraper
+(TASK-013), seed script (TASK-014), fhir-integration's Coverage → query (Phase 5).
 
-Doing this after TASK-014 seeds a corpus would mean re-ingesting that corpus.
-Doing it now costs a re-run of a dev-only index. Same argument as TASK-010's
-package rename.
-
-**Jurisdiction is the same problem one column over.** A Medicare LCD is issued
-per Medicare Administrative Contractor jurisdiction and applies in every state
-that jurisdiction covers — a median of 12 states across the 949 current LCDs,
-and 48 for the widest. CMS's own state vocabulary is *not* a list of USPS state
-codes: it carries territories, a four-character `CNMI` that will not fit
-`CHAR(2)` at all, and sub-state jurisdictions — `DN`/`QN`/`UN` (New York
-downstate, Queens, upstate), `NF`/`SF` (northern and southern California) and
-`EM`/`WM` (Missouri). Writing any of those into a `state` that a FHIR `Coverage`
-will later be matched against reproduces the payer bug exactly. Normalise to the
-two-character USPS code of the parent state at ingestion time (`CNMI` → `MP`,
-`DN`/`QN`/`UN` → `NY`, `NF`/`SF` → `CA`, `EM`/`WM` → `MO`).
+**Jurisdiction is the same problem one column over.** Medicare LCDs apply per MAC
+jurisdiction (median 12 states). CMS state codes include territories, the
+4-character `CNMI`, and sub-state codes. Normalise to the parent state's USPS code
+at ingestion: `CNMI` → `MP`, `DN`/`QN`/`UN` → `NY`, `NF`/`SF` → `CA`,
+`EM`/`WM` → `MO`.
 
 **A multi-state policy is one document with a list of states, never one copy per
-state.** Qdrant's `MatchValue` matches any element of a list-valued payload
-field — verified against the running Qdrant using the exact filter in
-`policy_query_filter`, with and without the keyword payload index TASK-011
-creates. So a payload of `state: ["MA", "ME", "NY"]` needs *no* change to the
-retrieval filter, and the `IsNullCondition` that lets national policies match
-every state keeps working alongside it. Copying a policy per state would instead
-duplicate identical text a median of 12 times in Qdrant — 12× the embedding
-cost, and near-duplicate chunks crowding each other out of `TOP_K=8`. See
-TASK-013 for the Postgres side of the same decision.
+state.** Qdrant's `MatchValue` matches any element of a list payload (verified with
+`policy_query_filter`, with and without the keyword index), and the
+`IsNullCondition` for national policies still works. Per-state copies would
+multiply embedding cost and crowd `TOP_K=8`. See TASK-013 for the Postgres side.
 
 ### packages/api-envelope — Design Decisions (locked, do not revisit)
-**Scope note (read first):** this package is the single definition of the HTTP
-response envelope fixed in the API Design section above — `{"data": ..., "error":
-null}` and `{"data": null, "error": {...}}` — plus the FastAPI exception handlers
-that put FastAPI's own failure paths into it. It is **not** a shared web
-framework: no routes, no authentication, no dependencies, no middleware. A
-service's domain surface stays in that service.
-- **Every service imports it; no service defines its own envelope.** It was
-  extracted in TASK-010, when `track-b-rag` became the second consumer and
-  started as a copy of `track-a-clinical`'s. Two hand-maintained definitions of
-  a cross-service contract drift apart, for exactly the reason given above for
-  centralising the shared SQLAlchemy models. Any service added later imports
-  from here — copying it again is the thing this package exists to prevent.
-- **The validation handler never echoes a rejected value.** FastAPI's
-  `RequestValidationError.errors()` reports the offending field *and can include
-  what was sent*, and request bodies in this monorepo carry patient identifiers
-  and clinical context. The handler reports field *locations* only. This is a
-  HIPAA constraint living inside the primitive, not a rule call sites are
-  trusted to remember.
+**Scope note:** the single definition of the response envelope plus the FastAPI
+exception handlers that put FastAPI's own failures into it. **Not** a shared web
+framework: no routes, auth, dependencies, or middleware.
+- **Every service imports it; no service defines its own envelope.**
+- **The validation handler never echoes a rejected value** — field *locations*
+  only, since bodies carry PHI.
 - **`error_responses()` carries generic per-status wording, overridable per
-  route.** Pass `descriptions={404: "..."}` when a route's failure means
-  something more specific than the default; an undeclared status raises rather
-  than publishing a spec with an invented description.
-- **`GET /health` is the one documented departure from the envelope's failure
-  half.** A 503 from a health endpoint returns `data` populated with the
-  per-dependency flags and `error: null` — the request succeeded, the answer is
-  "unhealthy", and moving the flags into the error half would discard the only
-  diagnostic the endpoint has. See the hipaa-logger scope note below for why
-  the same endpoint also writes no audit row.
+  route** via `descriptions={404: "..."}`; an undeclared status raises.
+- **`GET /health` is the one documented departure**: a 503 returns `data` with the
+  per-dependency flags and `error: null`. Health endpoints also write no audit row.
 
 ### packages/session-auth — Design Decisions (locked, do not revisit)
-**Scope note (read first):** this package is the single definition of the
-session-token validation described in "How the JWT reaches a WebSocket endpoint"
-above — the two carriers, the checks, and the 4401 close code. It **validates and
-never mints**: `POST /sessions/start` in `track-a-clinical` (TASK-006) remains
-the only issuer, per Known Constraint 8. It is not a shared web framework and
-holds no routes, dependencies or middleware, exactly as the api-envelope scope
-note has it.
-
-- **Every real-time endpoint imports it; none writes its own validator.** It was
-  extracted in TASK-041, when `nudge-service` became the second endpoint needing
-  the validation `audio-ingestion` had carried since TASK-020 — the same trigger,
-  and the same argument, as api-envelope's extraction one task after
-  track-b-rag copied track-a-clinical's envelope. The specific hazard here is
-  named in Known Constraint 8: two hand-maintained copies of one validator is how
-  a "parallel auth mechanism" arrives without anyone deciding to build one, since
-  copies diverge not on purpose but because a fix lands in whichever file the
-  person had open.
-- **`validate_token()` takes a signing key, not a `Settings` object.** Each
-  service keeps its own configuration class; making one of them part of this
-  package's interface would drag a service's whole config surface into every
-  other service that authenticates.
-- **The issuer keeps its own `JWT_ALGORITHM` and `MIN_SIGNING_KEY_BYTES`.**
-  `track_a_clinical.config` defines both, and importing this package there was
-  considered and rejected: the issuer is not a consumer of this validator, and
-  making it depend on one would invert what Known Constraint 8 centralises. What
-  proves the two agree is `tests/unit/test_issuer_contract.py`, which feeds the
-  real issuer's output to this validator and asserts the key floors match — a
-  stronger check than a shared literal, which would prove the two agree on an
-  algorithm name while saying nothing about the claim set.
-- **That contract test lives here, not in a consuming service.** It was in
-  `audio-ingestion` until TASK-041, for a reason that expired with the move: the
-  validator was `src.auth` there, and several services still install a top-level
-  `src` into the shared virtualenv. The contract belongs to whoever owns the
-  validation, or the second consumer either copies the file or trusts an
-  agreement nothing in its own suite checks.
+**Scope note:** the single definition of the session-token validation in "How the
+JWT reaches a WebSocket endpoint" (two carriers, checks, 4401). It **validates and
+never mints** — `POST /sessions/start` is the only issuer (Known Constraint 8). No
+routes, dependencies or middleware.
+- **Every real-time endpoint imports it; none writes its own validator** (two
+  copies is how a parallel auth mechanism arrives by accident).
+- **`validate_token()` takes a signing key, not a `Settings` object.**
+- **The issuer keeps its own `JWT_ALGORITHM` and `MIN_SIGNING_KEY_BYTES`** in
+  `track_a_clinical.config`; the issuer does not import this package.
+  `tests/unit/test_issuer_contract.py` (in this package) feeds the real issuer's
+  output to the validator and checks the key floors match.
   `.github/scripts/detect-changed-members.sh` selects this package when
-  `track-a-clinical` changes, so a change to the issuer re-runs it.
-- **Nothing here logs a token, a claim, or a reason containing either.** A
-  refusal reason is a fixed label — `expired`, `session_mismatch`,
-  `malformed_claim` — and the caller logs that. This is a HIPAA constraint living
-  inside the primitive rather than a rule call sites are trusted to remember, the
-  same arrangement as api-envelope's validation handler.
+  track-a-clinical changes.
+- **Nothing here logs a token, a claim, or a reason containing either.** Refusal
+  reasons are fixed labels (`expired`, `session_mismatch`, `malformed_claim`).
 
 ### packages/logging-policy — Design Decisions (locked, do not revisit)
-**Scope note (read first):** this package decides the log level of *third-party*
-loggers, and nothing else. It configures no handlers, sets no format, does not
-touch the root logger, and does not touch any logger this repository owns —
-those stay with `logging.getLogger(__name__)` per the Python conventions above.
-It is not a logging framework and it is not related to `hipaa-logger`, which
-writes audit rows to Postgres and is not a logger at all in this sense. Same
-boundary `api-envelope`, `session-auth` and `cors-policy` each draw around
-themselves.
+**Scope note:** sets log-level floors for *third-party* loggers only. No handlers,
+no format, no root logger, no repo-owned loggers; unrelated to hipaa-logger.
 
-**The gap it closes (TASK-046).** `httpx` logs every request it makes at INFO,
-as `HTTP Request: GET <full url> "HTTP/1.1 200 OK"`. Nothing configured that
-logger, so it inherited the root level and wrote patient identifiers to stdout on
-ordinary successful requests — against the first rule in Regulatory Context. It
-is the **whole URL and not only the query string**: `get_patient()` reads
-`Patient/{patient_id}` and `get_encounter()` reads `Encounter/{encounter_id}`, so
-anything that sanitised query parameters alone would have left the most ordinary
-read in the tree exposed and looked like it had worked. The exposure predates the
-task that found it — `_search` has issued `Coverage?patient={id}` since TASK-052;
-TASK-025b's `Patient?name=` only made it visible by putting a patient's *name*
-there.
+**The gap it closes (TASK-046):** `httpx` logs every request's **full URL** at INFO
+(`Patient/{id}`, `Coverage?patient={id}`, `Patient?name=`) — PHI in stdout.
 
-**Installed in every service, which is where it differs from `cors-policy`.**
-That package goes only into services a browser reaches, because middleware in a
-service no browser calls protects nothing. This one has no such limit: every
-service's process can be turned up to DEBUG and every one of them links a library
-that writes request content at DEBUG. `audio-ingestion` is the sharpest case and
-is not browser-facing at all — its Comprehend Medical call puts clinical text
-into `botocore.endpoint`'s DEBUG line. `policy-scraper` installs it too, even
-though it fetches public payer publications whose URLs carry no patient
-identifier, because what a library may write is a platform-wide decision rather
-than a per-URL judgement.
+**Installed in every service** (unlike cors-policy), because every process can run
+at DEBUG and links libraries that write request content there — including
+audio-ingestion (botocore DEBUG carries clinical text) and policy-scraper.
 
-**Each floor was chosen by running the library, not by reputation**, and the
-levels are deliberately not uniform — each sits just above where that library
-writes request or response content, so it keeps whatever it says that is useful:
-- **`httpx` → WARNING.** The defect. It leaks *at* INFO, so nothing lower closes
-  it. Errors and warnings still reach the log.
-- **`urllib3` → INFO.** `urllib3.connectionpool` writes the full request line at
-  DEBUG, query string included. It is botocore's transport.
-- **`botocore` and `boto3` → INFO.** The largest body of PHI of the five:
-  `botocore.endpoint` logs the entire request at DEBUG, headers and body
-  together, and `botocore.parsers` logs the entire response body. A Bedrock
-  request body is an encounter's transcript and its response is the generated
-  SOAP note. INFO rather than WARNING on purpose — `botocore.credentials` reports
-  at INFO where credentials were found, which is useful and carries nothing.
-- **`httpcore` → INFO, and it is on the record as not having leaked.** Its trace
-  renders a request as the method alone and it logs no request headers. The floor
-  is there because it is the transport under every URL httpx sends, so a future
-  version that starts rendering more would otherwise arrive silently. Do not read
-  this entry as evidence that httpcore ever exposed anything.
+**Floors, each chosen by running the library:**
+- **`httpx` → WARNING** (it leaks at INFO).
+- **`urllib3` → INFO** (full request line at DEBUG).
+- **`botocore` and `boto3` → INFO** (full request/response bodies at DEBUG —
+  transcripts and SOAP notes; `botocore.credentials` INFO is useful and harmless).
+- **`httpcore` → INFO** — precautionary; it has never been observed leaking.
 
-**`sqlalchemy.engine` is deliberately not in the table, and that is not an
-oversight.** It writes every statement and its bound parameters at INFO, which is
-PHI, so it looks like the obvious sixth entry. It is not, for a mechanical
-reason: SQLAlchemy decides whether to emit those lines from the engine's own
-`echo` flag rather than from the logger's level, through
-`sqlalchemy.log.InstanceLogger`. Verified against SQLAlchemy 2.0.52 — with
-`sqlalchemy.engine` pinned to WARNING and `echo=True`, every statement and every
-bound parameter is still logged. An entry here would be a claim to protect
-something it cannot protect, which is worse than no entry. What actually holds
-the line is that no engine in this repository passes `echo`, and with it unset
-nothing is logged even with the root logger at DEBUG. Enabling echo against a
-database holding PHI is the decision to look at, not this table.
+**`sqlalchemy.engine` is deliberately not in the table.** Its statement/parameter
+logging is controlled by the engine's `echo` flag, not the logger level (verified
+on 2.0.52), so a floor would protect nothing. No engine may pass `echo` against a
+PHI database.
 
-**It raises and never lowers.** A logger already pinned above its floor is left
-alone — someone silencing a library further has chosen in the same direction as
-this policy, and overriding that would be this package loosening a restriction
-rather than applying one. What it cannot do is win against a *later* explicit
-`setLevel`, and it does not try to: the failure mode being fixed is a library
-writing PHI at a level nobody configured, not a developer deliberately turning
-one up.
+**It raises and never lowers** existing levels, and does not fight a later explicit
+`setLevel`.
 
-**Where it is called.** First in each service's `create_app()`, before anything
-else in startup can log, and at the top of `policy_scraper.__main__.main()` after
-`basicConfig` — after, because `LOG_LEVEL=DEBUG` is a real thing to do when a
-nightly run failed and the floors have to apply to the configuration a human just
-chose rather than to the default it replaced. Tests build their app through
-`create_app()`, so the policy is in force in the suites too, which is what makes
-the service-level assertions about it meaningful.
+**Where it is called:** first in each service's `create_app()`, and in
+`policy_scraper.__main__.main()` after `basicConfig`. Tests use `create_app()`, so
+the policy is active in suites.
 
-**Do not solve this class of problem by moving identifiers out of URLs.** FHIR
-search is defined with parameters in the query string; there is nowhere else for
-them to go. The library's logging is what changes. A new direct AWS SDK or HTTP
-client dependency is a reason to check what it logs and add a floor here — in the
-same change, the way an action is added to `AuditAction`.
+**Do not solve this class of problem by moving identifiers out of URLs** — FHIR
+search needs them there. A new HTTP/AWS client dependency means checking what it
+logs and adding a floor in the same change.
 
 ### packages/hipaa-logger — Design Decisions (locked, do not revisit)
-**Scope note (read first):** this package is NOT a general application logger.
-It writes one specific thing — a compliance audit trail row per PHI access —
-to the audit_log Postgres table. It does not replace standard Python `logging`,
-does not handle debug/info/error output, and is not used for anything except
-PHI access events. Normal application logging (service startup, errors, request
-traces) uses `logging.getLogger(__name__)` per the Python conventions section
-above and goes to stdout/CloudWatch, not this package. Neither one ever logs
-actual PHI content — hipaa-logger records metadata about an access (who, what
-resource type, when), never the patient data itself. **A route calls
-`audit_log()` if and only if it touches PHI** (Known Constraints #6 in
-TASKS.md). This is the rule itself, not a default with exceptions bolted on:
-an earlier phrasing required the call on *every* route, which immediately
-needed a carve-out for `/health` and was about to need a second one for
-`POST /policies/ingest`.
-
-The reason the rule is an "if and only if" in both directions: the audit_log
-table's value comes from every row in it being a PHI access. Mix operational
-writes in and "who accessed patient X" stops being a query you can just run and
-becomes one you have to filter. So a route over public or operational data must
-*not* audit — health and liveness probes touch no PHI and auditing a k8s probe
-on its polling interval is noise; `POST /policies/ingest` (TASK-011) writes
-insurance policy documents, which are public payer publications with no patient
-linkage. Those routes log at INFO through `logging.getLogger(__name__)` instead,
-which still gives the operational trace, in the right place.
-- **Owns its own audit_log table and Alembic migration.** Every service depends on
-  this package, so it cannot wait on another service's schema (see TASK-002/TASK-005
-  ordering note below). The migration lives in `packages/hipaa-logger/migrations/`
-  and is applied first, before any service-owned migration.
-- **Raw asyncpg, not SQLAlchemy.** Single hot-path INSERT — an ORM adds nothing here.
-  SQLAlchemy 2.0 async remains standard for services with real domain models
-  (track-a-clinical, prior-auth, etc.) — this is an intentional exception, not
-  an inconsistency.
-- **Self-managed lazy connection pool**, initialized from `DATABASE_URL` on first use.
-  Provides an explicit injection hook (`set_connection(conn)` / accepts an optional
-  `conn` param on `audit_log()`) so tests can mock it and so services that need the
-  audit write inside their own transaction can pass their connection in.
+**Scope note:** NOT a general application logger. It writes one compliance audit
+row per PHI access to the `audit_log` table — metadata (who, what resource, when),
+never PHI content. Normal logging uses `logging.getLogger(__name__)`.
+**A route calls `audit_log()` if and only if it touches PHI** (Known Constraints #6).
+Both directions matter: operational rows would make "who accessed patient X" a
+filtered query instead of a plain one. Health probes and `POST /policies/ingest`
+(public payer documents) do *not* audit; they log at INFO.
+- **Owns its own audit_log table and Alembic migration**, in
+  `packages/hipaa-logger/migrations/`, applied before any service migration.
+- **Raw asyncpg, not SQLAlchemy** — a single hot-path INSERT; an intentional exception.
+- **Self-managed lazy connection pool** from `DATABASE_URL`, with an injection hook
+  (`set_connection(conn)` / optional `conn` param) for tests and for writing the
+  audit row inside a caller's transaction.
 
 ### audit_log table schema (authoritative — matches architecture doc)
 ```sql
@@ -2151,16 +1039,9 @@ CREATE INDEX idx_audit_log_actor ON audit_log(actor_id);
 CREATE INDEX idx_audit_log_session ON audit_log(session_id);
 CREATE INDEX idx_audit_log_fhir_practitioner ON audit_log(fhir_practitioner_ref);
 ```
-`service_name` and `request_id` were added beyond the original architecture doc
-sketch — every service calls this package, so knowing which one wrote each row
-and being able to trace it to a specific request is worth the two extra columns.
+`fhir_practitioner_ref` (TASK-051c) is **not a second spelling of `actor_id`** —
+see "The EHR-asserted actor is its own column".
 
-`fhir_practitioner_ref` was added by TASK-051c and is **not a second spelling of
-`actor_id`** — see "The EHR-asserted actor is its own column" below for why an
-identity the EHR asserts cannot go in `actor_id` and what a query against this
-table has to do as a result.
-
-`audit_log()` function signature:
 ```python
 async def audit_log(
     actor_id: str | None,
@@ -2176,376 +1057,152 @@ async def audit_log(
     conn: asyncpg.Connection | None = None,  # injection hook — uses pool if omitted
 ) -> None: ...
 ```
-`ip_address` and `user_agent` are optional and default to None until a request-context
-mechanism (likely FastAPI middleware) populates them automatically in a later task.
-Ship them as real parameters, not permanently-empty columns silently filled with NULL.
+`ip_address`/`user_agent` default to None until request-context middleware
+populates them for routes.
 
-`action` is typed as `AuditAction` rather than `str` deliberately — see "The
-action vocabulary" below for what that buys and why it must not be widened.
+`resource_type` is the resource the row is about (`Encounter`, `ClinicalNote`,
+`ClinicalNudge`, `PriorAuthRequest`, `Patient`); `resource_id` is its primary key.
 
 ### Auditing work that no request triggered (cross-cutting — every consumer)
-Every rule about `audit_log()` above this line is written for a route. Known
-Constraints #6 in TASKS.md says "every new API route needs ... an `audit_log()`
-call if and only if the route touches PHI", and `ip_address`/`user_agent` are
-described as waiting on request-context middleware that will populate them.
-Phase 3 breaks that assumption: TASK-030 generates a SOAP note when a Redis
-signal arrives and TASK-060 assembles a prior-auth bundle from the same signal.
-Both read an entire encounter's clinical content and write a new PHI record, and
-neither has a request, a caller, or a client behind it. Settled here once,
-because the two tasks are the same shape and solving it twice is how they end up
-disagreeing.
-
+Redis-triggered work (TASK-030 SOAP generation, TASK-060 bundle assembly) reads and
+writes PHI with no request behind it.
 - **The "if and only if it touches PHI" test is unchanged — only the trigger
-  is.** A consumer that reads or writes patient data audits. That the work was
-  started by a pub/sub message rather than an HTTP request is not grounds to
-  skip the row; it is the reason no other record of the access exists.
-- **`actor_id` is `encounters.provider_id`, read from the encounter row.** The
-  signal carries no identity — `session:ended:{session_id}` has an empty payload
-  by design and `sessions:started` carries only a session id. The provider who
-  opened the visit is who the work is done for and is the only defensible actor.
-  Never mint a service-account UUID to fill the field: `actor_id` is nullable,
-  and a fabricated identifier in an audit trail is worse than an honest null.
-  This is the same rule as "the provider comes from the `encounters` row, never
-  from the presented token's claim" in the session section above.
-- **`session_id` comes from the same row**, not from parsing it back out of the
-  channel name in a handler that has already loaded the encounter.
+  is.** Consumers that touch PHI audit.
+- **`actor_id` is `encounters.provider_id`, read from the encounter row.** Signals
+  carry no identity. **Never mint a service-account UUID** — an honest null beats a
+  fabricated actor.
+- **`session_id` comes from the same row.**
 - **`ip_address` and `user_agent` are permanently `None` here, not pending.**
-  There is no client. The middleware that will populate them for routes will
-  never populate them for a consumer, and a later reader should not mistake this
-  for the gap that middleware closes.
-- **One row per unit of work, never one per message.** TASK-030 buffers hundreds
-  of transcript segments and writes one note: the auditable access is the
-  generation — which reads the accumulated transcript and produces the record —
-  not each segment arriving on the bus. A row per segment would bury the events
-  an audit is actually asked about under per-message noise, the same argument
-  that keeps health probes out of this table.
-- **The audit row joins the transaction that does the work**, through
-  `audit_log(..., conn=...)`, exactly as `track_a_clinical.audit` already does
-  for routes. A note that exists with no audit row, and an audit row for a note
-  that rolled back, are both worse than the write failing outright.
+- **One row per unit of work, never one per message** (one per generated note,
+  not per transcript segment).
+- **The audit row joins the transaction that does the work** via
+  `audit_log(..., conn=...)`.
 
 ### Auditing a PHI read that happens before any encounter exists (cross-cutting)
-The section above answers "who is the actor when no request triggered the work"
-by reading `encounters.provider_id`. Phase 5 breaks the assumption underneath
-that answer: `fhir-integration` reads a patient, their coverage and their
-conditions from the EHR at SMART launch (TASK-052), and at that moment **no
-`encounters` row exists at all**. The launch precedes the visit — settled in "A
-SMART launch is not an encounter session" above — so there is no provider column
-to read the actor from. Settled here once, because TASK-052, TASK-025b's patient
-search and TASK-053's note write-back are all the same shape.
-
-- **`actor_id` is `None`, and that is the honest answer rather than a gap.**
-  The column is nullable, and a null actor truthfully records that the system
-  read this patient's data under a launch whose provider identity this service
-  had not captured. This is the same rule the section above already states in
-  its own words: *never mint a service-account UUID to fill the field, because a
-  fabricated identifier in an audit trail is worse than an honest null.* A
-  service-account UUID would be worse here than in a Redis consumer, because it
-  would look like a real actor in the one table an auditor reads to answer "who
-  accessed patient X".
-- **The correct source is the SMART `fhirUser` claim.** SMART on FHIR 2.0
-  identifies the authorizing user through the `fhirUser` claim in the `id_token`
-  returned by the token exchange — a reference to a `Practitioner` resource,
-  which is precisely the provider whose access is being recorded. That is a real
-  identity asserted by the EHR, not one we invented, so it is what an audit row
-  for a launch-time read should carry. **It goes in `fhir_practitioner_ref`, not
-  in `actor_id`** — an earlier draft of this bullet said `actor_id`, written
-  before anyone checked the two types against each other. See the next section.
-- **Capturing `fhirUser` was TASK-051c, and it is built.** It was kept out of
-  TASK-052 deliberately: reading the claim responsibly means fetching the EHR's
-  JWKS, verifying the token's signature and issuer against it, and resolving a
-  `Practitioner` reference — a token-validation path of its own, not a field to
-  bolt onto a resource fetch. Folding it into a task implementing four GETs
-  would have smuggled in an authentication mechanism, which is what Known
-  Constraints #8 forbids. The implementation is
-  `services/fhir-integration/src/smart/identity.py`; the launch's `issuer` and
-  `jwks_uri` come from the same SMART discovery document as its endpoints, and
-  the resolved reference is stored on the launch record so every later PHI read
-  audits with it.
-- **Verification failure is never a launch failure.** No `id_token`, no
-  published key set, a bad signature, a foreign `aud`, or a claim naming
-  anything but a `Practitioner` all leave the actor unknown and the launch
-  working. The *unverified* claim is never written in its place — that is the
-  same fabrication as a service-account UUID, one step subtler, and harder to
-  spot because it looks like a real identity. A `Patient` reference is refused
-  for a second reason on top: an actor column is not a place for a patient
-  identifier.
-- **`actor_id` stays `None` in this service permanently — it is not waiting on
-  anything.** Before TASK-051c that null was provisional and every
-  `audit_log()` call in `fhir-integration` named the task in a comment. It is
-  now settled: the identity the EHR asserts is recorded, and it is recorded in
-  `fhir_practitioner_ref`, so `actor_id` has nothing to hold rather than
-  something still to come. Remove those comments when wiring the new column in;
-  a comment naming a completed task reads as an open gap.
+At SMART launch (TASK-052, TASK-025b patient search, TASK-053) fhir-integration
+reads PHI before any `encounters` row exists.
+- **`actor_id` is `None`, and that is the honest answer rather than a gap.** Never a
+  service-account UUID.
+- **The correct source is the SMART `fhirUser` claim** from the verified
+  `id_token` — a `Practitioner` reference. **It goes in `fhir_practitioner_ref`,
+  not in `actor_id`.**
+- **Capturing `fhirUser` was TASK-051c, and it is built**
+  (`services/fhir-integration/src/smart/identity.py`): JWKS fetch, signature and
+  issuer verification, `Practitioner` resolution; the reference is stored on the
+  launch record for later reads.
+- **Verification failure is never a launch failure.** Missing `id_token`, no keys,
+  bad signature, foreign `aud`, or a non-`Practitioner` claim leave the actor
+  unknown. **The unverified claim is never written** (a `Patient` reference doubly so).
+- **`actor_id` stays `None` in this service permanently** — nothing is pending; do
+  not leave comments naming TASK-051c as an open gap.
 - **Rows written before TASK-051c carry neither identifier, and nothing
-  backfills them.** Inventing the actor afterwards is the same fabrication one
-  step removed. An audit trail that is honestly incomplete for a known window is
-  worth more than one made to look uniform.
-- **What does not change:** the read still audits. Absent provider identity is a
-  reason the trail matters more, not less — the same argument the note routes
-  and `PATCH /nudges/{nudge_id}/acknowledge` already make for shipping without a
-  credential in v1.
+  backfills them.**
+- **The read still audits.**
 
 ### The EHR-asserted actor is its own column (cross-cutting)
-Settled by TASK-051c, and settled here rather than inside it because it changes
-the shared `audit_log` table that every service writes — not only the rows
-`fhir-integration` produces.
+**Why:** `audit_log.actor_id` is `UUID` and `hipaa_logger._as_uuid()` raises on
+anything else; FHIR ids are `[A-Za-z0-9\-\.]{1,64}` (HAPI issues `"1"`), so passing
+`fhirUser` as `actor_id` would fail exactly when capture succeeded.
 
-**The blocker that forced the decision.** `audit_log.actor_id` is
-`postgresql.UUID`, and `hipaa_logger._as_uuid()` *raises* rather than coercing
-or dropping a malformed value. A SMART `fhirUser` claim resolves to a FHIR
-`Practitioner` reference, and a FHIR `id` is `[A-Za-z0-9\-\.]{1,64}` — HAPI
-issues `"1"`, Epic issues opaque strings, and none of them is required to be a
-UUID. So "capture `fhirUser` and pass it as `actor_id`", which is what the
-section above used to say, would have raised `InvalidAuditFieldError` on exactly
-the launches where the capture succeeded. It would have failed loudest where it
-worked best.
-
-**The decision: a separate column, `fhir_practitioner_ref`.** Two alternatives
-were considered and rejected, and the reasons are recorded because both will
+**The decision: a separate column, `fhir_practitioner_ref`.** Rejected, and will
 look tempting again:
+- **Widening `actor_id` to text** — weakens the UUID-joins-to-provider guarantee
+  every other row relies on.
+- **A practitioner-to-UUID mapping table** — out of scope for this column (see
+  "Provider identity" below for the `encounters` side).
 
-- **Widening `actor_id` to text was rejected because its cost is not local.**
-  Every other row in the table — the session-keyed routes, the Redis consumers,
-  the prior-auth writes — depends on `actor_id` being a UUID that joins to a
-  provider. Relaxing the column's type to admit one new producer weakens that
-  guarantee for all of them, and a type guarantee most rows still honour is
-  worth more than one relaxed for a single caller.
-- **A practitioner-to-UUID mapping table was rejected as scope.** It is a real
-  piece of work — its own table, its own migration, its own questions about when
-  a mapping is created and what happens when an EHR reissues an id — and none of
-  it belongs inside a task whose subject is capturing and verifying one claim.
-  It remains available later if a provider identity ever needs to be the same
-  value across both columns.
-- **A distinctly named column records what we actually know without
-  overclaiming.** An EHR-asserted `Practitioner` reference genuinely is a
-  different kind of identifier from a `provider_id` this system minted, and two
-  names keep a later reader from assuming they are interchangeable.
-
-**What the column holds is the reference as the claim gave it, verbatim** —
-normally an absolute URL such as
-`https://ehr.example.com/fhir/Practitioner/abc-123`. Not the bare id: a
-`Practitioner` id is only unique within one EHR, so `Practitioner/1` on two
-servers is two different people, and storing the id alone would silently merge
-them. `VARCHAR(512)` rather than `resource_id`'s 200 for that reason.
-
-**A value only ever reaches this column after verification.** The column means
-"the EHR asserted this identity and we checked the assertion" — an unverified
-claim is written as `None`, exactly as the null-over-fabrication rule above
-requires. Nothing may write a practitioner reference taken on trust.
-
-**The consequence for reading the table, stated rather than left to be
-discovered:** "who accessed patient X" is now two columns, not one. A query
-that reads only `actor_id` silently omits every launch-time EHR read, and a
-query that reads only `fhir_practitioner_ref` omits everything else. Neither
-column is a fallback for the other and neither is ever populated from the
-other. This is the price of the decision, and it is written down here instead of
-being found by someone whose audit query quietly returned half the rows.
-
-**The general rule, for the next time this shape appears:** when an existing
-column's type is a guarantee other code depends on, do not relax it to admit a
-new producer. Ask first whether the new value is really the same kind of thing
-the column already holds; when it is not, give it its own field and let the
-names carry the distinction.
+- **The column holds the reference verbatim**, normally an absolute URL
+  (`https://ehr.example.com/fhir/Practitioner/abc-123`) — bare ids collide across
+  EHRs. Hence `VARCHAR(512)`.
+- **A value only ever reaches this column after verification.**
+- **"Who accessed patient X" is now two columns, not one.** Query both `actor_id`
+  and `fhir_practitioner_ref`; neither is a fallback for or populated from the other.
+- **General rule:** when a column's type is a guarantee others depend on, don't
+  relax it for a new producer — give a different kind of value its own field.
 
 **The action vocabulary is `hipaa_logger.AuditAction`, and it is the only
-definition.** Services import members from it; none declares its own action
-string, and there is no list in this document to keep in step with the code.
-`audit_log()` takes an `AuditAction` rather than a `str`, so mypy rejects an
-invented action at the call site and the function rejects one again at runtime
-for callers static typing does not reach.
-
-That arrangement is TASK-045, and the history is why it is shaped this way. The
-vocabulary used to live here, as a table, with each service declaring its own
-string constants against it — and the two drifted three times, in both
-directions. `WRITE_NOTE` was cited by a task while no service defined it.
-`QUERY_POLICY` shipped in `track_b_rag/audit.py` under a comment claiming it came
-from this document, while the table had never carried it. `STREAM_AUDIO` did the
-same from `audio-ingestion/src/audit.py`, and was named in
-`docs/api/audio-ingestion.yaml` too. Each was found by someone working on
-something else, because the table and the code each looked authoritative on their
-own.
-
-TASK-045 was originally specified as a CI test comparing the table against the
-constants. That would have detected a fourth instance rather than preventing one,
-and it would have left two definitions in place plus a third thing to maintain.
-The vocabulary belongs in `hipaa-logger` because that package already owns the
-`audit_log` table and its migration, `action` is a column of that table, and
-every service that audits already depends on the package — so nothing new is
-coupled by it. **Prefer collapsing a duplication to detecting its drift**, here
-and generally.
-
-What follows from that, and is easy to undo by accident:
-
-- **Adding an action means adding a member to `AuditAction`**, in the same change
-  as the code that writes it. Not a row in this document — there is no longer a
-  row to add.
-- **Members for unbuilt work are expected**, not a carve-out. `READ_PATIENT`
-  waits on Phase 5 and `SUBMIT_PRIOR_AUTH` on TASK-061; an unused member is
-  inert, unlike a documented row with nothing behind it.
-- **Which service writes which action is deliberately not written down.** It was
-  a column of the old table and the half that rotted fastest. With one symbol per
-  action it is `grep -rn "AuditAction.READ_NUDGE"`, which cannot go stale.
-- **The meanings live on the members**, as comments in
-  `packages/hipaa-logger/src/hipaa_logger/actions.py`. Read them there.
-- **Do not widen `audit_log`'s parameter back to `str`** for a caller's
-  convenience. The column is `VARCHAR(100)` and constrains nothing; the type is
-  the only thing standing between one vocabulary and two spellings of it.
-
-`resource_type` is the resource name the row is about — `Encounter`,
-`ClinicalNote`, `ClinicalNudge`, `PriorAuthRequest`, `Patient` — and
-`resource_id` is that row's primary key.
+definition** (TASK-045). Services import members; none declares its own string.
+`audit_log()` takes `AuditAction`, so mypy and a runtime check reject invented
+actions. (A doc table plus per-service constants drifted three times; collapse
+duplication rather than detect drift.)
+- **Adding an action means adding a member to `AuditAction`** in the same change as
+  the code that writes it.
+- **Members for unbuilt work are expected** (`READ_PATIENT`, `SUBMIT_PRIOR_AUTH`).
+- **Which service writes which action is deliberately not written down** —
+  `grep -rn "AuditAction.<NAME>"`.
+- **The meanings live on the members**, in
+  `packages/hipaa-logger/src/hipaa_logger/actions.py`.
+- **Do not widen `audit_log`'s parameter back to `str`.**
 
 ### Provider identity — the registry that resolves an EHR practitioner (cross-cutting)
-Settled by TASK-025b, and settled here rather than inside it because TASK-070
-needs the same answer, and because every audit row TASK-030 and TASK-060 write
-takes its actor from the column this section decides how to fill.
+Settled by TASK-025b; TASK-070 follows it. Same type mismatch as above, but for
+`encounters.provider_id` — which is a *key* read by TASK-030/060 audits, the note
+routes and the nudge acknowledge join, so a sibling column would fork every reader.
 
-**This is the sibling of the section above, arriving from the other side.** That
-one asks where an EHR-asserted practitioner goes in the *audit* table, and
-answers: its own column, because `actor_id` is a UUID and a `Practitioner` id is
-not. This one asks the same question of `encounters.provider_id`, and the type
-mismatch is identical — `postgresql.UUID` against a FHIR `id` of
-`[A-Za-z0-9\-\.]{1,64}`, which HAPI answers as `"1"`. The answers differ because
-the two columns mean different things, and the difference is the whole content of
-this section.
-
-**Why the audit answer does not transfer.** `audit_log` records what happened, so
-recording the EHR's own reference verbatim in a second column is a complete
-answer — nothing else needs to join to it. `encounters.provider_id` is a *key*:
-TASK-030 and TASK-060 read it as `actor_id` for the work no request triggered,
-`GET`/`PATCH /notes/{session_id}` read it as the actor for a route with no
-credential, and `PATCH /nudges/{nudge_id}/acknowledge` resolves through two joins
-to reach it. Giving that column a second nullable sibling would fork every one of
-those readers, which is exactly the "who accessed patient X is now two columns"
-cost the section above accepts once and should not pay twice.
-
-**The decision: a `providers` table, and `provider_id` is a row in it.** One row
-per `Practitioner` the EHR has asserted and we have verified, with the reference
-stored as the claim gave it — normally an absolute URL, for the reason the audit
-column stores one: a `Practitioner` id is unique only within one EHR, so
-`Practitioner/1` on two servers is two different people. `UNIQUE` on that column,
-and resolution is a get-or-create, so two launches by one practitioner cannot
-mint two providers for one person.
-
+**The decision: a `providers` table, and `provider_id` is a row in it.** One row per
+verified `Practitioner` reference (stored verbatim, `UNIQUE`); resolution is
+get-or-create.
 - **`POST /providers/resolve` in `track-a-clinical` is the only way a row is
-  created.** That service owns the migration history for the core schema and owns
-  `encounters`, so the table and its writer live there; `fhir-integration` calls
-  it over HTTP, holding no database connection of its own, exactly as the note
-  write-back does in the other direction.
-- **It is not a PHI route and writes no audit row.** A practitioner reference is
-  the identity of the *provider*, not of a patient, and Known Constraints #6 is
-  an if-and-only-if in both directions — an operational write in `audit_log`
-  makes "who accessed patient X" a query you have to filter rather than one you
-  can just run. It logs at INFO like `POST /policies/ingest`.
-- **The client never sees a practitioner reference.** `GET /fhir/launch-context`
-  returns `provider_id` already resolved, so an app receives an opaque local
-  identifier and cannot assert a provider identity of its own. That is "the
-  provider comes from the `encounters` row, never from the presented token's
-  claim", applied one step earlier — at the point the identity is minted rather
-  than at the point it is read back.
-- **A launch whose actor was never verified resolves to no provider.** TASK-051c
-  writes `fhir_practitioner_ref` only after checking the `id_token`'s signature
-  against the EHR's published keys, so a null there means we do not know who
-  launched us. `provider_id` is then null too, and a visit cannot be started —
-  never a placeholder row. Minting a provider for an unverified claim would put a
-  fabricated identity in the one column an auditor reads to answer "who saw this
-  patient", which is the failure the null-over-fabrication rule exists to
-  prevent.
+  created**; fhir-integration calls it over HTTP.
+- **It is not a PHI route and writes no audit row** — logs at INFO.
+- **The client never sees a practitioner reference** — `GET /fhir/launch-context`
+  returns the resolved `provider_id`.
+- **A launch whose actor was never verified resolves to no provider** — null
+  `provider_id`, and a visit cannot be started. Never a placeholder row.
 
-**Two alternatives were considered and rejected, and both will look tempting
-again:**
+**Rejected alternatives:** **a UUIDv5 derived from the reference** (one-way — audit
+actors no query can resolve, looking like real providers) and **widening
+`encounters.provider_id` to text** (same reason as `actor_id`).
 
-- **Deriving a UUIDv5 from the practitioner reference** needs no table, no
-  migration and no HTTP hop, and it is deterministic, so it is the cheap answer
-  and it is wrong for one reason: it is one-way. Nothing anywhere would record
-  which practitioner a derived UUID came from, so every audit row written by the
-  Redis consumers would carry an actor that no query can resolve to a person —
-  and it would carry it *opaquely*, looking exactly like a provider this system
-  knows. That is worse than the honest null this repository prefers, because a
-  null is legible as an absence and a meaningless UUID is not.
-- **Widening `encounters.provider_id` to text** is the same move the section
-  above already rejects for `actor_id`, and it fails for the same reason: the
-  column's type is a guarantee other readers depend on, and relaxing it for one
-  new producer weakens it for all of them.
-
-**No foreign key from `encounters.provider_id` to `providers.id`, deliberately.**
-`POST /sessions/start` takes `provider_id` as an unauthenticated body field in
-v1 — a weakness this document already names in the session section — so a
-foreign key would convert a documented-weak field into a hard constraint, reject
-every existing row and every test double, and do it in the name of an invariant
-nothing currently assumes. What changes that: when provider authentication lands
-in Phase 5 and the field stops being caller-supplied, the constraint becomes
-free and should be added. Until then the registry is a resolver, not a gate.
+**No foreign key from `encounters.provider_id` to `providers.id`, deliberately**,
+while `/sessions/start` accepts an unauthenticated `provider_id`. Add it when Phase 5
+provider authentication makes the field server-supplied.
 
 ### Alembic version table isolation
-hipaa-logger's migrations and each service's migrations run against the same database.
-If two Alembic setups share the default `alembic_version` table, they read each other's
-revision as their own head and corrupt migration state. Every package/service with its
-own Alembic setup must set a unique `version_table` in its `env.py`:
+Migrations from hipaa-logger and each service share one database; a shared default
+`alembic_version` table corrupts migration state. Every Alembic setup sets a unique
+`version_table` in its `env.py`:
 ```python
-# packages/hipaa-logger/migrations/env.py
-context.configure(
-    connection=connection,
-    target_metadata=target_metadata,
-    version_table="alembic_version_hipaa_logger",
-)
-```
-```python
-# services/track-a-clinical/migrations/env.py
 context.configure(
     connection=connection,
     target_metadata=target_metadata,
     version_table="alembic_version_track_a_clinical",
 )
 ```
-Pattern: `alembic_version_{package_or_service_name_with_underscores}`. Apply this to
-every future Alembic setup, not just these two.
+Pattern: `alembic_version_{package_or_service_name_with_underscores}` (e.g.
+`alembic_version_hipaa_logger`). Applies to every future Alembic setup.
 
 ### DATABASE_URL format — single env var, two consumers
-CI and .env.example set `DATABASE_URL` in SQLAlchemy dialect form:
-`postgresql+asyncpg://user:pass@host/db`. SQLAlchemy services use this directly.
-Raw asyncpg (hipaa-logger) cannot parse the `+asyncpg` driver suffix, so hipaa-logger
-strips it defensively on connect rather than requiring a second env var:
+`DATABASE_URL` uses SQLAlchemy form `postgresql+asyncpg://user:pass@host/db`.
+hipaa-logger (raw asyncpg) strips the driver suffix on connect — no second env var:
 ```python
 def _to_asyncpg_dsn(database_url: str) -> str:
     """SQLAlchemy-style URLs use postgresql+asyncpg://; raw asyncpg wants postgresql://"""
     return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
 ```
-One `DATABASE_URL` value works for every consumer in the monorepo — services never
-need to know which driver style another package expects.
 
-
+### FHIR
 - FHIR version: R4 (4.0.1)
 - SMART on FHIR version: 2.0
 - Local dev FHIR server: HAPI FHIR at localhost:8080 (Docker)
 - FHIR resources used: Patient, Encounter, Condition, Coverage, MedicationRequest,
-  DocumentReference, Claim, Bundle, ClaimResponse. `Bundle` and `ClaimResponse` are
-  what Da Vinci PAS actually exchanges — `Claim/$submit` takes a bundle carrying a
-  Claim plus every resource it references and answers with one carrying a
-  ClaimResponse (TASK-004b). This list is what a reader checks before assuming a
-  resource is unmodelled, so add to it in the change that models the resource.
-  `packages/fhir-types` also models `Location` and `Organization`, which are not on
-  this list because nothing reads or writes them as a FHIR resource in their own
-  right — TASK-052b reads an encounter's site of care through them.
+  DocumentReference, Claim, Bundle, ClaimResponse. `Bundle`/`ClaimResponse` are what
+  Da Vinci PAS `Claim/$submit` exchanges (TASK-004b). Add to this list in the change
+  that models a new resource. `packages/fhir-types` also models `Location` and
+  `Organization` (read only through an encounter's site of care, TASK-052b).
 
 ### EHR Priority Order (do not deviate from this)
-1. **Athenahealth** — build and certify first. Most accessible developer program,
-   common in private orthopedic and dermatology practices (our target customers).
-   Sandbox: developer.athenahealth.com
-2. **eClinicalWorks** — second. Large presence in specialty practices.
-   Sandbox: developer.eclinicalworks.com
-3. **Modernizing Medicine (EMA)** — third. Specifically targets dermatology and
-   orthopedics — our exact specialties. Higher priority than market share suggests.
-4. **Cerner (Oracle Health)** — fourth. Faster certification than Epic.
-   Sandbox: code.cerner.com
-5. **Epic** — last. Largest market but hardest certification (6-12 months,
-   requires reference customer). Pursue only after paying customers on other EHRs.
-   Sandbox: fhir.epic.com
+1. **Athenahealth** — first. Most accessible developer program, common in private
+   orthopedic and dermatology practices. Sandbox: developer.athenahealth.com
+2. **eClinicalWorks** — second. Large specialty presence. Sandbox: developer.eclinicalworks.com
+3. **Modernizing Medicine (EMA)** — third. Targets dermatology and orthopedics.
+4. **Cerner (Oracle Health)** — fourth. Faster certification than Epic. Sandbox: code.cerner.com
+5. **Epic** — last. Hardest certification (6-12 months, needs a reference customer);
+   only after paying customers on other EHRs. Sandbox: fhir.epic.com
 
 ### Adapter Architecture (mandatory — do not build single-EHR)
-All EHR integration goes through an adapter layer in services/fhir-integration.
-Never write EHR-specific logic directly into route handlers or other services.
+All EHR integration goes through the adapter layer in services/fhir-integration.
+Never put EHR-specific logic in route handlers or other services.
 
 ```
 services/fhir-integration/src/adapters/
@@ -2559,105 +1216,39 @@ services/fhir-integration/src/adapters/
                    # detect_ehr_from_issuer(iss_url) -> EHRType
 ```
 
-The SMART launch `iss` parameter identifies the EHR vendor. Pass it to
-`detect_ehr_from_issuer()` to get the right adapter — never hardcode EHR type.
+The SMART launch `iss` identifies the vendor — pass it to `detect_ehr_from_issuer()`;
+never hardcode EHR type.
 
-**base.py has two layers of method, and the distinction is what the subclasses
-override.** An earlier draft of this list named only four methods and mixed the
-two layers together, which left TASK-052 (which specifies the granular fetches)
-and TASK-056/TASK-057 (which say they override `get_patient_context()`)
-describing method sets that did not contain each other. Both layers are real;
-they are written out separately here because TASK-050 creates the stubs from
-this list and the two later adapters depend on this exact shape.
-
-**Primitives — one FHIR resource type each, standard US Core, no composition:**
-- `get_patient(patient_id)` → normalized `PatientContext` patient half
-- `get_coverage(patient_id)` → normalized `CoverageInfo` (payer, plan, member_id)
-- `get_conditions(patient_id)` → list of active `Condition`
-- `get_encounter(encounter_id)` → `Encounter`
-
-**Composed — assembles primitives, and is the override point:**
-- `get_patient_context(patient_id)` → `PatientContext`, built by calling
-  `get_patient()`, `get_coverage()` and `get_conditions()`
-
-Also on base.py, and belonging to neither layer (they compose nothing and fetch
-nothing):
-- `write_clinical_note()` — DocumentReference write-back (TASK-053). Takes one
-  `ClinicalNoteContent` rather than a parameter list, so a vendor subclass
-  overriding the write changes one signature. **A subclass amends what
+**base.py has two layers of method:**
+- **Primitives** (one US Core resource each, no composition): `get_patient(patient_id)`,
+  `get_coverage(patient_id)` → `CoverageInfo`, `get_conditions(patient_id)`,
+  `get_encounter(encounter_id)`.
+- **Composed** (the override point): `get_patient_context(patient_id)` →
+  `PatientContext`, built from the three patient primitives.
+- Also on base.py: `write_clinical_note()` — DocumentReference write-back
+  (TASK-053), taking one `ClinicalNoteContent`; **a subclass amends what
   `note_document.build_document_reference()` returns rather than rebuilding the
-  resource**, for the same reason Cerner and Epic call `super()` on the composed
-  read: the builder is where the note type, the required US Core category and
-  the filter on which codes may leave this system live, and a hand-rolled
-  resource loses all three silently.
-- `submit_prior_auth()` — FHIR Claim/$submit, Da Vinci PAS (TASK-054)
+  resource** (the builder holds note type, US Core category and the outbound code
+  filter). And `submit_prior_auth()` — Claim/$submit, Da Vinci PAS (TASK-054).
 
-**Subclasses override the composed method, not the primitives, unless the
-vendor's deviation is genuinely in one resource fetch.** Enrichment and
-fallback logic is about the assembled context — Epic adds proprietary
-extensions to it, Cerner fills a payer field the `Coverage` fetch returned
-incomplete — so overriding `get_patient_context()` lets each of them call
-`super()` and then adjust, without reimplementing three fetches. A subclass that
-overrode a primitive instead would have to duplicate the composition to change
-anything about the result.
+**Subclasses override the composed method (calling `super()`), not primitives**,
+unless the deviation is genuinely in one fetch:
+- Athena: `submit_prior_auth()` → CoverMyMeds API (no FHIR PAS)
+- Epic: `get_patient_context()` → optional proprietary extension enrichment
+- Cerner: `get_patient_context()` → coverage fallback if payer field incomplete
 
-What gets overridden in subclasses (EHR-specific only):
-- Athena: submit_prior_auth() → CoverMyMeds API (Athena doesn't support FHIR PAS)
-- Epic: get_patient_context() → optional proprietary extension enrichment
-- Cerner: get_patient_context() → coverage fallback if payer field incomplete
+Rule: one-EHR code goes in a subclass; standard FHIR goes in base.py.
 
-Rule: if code only works on one EHR, it belongs in a subclass. If it works
-on all EHRs using standard FHIR, it belongs in base.py.
-
-**`EHRAdapter` is concrete and instantiable, never abstract.** It is not only a
-shared base — it is the adapter an unrecognised issuer actually gets, per the
-fallback below, and every method on it is standard FHIR R4 / US Core that works
-without any vendor knowledge. Marking it abstract would make an unknown EHR
-impossible to serve, which is exactly the hard failure the fallback exists to
-avoid.
-
-**An unrecognised issuer resolves to the base adapter and logs a WARNING — it
-does not raise.** This is the same arrangement as an unknown payer in
-`packages/payer-vocab`: the request still runs, and the fact that the name did
-not line up is visible in the operational trace rather than being indistinguishable
-from a normal answer. The reasoning transfers exactly. An EHR we have never seen
-is usually still a conformant FHIR R4 server, so the standard path is a real
-answer rather than a guess; and a raise here would turn every unrecognised SMART
-launch into a failed launch, which is a worse outcome than a working session
-someone has to notice in the logs. Log at WARNING with the issuer host — never
-the full URL with its query string, which can carry launch context — so an EHR
-worth adding a subclass for surfaces on its own.
-
-**`ehr_type` is a closed vocabulary — `EHRType`, a `StrEnum` — never a bare
-`str`.** This is the third time this repository has reached the same conclusion
-about an identifier matched by string equality, after `payer_vocab`'s canonical
-slugs and `hipaa_logger.AuditAction`, and the argument is the one those two
-already made: one spelling, defined once, with mypy rejecting an invented value
-at the call site. It matters more here than in an ordinary function signature
-because the value **round-trips through Redis** — TASK-051 writes it into
-`fhir_token:{launch_id}` at launch and a later request reads it back to pick an
-adapter — so a free-form string puts a write side and a read side in two
-different modules with nothing holding them in step. `StrEnum` for the same
-reason `AuditAction` is one: a member compares equal to its own text, so what
-goes into Redis and comes back out is an ordinary string and no serialisation
-step has to know about the type.
-
-Three details of the matching, settled here so `detect_ehr_from_issuer()` has no
-judgement left to make:
-- **Case-insensitive.** An `iss` is a URL; its host is case-insensitive by
-  specification and vendors do not agree on spelling.
-- **Match against the host, not the whole URL.** `"epic"` is four characters
-  that occur inside ordinary words, and an `iss` carries a path and can carry a
-  query string — a practice named "Epicenter Orthopedics" or a path segment
-  containing the substring would otherwise select the Epic adapter for a server
-  that is not Epic. The host is the part that actually identifies the vendor.
-- **`"cerner"` and `"oraclehealth"` both mean Cerner, and are checked in that
-  order.** Oracle's acquisition of Cerner means both appear in real issuer URLs
-  during the rename, sometimes in the same host. They resolve to one vendor key,
-  so the ordering changes nothing about the outcome — it is fixed anyway so that
-  two readers of the function cannot disagree about what a host containing both
-  does. Order the remaining checks most-specific-first for the same reason, and
-  add a test case for any host that matches two patterns.
+- **`EHRAdapter` is concrete and instantiable, never abstract** — it is what an
+  unknown issuer gets.
+- **An unrecognised issuer resolves to the base adapter and logs a WARNING — it
+  does not raise.** Log the issuer host only, never the full URL.
+- **`ehr_type` is a closed vocabulary — `EHRType`, a `StrEnum` — never a bare
+  `str`** (it round-trips through Redis in `fhir_token:{launch_id}`).
+- `detect_ehr_from_issuer()` matching: **case-insensitive; match the host, not the
+  whole URL** (avoid "Epicenter Orthopedics" → Epic); **`"cerner"` and
+  `"oraclehealth"` both mean Cerner, checked in that order**; remaining checks
+  most-specific-first, with a test for any host matching two patterns.
 
 ## GitHub Actions & Templates
 
@@ -2671,282 +1262,108 @@ judgement left to make:
   - example: `feat(track-b-rag): implement policy query endpoint [TASK-012]`
 
 ### .github/CODEOWNERS
-```
-# Everything — Mohamed owns all of it for now
-*   @mohamedbouchtout
-
-# Infra and compliance require extra attention
-/infrastructure/terraform/environments/production/   @mohamedbouchtout
-/docs/compliance/                                    @mohamedbouchtout
-/packages/hipaa-logger/                              @mohamedbouchtout
-```
+`@mohamedbouchtout` owns everything, with explicit entries for
+`/infrastructure/terraform/environments/production/`, `/docs/compliance/` and
+`/packages/hipaa-logger/`. See the file.
 
 ### .github/workflows/ci.yml
-Triggers on: pull_request to main, push to main
-Jobs:
-1. `detect-changes` — uses dorny/paths-filter to find which services/packages changed
-2. Per-service test jobs (only run if that service changed):
-   - `ruff check` + `ruff format --check` (linting)
-   - `mypy src/` (type checking)
-   - `pytest tests/ --cov=src --cov-fail-under=80`
-3. `security-scan` — runs bandit -r . -ll on changed Python services
-4. All jobs must pass before PR can merge
+Triggers on pull_request to main and push to main.
+1. `detect-changes` — finds which services/packages changed
+2. Per-member test jobs (only if changed): `ruff check` + `ruff format --check`,
+   `mypy src/`, `pytest tests/ --cov=src --cov-fail-under=80`
+3. `security-scan` — `bandit -r . -ll` on changed Python services
+4. All jobs must pass before merge
 
 Path filter groups (each maps to a test job):
-- `hipaa-logger`: packages/hipaa-logger/**  (own job — was previously only
-  triggering service jobs via the packages/** wildcard below, and never
-  actually ran its own tests. Fixed: packages get dedicated jobs too.)
-- `api-envelope`: packages/api-envelope/**
-- `session-auth`: packages/session-auth/**
-- `logging-policy`: packages/logging-policy/** — every service installs it
-  (TASK-046), so a change here re-runs all of them through the `packages/**`
-  rule, and its own job runs the tests that drive the real libraries.
-- `crypto-utils`: packages/crypto-utils/**
-- `fhir-types`: packages/fhir-types/** — this job runs BOTH checks: pytest against
-  the Pydantic models AND `tsc --noEmit` against packages/fhir-types/typescript/.
-  It is the only package with two languages in one job. The TypeScript side is
-  its own npm workspace (see TASK-004) so tsc actually catches drift between
-  the Pydantic models and their TS mirrors, not just compiles them in isolation.
-- `audio-wire`: packages/audio-wire/** — TypeScript only, so it runs `tsc
-  --noEmit` and Vitest rather than joining the Python matrix. A change here also
-  sets the `web` and `mobile` filters, because the package ships source that
-  both apps compile into themselves rather than a built artifact.
-- `session-client`: packages/session-client/** — TypeScript only, on the same
-  terms as `audio-wire` above, and it sets `web` and `mobile` for the same
-  reason. It holds the only client that may re-mint a session token, so a change
-  here that ran no tests would change how a credential is refreshed in both apps
-  at once.
-- `fhir-client`: packages/fhir-client/** — TypeScript only, on the same terms
-  again, and it sets `web` and `mobile` for the same reason. It holds the client
-  that obtains a SMART launch and the function deciding whether a patient search
-  is the right question at all, so a change here that ran no tests would change
-  which patient a visit is filed against in both apps at once.
-- `track-b-rag`: services/track-b-rag/** or packages/**
-- `track-a-clinical`: services/track-a-clinical/** or packages/**
-- `audio-ingestion`: services/audio-ingestion/** or packages/**
-- `fhir-integration`: services/fhir-integration/** or packages/**
-- `nudge-service`: services/nudge-service/** or packages/**
-- `prior-auth`: services/prior-auth/** or packages/**
-- `policy-scraper`: services/policy-scraper/** or packages/**
-- `web`: apps/web/**
-- `mobile`: apps/mobile/**
+- Python packages, each with its own job: `hipaa-logger`, `api-envelope`,
+  `session-auth`, `logging-policy`, `crypto-utils` (`packages/<name>/**`).
+- `fhir-types`: runs pytest **and** `tsc --noEmit` against
+  `packages/fhir-types/typescript/` (its own npm workspace, so tsc catches drift
+  from the Pydantic models).
+- TypeScript packages `audio-wire`, `session-client`, `fhir-client`: `tsc --noEmit`
+  + Vitest, and a change **also sets the `web` and `mobile` filters** (both apps
+  compile their source).
+- Services `track-b-rag`, `track-a-clinical`, `audio-ingestion`, `fhir-integration`,
+  `nudge-service`, `prior-auth`, `policy-scraper`: `services/<name>/**` or `packages/**`.
+- `web`: apps/web/** · `mobile`: apps/mobile/**
 
-Rule: any directory under packages/ needs its own path-filter entry AND its own
-test job — a change under packages/ correctly re-runs every service that depends
-on it, but that is not a substitute for running the package's own test suite.
-The 80% coverage gate applies to packages/ the same as services/.
-
-**A service's OpenAPI spec selects that service's job**, by the filename
-convention in API Design above: `docs/api/<service-name>.yaml` selects
-`services/<service-name>`. This exists because
-`tests/unit/api/test_openapi_contract.py` compares the committed spec against the
-app's generated schema, so the spec is half of a contract and editing it alone is
-a way to break that test. Without this rule the drift test ran on changes to the
-half that cannot drift by itself and not on the half that can, and a spec-only
-edit could land red on `main`. Keep the filename convention when adding a
-service; the rule is derived from it and needs no lookup table.
-
-Corollary worth remembering when adding any future coupling: **a test that
-guards two things must be re-run when either of them moves.** The same reasoning
-puts `services/audio-ingestion` in the selection whenever
-`services/track-a-clinical` changes, for the session-JWT contract test.
-
-**The selection rules live in `.github/scripts/detect-changed-members.sh`, not
-inline in the workflow, and they have their own test.** The script is a pure
-function: changed paths on stdin, the six job-gating outputs on stdout. Only
-base-SHA resolution and `git diff` stay in `ci.yml`, because those need the
-GitHub event context. Adding or changing a rule means adding a case to
-`.github/scripts/detect-changed-members.test.sh` in the same change — a rule
-without a case is precisely the situation the extraction exists to prevent.
-
-Two properties of that arrangement are load-bearing and easy to undo by
-accident:
-- **A change under `.github/scripts/` selects every member.** Selection logic
-  cannot be trusted to scope its own blast radius.
-- **The `detect-logic` job is unconditional and declares no `needs`.** A
-  self-test gated on the thing it tests would be skipped by exactly the bug it
-  exists to catch.
-
-**Every job must appear in `ci-passed`'s `needs`.** That job is the merge gate,
-and one missing from its list can go red without blocking the pull request —
-`audio-wire` was missing for a while. This is the same silent-hole failure as an
-untested member, one layer up: the work runs, fails, and nothing stops the merge.
+Rules:
+- **Any directory under packages/ needs its own path-filter entry AND its own test
+  job** — re-running dependent services is not a substitute. The 80% gate applies.
+- **A service's OpenAPI spec selects that service's job**: `docs/api/<service>.yaml`
+  selects `services/<service>` (the spec is half of `test_openapi_contract.py`'s
+  contract). Keep the filename convention.
+- **A test that guards two things must be re-run when either of them moves** — e.g.
+  track-a-clinical changes select audio-ingestion and session-auth for the JWT
+  contract test.
+- **The selection rules live in `.github/scripts/detect-changed-members.sh`** (pure
+  function: paths on stdin, outputs on stdout), tested by
+  `.github/scripts/detect-changed-members.test.sh` — add a case with every rule change.
+- **A change under `.github/scripts/` selects every member.**
+- **The `detect-logic` job is unconditional and declares no `needs`.**
+- **Every job must appear in `ci-passed`'s `needs`** — it is the merge gate.
 
 ### .github/workflows/deploy-dev.yml
-Stub file only during Phases 0-5. Content:
-```yaml
-# Deploy to dev — enabled in Phase 6 when infrastructure is ready
-# on:
-#   push:
-#     branches: [main]
-name: Deploy Dev (stub)
-on: workflow_dispatch  # manual trigger only for now
-jobs:
-  placeholder:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Deploy pipeline not yet configured"
-```
+A `workflow_dispatch`-only stub during Phases 0-5; enabled in Phase 6.
 
 ### .github/workflows/nightly-live-checks.yml — gated tests actually run
-Some tests depend on a live external source: the CMS Medicare Coverage Database
-(TASK-013), and later the payer and EHR sandboxes. Those belong out of the
-per-PR suite — an unrelated pull request should not go red because a government
-site is down or a vendor sandbox is being rebuilt — so they sit behind an
-environment-variable gate and are skipped by default.
-
-**A gated test must be paired with a scheduled run that turns the gate on.**
-This workflow runs nightly on `schedule:` with the gate set, plus
-`workflow_dispatch` for running it by hand. Without it the gate is not a
-deferral, it is a deletion: nothing ever executes the test, and drift in the
-external source surfaces whenever someone happens to flip the flag, which is to
-say at random. A scheduled failure naming the source that changed is the honest
-version of "don't loosen the test to mask drift".
-
-Rules for anything added here:
-- The gate's default is off, so `pytest` on a laptop and in CI behaves the same.
-- The job names the external dependency in its own name, so a red nightly says
-  *which* upstream moved without anyone opening the log.
-- A failure here is a real signal about the outside world, not a flake to
-  re-run until green. Fix the code or the fixtures; do not relax the assertion.
-- Never put a test here to escape the per-PR suite. Only genuine external
-  dependencies qualify; anything that can run against a fixture stays on in CI.
+Tests against live external sources (CMS Medicare Coverage Database, TASK-013;
+later payer/EHR sandboxes) sit behind an env-var gate, skipped by default.
+**A gated test must be paired with a scheduled run that turns the gate on** —
+otherwise the gate is a deletion. This workflow runs nightly plus
+`workflow_dispatch`.
+- The gate defaults off.
+- The job name names the external dependency.
+- A failure is a real signal — fix code or fixtures; never relax the assertion.
+- Only genuine external dependencies qualify; never use it to escape per-PR CI.
 
 ### .github/PULL_REQUEST_TEMPLATE.md
-PR template enforces task linkage and HIPAA checklist on every merge:
-```markdown
-## Task
-Closes TASK-XXX
-
-## What changed
-<!-- One paragraph description -->
-
-## Test evidence
-<!-- Paste pytest output or screenshot -->
-
-## HIPAA checklist
-- [ ] No PHI appears in logs, print statements, or error messages
-- [ ] Any new PHI access calls hipaa-logger audit_log()
-- [ ] No secrets or credentials added to code or comments
-- [ ] Audio data not written to disk anywhere in this change
-- [ ] New environment variables added to .env.example
-
-## For reviewer
-<!-- Anything specific to look at or known tradeoffs -->
-```
+Enforces task linkage (`Closes TASK-XXX`), what changed, test evidence, and a HIPAA
+checklist (no PHI in logs/errors, `audit_log()` on new PHI access, no secrets, no
+audio on disk, new env vars in `.env.example`). Fill it in; see the file.
 
 ### .github/ISSUE_TEMPLATE/task.md
-```markdown
----
-name: Task
-about: Implement a TASKS.md item
----
-**Task ID:** TASK-XXX
-**Phase:** 0 / 1 / 2 / 3 / 4 / 5 / 6 / 7
-
-## What to build
-<!-- Copy from TASKS.md -->
-
-## Acceptance criteria
-<!-- Copy test bullets from TASKS.md -->
-
-## Notes
-<!-- Decisions made, context for implementer -->
-```
+Task ID, phase, what to build, acceptance criteria and notes copied from TASKS.md.
 
 ### .github/dependabot.yml
-Lives in `.github/` directly, NOT in `.github/workflows/`. GitHub reads it
-natively — it is not a GitHub Actions workflow file.
-
-**The file itself is authoritative.** What follows is the shape and the
-reasoning; do not treat this block as a copy to edit. An earlier draft of this
-section inlined the whole YAML, drifted from it completely, and described five
-ecosystems that were never configured.
-
-Five ecosystems are configured, all weekly on Mondays, all with a
-`chore(deps)` commit prefix:
-
-| Ecosystem | Directory | Covers |
-|---|---|---|
-| `uv` | `/` | Every Python service and package — one uv workspace at the root, so one entry covers all of them |
-| `npm` | `/apps/web` | The React frontend |
-| `npm` | `/apps/mobile` | The React Native app |
-| `github-actions` | `/` | Pinned action versions in `workflows/` |
-| `docker-compose` | `/` | The backing service images — local **and** CI, see below |
-
-Terraform is commented out in the file, waiting on `infrastructure/terraform`
-to actually contain `.tf` files.
-
-Decisions worth knowing before changing it:
-- **One `uv` entry, not one `pip` entry per directory.** uv is the package
-  manager for this repo and the workspace root resolves every member together.
-  Per-directory `pip` entries would open separate PRs for the same transitive
-  bump in nine places and could resolve them inconsistently.
-- **Minor and patch updates are grouped per ecosystem; majors come through
-  individually.** A grouped PR keeps the volume low enough that people actually
-  read them. A major arriving on its own gets a real review.
-- **Majors of the core data and LLM stack are ignored entirely** — `pydantic`,
-  `sqlalchemy`, `langchain*`. These are coordinated migrations, not bumps. Same
-  for `expo` and `react-native` on mobile, and for `postgres` (see below).
-- **Postgres majors are ignored, and this is not squeamishness.** Postgres 18
-  moved its data directory into a major-version subdirectory, which breaks
-  every existing local volume against the mount in `docker-compose.yml`. CI
-  cannot catch that: it starts from an empty volume on every run, so the bump
-  goes green in a pull request and breaks each developer only when they next
-  pull. Upgrading means moving the mount to `/var/lib/postgresql` and planning
-  a `pg_upgrade` or a deliberate reset — a task, not a merge.
+Lives in `.github/` (not `workflows/`). **The file itself is authoritative.**
+Weekly on Mondays, `chore(deps)` prefix, five ecosystems: `uv` (`/`, the whole
+workspace — one entry, not per-directory `pip`), `npm` (`/apps/web`), `npm`
+(`/apps/mobile`), `github-actions` (`/`), `docker-compose` (`/`). Terraform is
+commented out until `.tf` files exist.
+- Minor/patch grouped per ecosystem; majors individually.
+- **Majors ignored:** `pydantic`, `sqlalchemy`, `langchain*`, `expo`,
+  `react-native` (coordinated migrations), and **`postgres`** — v18 moved its data
+  directory, breaking existing local volumes in a way CI (fresh volumes) cannot
+  catch. Upgrading is a task: move the mount to `/var/lib/postgresql` and plan a
+  `pg_upgrade` or reset.
 
 ### Backing service versions live in exactly one file
-`docker-compose.yml` is the single source of truth for the postgres, redis and
-qdrant versions. **CI does not declare its own service containers.** The test
-job runs `docker compose up -d --wait postgres redis qdrant`, so a pull request
-tests against the same images, the same healthchecks and the same configuration
-a developer gets locally — not merely the same version tags.
-
-This is deliberate and worth not undoing. Dependabot watches
-`docker-compose.yml` and **cannot** watch images declared as GitHub Actions
-service containers or job containers: that is
-[dependabot-core#5819](https://github.com/dependabot/dependabot-core/issues/5819),
-open since September 2022. While CI carried its own pin, nothing kept the two
-in step and nothing could — a bump landed on the compose side alone and left
-local dev on postgres 18 while every CI run stayed on 16, which is how a
-migration passes on a laptop and fails in a pull request.
-
-If a future job needs a backing service, add it to `docker-compose.yml` and
-start it from there. Do not add a `services:` block back to `ci.yml`; that
-reintroduces an unwatched second pin.
+`docker-compose.yml` is the single source of truth for postgres, redis and qdrant.
+**CI does not declare its own service containers** — it runs
+`docker compose up -d --wait postgres redis qdrant`. Dependabot cannot watch Actions
+service containers (dependabot-core#5819), so a second pin drifts silently. Add
+any future backing service to `docker-compose.yml`; never add a `services:` block
+to `ci.yml`.
 
 ### .github/ISSUE_TEMPLATE/bug_report.md
-See the file for the current template. The one rule that is not obvious from
-reading it: **never paste PHI into an issue.** GitHub is not a HIPAA-eligible
-store — no patient names, MRNs, dates of birth, addresses, real transcripts, or
-real audio. Redact to synthetic values or reference a Synthea patient ID. The
-template carries an "Impact" checkbox for possible PHI exposure; ticking it
-means notifying the security owner directly rather than waiting on triage.
+**Never paste PHI into an issue** — GitHub is not HIPAA-eligible. Use synthetic
+values or a Synthea patient ID. Ticking the "Impact" PHI-exposure box means
+notifying the security owner directly.
 
 ### packages/crypto-utils — Design Decisions (locked, do not revisit)
-**Scope note:** field-level AES-256-GCM encryption using a KMS-wrapped DEK per
-record. This is for encrypting specific sensitive fields before they hit the
-database — it is not a replacement for encryption-at-rest (RDS/S3 handle that
-separately) and it is not a general crypto toolkit.
-- **Never log plaintext.** Plaintext DEKs and plaintext field values must never
-  reach any log line, exception message, or stack trace. If an encrypt/decrypt
-  call fails, the exception message names the field/context being processed —
-  never the plaintext value or the unwrapped key material. This applies inside
-  the crypto primitives themselves, not just at call sites that happen to touch PHI.
-- **Encryption context is bound in two places, not one.** The `context: dict`
-  passed to `encrypt_field()` is used both as the KMS encryption context (on the
-  DEK wrap/unwrap call) and as AES-GCM's AAD (additional authenticated data) on
-  the local encrypt/decrypt operation. Binding only at the KMS layer would let
-  ciphertext for one record's field be swapped onto another record and still
-  decrypt successfully, since GCM alone has no knowledge the ciphertext was
-  scoped to a specific record. Binding the same context as AAD makes GCM's
-  authentication tag itself reject a mismatched context — defense in depth,
-  independent of whether the KMS-side check is ever bypassed.
-- **Moto (`@mock_aws`) for all KMS mocking in tests** — not hand-rolled
-  `unittest.mock` on boto3 calls. Applies to every test that touches KMS.
+**Scope note:** field-level AES-256-GCM encryption with a KMS-wrapped DEK per
+record, for specific sensitive fields. Not a replacement for encryption at rest,
+not a general crypto toolkit.
+- **Never log plaintext.** Plaintext DEKs and field values never reach a log line,
+  exception message, or stack trace; errors name the field/context only. Enforced
+  inside the primitives.
+- **Encryption context is bound in two places, not one**: as the KMS encryption
+  context *and* as AES-GCM AAD, so ciphertext swapped onto another record fails the
+  GCM tag even if the KMS check were bypassed.
+- **Moto (`@mock_aws`) for all KMS mocking in tests** — never hand-rolled
+  `unittest.mock` on boto3.
 
-`encrypt_field()` / `decrypt_field()` signatures:
 ```python
 def encrypt_field(plaintext: str, context: dict[str, str]) -> EncryptedField:
     """context is bound as both KMS encryption context and GCM AAD."""
