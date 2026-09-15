@@ -24,6 +24,8 @@ from typing import Any
 import httpx
 import pytest
 
+from track_b_rag.documents import content_digest
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "seed-policies.py"
 
@@ -430,3 +432,36 @@ class TestAgainstLivePayers:
             # whitespace before the first tag, so this looks at the stripped
             # body rather than at a fixed prefix of the raw bytes.
             assert stripped.startswith(b"<"), f"{policy.policy_id} is no longer HTML"
+
+    @pytest.mark.parametrize(
+        "policy",
+        [p for p in seed_policies.SEED_POLICIES if p.content_type == "text/html"],
+        ids=lambda p: p.policy_id,
+    )
+    @pytest.mark.asyncio
+    async def test_an_html_document_fetched_twice_digests_the_same(self, policy: Any) -> None:
+        """TASK-009, against the live CDN rather than a capture of it.
+
+        Every Aetna response carries an injected mPulse script with a fresh
+        token, and the digest ingest stores must not see it — or every seed run
+        re-embeds a policy that did not move. Ingest reports ``unchanged``
+        exactly when this digest matches the stored one, so equal digests here
+        are that claim without a database; ``test_ingestion.py`` proves the same
+        through the real pipeline on a captured pair.
+
+        A failure means something else on the page now varies per request —
+        most likely the CDN injecting into ``<noscript>``, an attribute or a
+        comment, which the digest deliberately still covers. Look at what
+        differs before widening ``packages/html-digest``'s definition to hide it.
+        """
+        async with seed_policies.PoliteClient(
+            user_agent=seed_policies.USER_AGENT,
+            delay_seconds=seed_policies.DELAY_SECONDS,
+            timeout_seconds=seed_policies.TIMEOUT_SECONDS,
+        ) as fetcher:
+            first = await fetcher.get(policy.source_url)
+            second = await fetcher.get(policy.source_url)
+
+        assert content_digest(first, "text/html") == content_digest(second, "text/html"), (
+            f"{policy.policy_id} digests differently on two fetches"
+        )
