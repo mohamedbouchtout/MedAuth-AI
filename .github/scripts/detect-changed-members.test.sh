@@ -73,10 +73,11 @@ assert_members 'seed-policies.py selects track-b-rag' \
 assert_members 'seed-test-encounters.py selects track-a-clinical' \
   'scripts/seed-test-encounters.py' '["services/track-a-clinical"]'
 # The pairing has to survive alongside the rules that fan out, or a change
-# touching both would quietly drop one of them.
+# touching both would quietly drop one of them. The src/ path also selects the
+# digest agreement test in packages/html-digest, and still one track-b-rag.
 assert_members 'seed-policies.py alongside its own service stays deduped' \
   "$(printf 'scripts/seed-policies.py\nservices/track-b-rag/src/track_b_rag/ingestion.py')" \
-  '["services/track-b-rag"]'
+  '["packages/html-digest","services/track-b-rag"]'
 # A script nothing tests must select nothing. Selecting a service for it would
 # claim a coverage that does not exist, which is the same lie in the other
 # direction as the under-selection this suite exists to catch.
@@ -102,8 +103,26 @@ assert_members 'a README selects nothing' 'README.md' '[]'
 assert_members 'nothing changed selects nothing' '' '[]'
 
 section 'service and package selection'
+# nudge-service rather than track-b-rag, which TASK-009 paired with the digest
+# agreement test below — a service with no coupling is what this case means.
 assert_members 'a service selects only itself' \
-  'services/track-b-rag/src/x.py' '["services/track-b-rag"]'
+  'services/nudge-service/src/x.py' '["services/nudge-service"]'
+
+# Both services compute an HTML policy document's digest, and
+# packages/html-digest proves they agree by calling each one's own function. If
+# either side moves, that proof has to re-run — or it is decorative.
+assert_members 'track-b-rag src selects the digest agreement test' \
+  'services/track-b-rag/src/track_b_rag/documents.py' \
+  '["packages/html-digest","services/track-b-rag"]'
+assert_members 'policy-scraper src selects the digest agreement test' \
+  'services/policy-scraper/src/policy_scraper/documents.py' \
+  '["packages/html-digest","services/policy-scraper"]'
+# As narrow as the coupling: the proof calls src/, so a test or a migration in
+# either service is no reason to re-run it.
+assert_members 'a track-b-rag test change selects only itself' \
+  'services/track-b-rag/tests/unit/x.py' '["services/track-b-rag"]'
+assert_members 'a policy-scraper test change selects only itself' \
+  'services/policy-scraper/tests/unit/x.py' '["services/policy-scraper"]'
 # Four couplings at once: the JWT contract test in packages/session-auth, the
 # shared SQLAlchemy models that track-b-rag, policy-scraper and prior-auth
 # import from this service rather than mapping their own, and fhir-integration's
@@ -140,7 +159,7 @@ assert_members 'session-auth selects itself and every service' \
   '["packages/session-auth","services/audio-ingestion","services/fhir-integration","services/nudge-service","services/policy-scraper","services/prior-auth","services/track-a-clinical","services/track-b-rag"]'
 assert_members 'a spec and its own service dedupe to one entry' \
   "$(printf 'docs/api/track-b-rag.yaml\nservices/track-b-rag/src/x.py')" \
-  '["services/track-b-rag"]'
+  '["packages/html-digest","services/track-b-rag"]'
 assert_members 'a package selects itself and every service' \
   'packages/api-envelope/src/x.py' \
   '["packages/api-envelope","services/audio-ingestion","services/fhir-integration","services/nudge-service","services/policy-scraper","services/prior-auth","services/track-a-clinical","services/track-b-rag"]'

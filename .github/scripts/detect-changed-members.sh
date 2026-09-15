@@ -151,6 +151,19 @@ main() {
       if changed_matches '^services/fhir-integration/src/'; then
         selected+=("services/track-b-rag")
       fi
+
+      # packages/html-digest holds the one definition of an HTML policy
+      # document's digest (TASK-009), and tests/unit/test_service_agreement.py
+      # proves the two services that compute it still agree by calling each
+      # one's own function: track-b-rag's content_digest at ingest, and
+      # policy-scraper's content_hash for its pre-upload skip. If those drift
+      # nothing fails -- the scraper just re-uploads every document every
+      # night and ingest answers "unchanged" -- so that test is the only thing
+      # that would notice, and it is decorative unless a change on either side
+      # re-runs it. Same rule as the session-auth pairing above.
+      if changed_matches '^services/(track-b-rag|policy-scraper)/src/'; then
+        selected+=("packages/html-digest")
+      fi
     fi
 
     # A service's OpenAPI spec is half of a contract its own test checks:
