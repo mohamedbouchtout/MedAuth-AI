@@ -10,17 +10,19 @@ change in field order would look like every policy changing at once.
 For the same reason the row's own metadata — ``last_updated``, ``lcd_version`` —
 is not part of the document. Those describe the export, not the policy, and
 folding them in would re-ingest a document whose text never moved. What CMS
-publishes is what gets hashed; nothing here reformats, re-indents or re-encodes
-the fragments on the way through.
+publishes is what gets hashed — less any script or style element, exactly as
+ingest hashes it — and nothing here reformats, re-indents or re-encodes the
+fragments on the way through.
 """
 
 from __future__ import annotations
 
 import datetime
-import hashlib
 import logging
 from dataclasses import dataclass
 from typing import Final
+
+from html_digest import html_digest
 
 logger = logging.getLogger(__name__)
 
@@ -60,14 +62,22 @@ class PolicyDocument:
 
     @property
     def content_hash(self) -> str:
-        """SHA-256 over the bytes uploaded, matching what ingest will compute.
+        """The digest ingest will compute for these bytes, uploaded as ``text/html``.
 
         This is what the pre-upload skip compares against
         ``insurance_policies.content_hash``. It is an optimisation only: ingest
         recomputes the digest from the bytes it receives and its answer is the
         authoritative one.
+
+        So the skip is only worth anything while it computes exactly what ingest
+        does, which is why both call :func:`html_digest.html_digest` rather than
+        this service hashing on its own: SHA-256 over the body with any script or
+        style element cut out (TASK-009). Export fragments carry neither, so
+        today that is the SHA-256 of ``body`` itself.
+        ``packages/html-digest/tests/unit/test_service_agreement.py`` proves the
+        two services agree.
         """
-        return hashlib.sha256(self.body).hexdigest()
+        return html_digest(self.body)
 
 
 def _assemble(title: str, row: dict[str, str], fields: tuple[str, ...]) -> bytes | None:

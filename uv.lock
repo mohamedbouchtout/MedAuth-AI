@@ -1849,6 +1849,7 @@ source = { editable = "services/policy-scraper" }
 dependencies = [
     { name = "asyncpg" },
     { name = "httpx" },
+    { name = "medauth-html-digest" },
     { name = "medauth-logging-policy" },
     { name = "medauth-payer-vocab" },
     { name = "medauth-track-a-clinical" },
@@ -1861,6 +1862,7 @@ dependencies = [
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "httpx", specifier = ">=0.28" },
+    { name = "medauth-html-digest", editable = "packages/html-digest" },
     { name = "medauth-logging-policy", editable = "packages/logging-policy" },
     { name = "medauth-payer-vocab", editable = "packages/payer-vocab" },
     { name = "medauth-track-a-clinical", editable = "services/track-a-clinical" },
