@@ -163,6 +163,26 @@ async def test_the_digest_is_over_the_bytes_whatever_the_format(
     assert result.content_hash == content_digest(DOCUMENT, content_type)
 
 
+async def test_the_digest_is_computed_off_the_event_loop(
+    qdrant: FakeQdrant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scanning a large HTML page for script and style took 23ms on a real 1.5MB
+    Aetna page — long enough to stall the live encounters this service's loop
+    also serves — so it runs in the threadpool with extraction and embedding."""
+    offloaded: list[Any] = []
+    real = ingestion.run_in_threadpool
+
+    async def recording(func: Any, *args: Any, **kwargs: Any) -> Any:
+        offloaded.append(func)
+        return await real(func, *args, **kwargs)
+
+    monkeypatch.setattr(ingestion, "run_in_threadpool", recording)
+
+    await ingest(FakeSession(), qdrant, content_type="text/html")
+
+    assert ingestion.content_digest in offloaded
+
+
 @pytest.mark.parametrize("content_type", ["application/pdf", "text/html"])
 async def test_an_unchanged_document_is_skipped_whatever_the_format(
     qdrant: FakeQdrant, content_type: ContentType

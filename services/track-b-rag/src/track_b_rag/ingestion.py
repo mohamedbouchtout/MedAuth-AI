@@ -142,7 +142,11 @@ async def ingest_policy(
         EmptyDocumentError: The document is readable but holds no extractable
             text.
     """
-    digest = content_digest(document_bytes, metadata.content_type)
+    # Off the event loop, like extraction and embedding below. Scanning a large
+    # HTML page for script and style is CPU work measured in tens of
+    # milliseconds (23ms on Aetna's 1.5MB CPB 0016, against 0.6ms for the bare
+    # SHA-256 it replaced), and this loop also serves live encounters.
+    digest = await run_in_threadpool(content_digest, document_bytes, metadata.content_type)
     existing = await session.scalar(
         sa.select(InsurancePolicy).where(InsurancePolicy.policy_id == metadata.policy_id)
     )
