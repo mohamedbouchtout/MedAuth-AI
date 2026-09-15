@@ -36,6 +36,10 @@ medauth-session-auth = { workspace = true }
 # for the shared SQLAlchemy models — see CLAUDE.md, "Where the shared SQLAlchemy
 # models live".
 medauth-track-a-clinical = { workspace = true }
+# Dev-only, for packages/html-digest's agreement test, which calls both
+# services' own digest functions — see that package's pyproject.toml.
+medauth-policy-scraper = { workspace = true }
+medauth-track-b-rag = { workspace = true }
 
 [dependency-groups]
 dev = [

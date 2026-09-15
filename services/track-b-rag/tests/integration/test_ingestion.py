@@ -26,6 +26,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import replace
+from pathlib import Path
 
 import pymupdf
 import pytest
@@ -250,6 +251,40 @@ async def test_the_payload_slug_is_what_a_query_filter_would_match(
 
     assert points, "a query spelling the payer differently found nothing"
     assert (points[0].payload or {})["policy_id"] == policy_id
+
+
+# --- TASK-009: a CDN-injected script does not make a page an update ---------
+
+#: Two real consecutive fetches of Aetna CPB 1009. They live with the package
+#: that defines what the digest strips; any change under packages/ re-tests
+#: every service, so editing them re-runs this file too.
+AETNA_FIXTURES = (
+    Path(__file__).resolve().parents[4] / "packages" / "html-digest" / "tests" / "fixtures"
+) / "aetna"
+
+
+async def test_a_second_fetch_of_an_unchanged_aetna_page_ingests_as_unchanged(
+    session: AsyncSession, qdrant: QdrantClient, collection: str, policy_id: str
+) -> None:
+    """The acceptance claim TASK-009 names, through the real pipeline.
+
+    The two captures differ only inside the Akamai mPulse script the CDN
+    injects with a per-request token. Before the fix the second ingest reported
+    ``updated`` and re-embedded every chunk; the stored digest and the indexed
+    points must now be left exactly as the first ingest wrote them.
+    """
+    first = (AETNA_FIXTURES / "cpb-1009-first-fetch.html").read_bytes()
+    second = (AETNA_FIXTURES / "cpb-1009-second-fetch.html").read_bytes()
+    assert first != second, "the capture no longer reproduces the bug"
+
+    created = await ingest(session, qdrant, collection, policy_id, first, "text/html")
+    again = await ingest(session, qdrant, collection, policy_id, second, "text/html")
+
+    assert created.status == "created"  # type: ignore[attr-defined]
+    assert again.status == "unchanged"  # type: ignore[attr-defined]
+    assert again.chunks_indexed == 0  # type: ignore[attr-defined]
+    assert again.content_hash == created.content_hash  # type: ignore[attr-defined]
+    assert count_policy_points(qdrant, collection, policy_id) == created.chunks_indexed  # type: ignore[attr-defined]
 
 
 # --- TASK-013: a policy issued per contractor jurisdiction ------------------

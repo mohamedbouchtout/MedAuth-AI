@@ -1799,6 +1799,20 @@ name = "medauth-html-digest"
 version = "0.1.0"
 source = { editable = "packages/html-digest" }
 
+[package.dev-dependencies]
+dev = [
+    { name = "medauth-policy-scraper" },
+    { name = "medauth-track-b-rag" },
+]
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "medauth-policy-scraper", editable = "services/policy-scraper" },
+    { name = "medauth-track-b-rag", editable = "services/track-b-rag" },
+]
+
 [[package]]
 name = "medauth-logging-policy"
 version = "0.1.0"
