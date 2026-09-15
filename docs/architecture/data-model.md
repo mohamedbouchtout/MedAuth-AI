@@ -103,7 +103,7 @@ Metadata for one ingested policy document. Not PHI.
 | `jurisdiction_states` | TEXT[] | Added in `0002`. A multi-state policy is **one row with a list**, never one row per state ([ADR-0023](../adr/0023-usps-jurisdictions-multi-state-policies.md)) |
 | `policy_id` | VARCHAR(200), **unique** | The dedup key, with `content_hash` |
 | `source_url` | TEXT | |
-| `content_hash` | VARCHAR(64), NOT NULL | SHA-256 over the **raw uploaded bytes** ([ADR-0021](../adr/0021-digest-over-uploaded-bytes.md)) |
+| `content_hash` | VARCHAR(64), NOT NULL | SHA-256 over the **uploaded bytes**; for HTML, with `<script>` and `<style>` elements cut out first ([ADR-0021](../adr/0021-digest-over-uploaded-bytes.md), amended by TASK-009) |
 | `last_ingested_at` | TIMESTAMPTZ | |
 | `effective_date` | DATE | |
 | `qdrant_collection` | VARCHAR(100) | Defaults to `insurance_policies` |

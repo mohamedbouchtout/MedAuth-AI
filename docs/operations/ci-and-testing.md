@@ -57,7 +57,7 @@ dependent service *and* the package's own job.
 
 | Filter | Matches |
 |---|---|
-| `hipaa-logger`, `api-envelope`, `crypto-utils`, `payer-vocab` | `packages/<name>/**` |
+| `hipaa-logger`, `api-envelope`, `crypto-utils`, `payer-vocab`, `bedrock-client`, `session-auth`, `cors-policy`, `logging-policy`, `html-digest` | `packages/<name>/**` |
 | `fhir-types` | `packages/fhir-types/**` — runs pytest **and** `tsc --noEmit` |
 | `audio-wire` | `packages/audio-wire/**` — also sets `web` and `mobile` |
 | Each service | `services/<name>/**` **or** `packages/**` |
@@ -74,6 +74,13 @@ Pydantic models and their TS mirrors rather than compiling them in isolation.
 
 `audio-wire` ships source that both apps compile into themselves rather than a
 built artefact, which is why a change there sets the app filters too.
+
+`html-digest` runs in the other direction too. Its agreement test calls
+track-b-rag's and policy-scraper's own digest functions and asserts they match,
+so a change under either service's `src/` selects the package's job as well —
+the same pairing that re-runs `session-auth`'s issuer contract test when
+track-a-clinical changes. Drift between those two digests fails silently, as a
+scraper that re-uploads every document every night (TASK-009).
 
 ### Backing services
 

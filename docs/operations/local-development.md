@@ -160,6 +160,16 @@ Watch it progress with:
 curl -s localhost:6333/collections/insurance_policies | grep -o '"points_count":[0-9]*'
 ```
 
+**After TASK-009, expect each Aetna document to report `updated` once more.**
+Digests stored before that change were taken over the raw HTTP body, which
+carried a CDN-injected script with a fresh token on every fetch; they are now
+taken with script and style cut out
+([ADR-0021](../adr/0021-digest-over-uploaded-bytes.md)). So the first seed run
+after pulling it re-embeds the nine Aetna documents and reports them `updated`,
+and every run after that reports `unchanged`. The BCBSMA PDFs and the CMS
+documents are unaffected. An Aetna document reporting `updated` on two
+consecutive runs is the bug, not this.
+
 Seed and ingest under the **publishing licensee's** payer slug (`bcbs-ma`), never
 a generic family bucket ([ADR-0022](../adr/0022-canonical-payer-slugs.md)).
 

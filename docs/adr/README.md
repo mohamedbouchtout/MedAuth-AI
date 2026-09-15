@@ -90,7 +90,7 @@ tense about the system.
 |---|---|---|
 | [0019](./0019-qdrant-get-or-create.md) | Qdrant collections are get-or-create, never recreated | Accepted |
 | [0020](./0020-qdrant-written-before-postgres.md) | Ingestion writes Qdrant before Postgres | Accepted |
-| [0021](./0021-digest-over-uploaded-bytes.md) | The digest is over the uploaded bytes, and HTML is a first-class format | Accepted |
+| [0021](./0021-digest-over-uploaded-bytes.md) | The digest is over the uploaded bytes, and HTML is a first-class format | Accepted, amended (TASK-009) |
 | [0024](./0024-scraper-reads-bulk-exports.md) | The scraper reads CMS bulk exports rather than crawling pages | Accepted |
 | [0025](./0025-own-robots-txt-matcher.md) | robots.txt matching is implemented here, not taken from `urllib` | Accepted |
 

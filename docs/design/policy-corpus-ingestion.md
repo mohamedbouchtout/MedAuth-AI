@@ -10,7 +10,7 @@ The RAG path can only answer from documents it holds. This is how they get there
 | Source | Format | Mechanism | Task |
 |---|---|---|---|
 | CMS Medicare Coverage Database | HTML fragments in CSV | Nightly `policy-scraper` CronJob | TASK-013 |
-| Commercial payers (Aetna, BCBS) | PDF | `scripts/seed-policies.py`, run by hand | TASK-014 |
+| Commercial payers (Aetna, BCBS) | HTML pages (Aetna), PDF (BCBS) | `scripts/seed-policies.py`, run by hand | TASK-014 |
 
 Both end at the same place: **`POST /policies/ingest`**. Nothing else chunks,
 embeds or writes Qdrant. There is one definition of how a policy gets indexed,
@@ -21,9 +21,12 @@ and keeping it that way is why the scraper is deliberately thin.
 Takes a document plus metadata (`policy_id`, `payer`, `plan_type`, `state`,
 `jurisdiction_states`, `source_url`, `effective_date`, `content_type`) and runs:
 
-1. **Digest** — SHA-256 over the **raw uploaded bytes**, never over extracted
+1. **Digest** — SHA-256 over the **uploaded bytes**, never over extracted
    text. Two documents whose text matches but whose bytes differ are distinct
-   source files for audit purposes.
+   source files for audit purposes. For HTML, `<script>` and `<style>` elements
+   are cut out of those bytes first, because a CDN-injected script made every
+   fetch of an Aetna page digest differently
+   ([ADR-0021](../adr/0021-digest-over-uploaded-bytes.md), amended by TASK-009).
 2. **Dedup** on `(policy_id, content_hash)`:
 
    | State | Action | Reported |
@@ -171,6 +174,11 @@ them. But `/policies/ingest` computes the digest from the bytes it receives and
 decides `created`/`unchanged`/`updated` for itself, and **that** decision is
 authoritative. Losing a race costs one redundant upload and never a wrong answer,
 so nothing here needs a lock.
+
+The skip is only useful while the scraper computes the same digest ingest does,
+so both call one function in `packages/html-digest`, and a test in that package
+feeds the same inputs through both services and asserts they agree. Were they to
+drift, nothing would fail: every document would simply be uploaded every night.
 
 ## Payer identity at ingestion
 
