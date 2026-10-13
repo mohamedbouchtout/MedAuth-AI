@@ -24,7 +24,7 @@ dependencies = [
     # carry no patient identifier — it installs the policy because what a
     # library may write is settled platform-wide rather than per service.
     "medauth-logging-policy",
-    "pydantic>=2.13.5",
+    "pydantic>=2.14.0",
     "pydantic-settings>=2.6",
     "sqlalchemy[asyncio]>=2.0.52",
 ]
