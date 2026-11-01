@@ -175,6 +175,21 @@ a generic family bucket ([ADR-0022](../adr/0022-canonical-payer-slugs.md)).
 
 ## Driving an encounter without AWS
 
+For a microphone demo with synthetic patients whose launch supplies no coverage,
+start a fresh visit in the web app and copy the **Demo session ID** shown in
+development mode. Before mentioning any procedure, run from the repository root:
+
+```powershell
+uv run python scripts/demo-encounter.py --session-id <uuid> --prepare-only
+```
+
+This fills missing demo coverage with BCBS Massachusetts / commercial / MA,
+publishes no transcript, and leaves the visit open for microphone input. Existing
+payer context is preserved. Use only synthetic visits. A procedure already
+detected with missing coverage is suppressed for that visit, so prepare a fresh
+visit before speaking. The terminal must have `DATABASE_URL` loaded, as for the
+normal scripted demo.
+
 Transcribe Medical has no local mock, so with no AWS credentials there is no way
 to get a transcript onto the bus from a microphone — and everything downstream of
 the transcript is the product. `scripts/demo-encounter.py` closes that gap by

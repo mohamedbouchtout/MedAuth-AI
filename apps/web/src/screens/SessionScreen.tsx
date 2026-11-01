@@ -41,6 +41,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PatientSource, VisitSubject } from '@medauth/fhir-client';
 
 import { sessionsApi, type ApiFailure, type Session, type SessionsApi } from '../api/sessions';
+import { enableNudgeSound } from '../audio/nudgeSound';
 import { NudgeOverlay } from '../components/NudgeOverlay';
 import { ProcedureChecklist } from '../components/ProcedureChecklist';
 import { TranscriptPane } from '../components/TranscriptPane';
@@ -230,6 +231,7 @@ export function SessionScreen({
   }, []);
 
   const onStart = useCallback(async () => {
+    enableNudgeSound();
     refreshedRef.current = false;
     setSessionStatus({ kind: 'creating' });
 
@@ -414,6 +416,12 @@ export function SessionScreen({
   return (
     <main className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-6">
       <h1 className="text-lg font-semibold text-slate-900">Visit</h1>
+
+      {import.meta.env.DEV && held !== null && (
+        <p className="break-all text-sm text-slate-600" data-testid="demo-session-id">
+          Demo session ID: <code>{held.sessionId}</code>
+        </p>
+      )}
 
       {renderPhase()}
 

@@ -272,7 +272,9 @@ async def _first_provider(session_factory: async_sessionmaker) -> uuid.UUID:
     return row[0]
 
 
-async def _ensure_coverage(session_factory: async_sessionmaker, session_id: uuid.UUID) -> None:
+async def _ensure_coverage(
+    session_factory: async_sessionmaker, session_id: uuid.UUID, *, require_active: bool = False
+) -> None:
     """Fill the three coverage columns a policy query is built from, if they are empty.
 
     Left alone when already populated: a session started through the UI after a
@@ -286,6 +288,8 @@ async def _ensure_coverage(session_factory: async_sessionmaker, session_id: uuid
         ).scalar_one_or_none()
         if encounter is None:
             raise DemoError(f"No encounter for session {session_id}.")
+        if require_active and (encounter.status != "active" or encounter.deleted_at is not None):
+            raise DemoError("Coverage preparation requires an active, non-deleted synthetic visit.")
         if encounter.insurance_payer:
             logger.info(
                 "Encounter already carries coverage (%s / %s / %s) — leaving it alone",
@@ -363,7 +367,7 @@ async def run(args: argparse.Namespace) -> int:
                 session_id = args.session_id
                 logger.info("Attaching to session %s", session_id)
 
-            await _ensure_coverage(session_factory, session_id)
+            await _ensure_coverage(session_factory, session_id, require_active=args.prepare_only)
 
             # Through the logger rather than print(), per the Python conventions
             # in CLAUDE.md. A session id is not PHI: it is a server-generated
@@ -372,6 +376,12 @@ async def run(args: argparse.Namespace) -> int:
             logger.info("session_id: %s", session_id)
             logger.info("note screen: http://localhost:5173/notes/%s", session_id)
             logger.info("nudge feed:  ws://localhost:8005/ws/nudges/%s", session_id)
+
+            if args.prepare_only:
+                logger.info(
+                    "Synthetic coverage prepared. No transcript published; visit left open."
+                )
+                return 0
 
             # A beat before the first segment, so a watcher who has just been
             # handed the session id has time to open something pointed at it.
@@ -432,7 +442,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="End the encounter afterwards, firing SOAP generation and bundle assembly.",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="Fill synthetic coverage for --session-id without publishing or ending the visit.",
+    )
+    args = parser.parse_args(argv)
+    if args.prepare_only and (args.session_id is None or args.end_session):
+        parser.error("--prepare-only requires --session-id and cannot be used with --end-session")
+    return args
 
 
 def main() -> int:

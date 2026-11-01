@@ -46,7 +46,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Route, Routes, useNavigate } from 'react-router';
+import { Link, Route, Routes, useNavigate } from 'react-router';
 
 import { launchApi as defaultLaunchApi, type LaunchApi } from './api/fhirClient';
 import { readClaim, readLaunchFailure, scrubLaunchParams } from './launch/inbound';
@@ -81,7 +81,7 @@ export function App({
   location = window.location,
   history = window.history,
 }: AppProps = {}) {
-  const claim = readClaim(location.search);
+  const [claim] = useState(() => readClaim(location.search));
   // A failed launch comes back the same way a completed one does, carrying an
   // `error` where a claim code would be (TASK-051g). The two are mutually
   // exclusive by construction — a failure names no launch, so there is nothing
@@ -123,22 +123,27 @@ export function App({
    * StrictMode double-invokes effects specifically to surface this class of bug,
    * so the guard is a ref rather than a dependency-array subtlety.
    */
-  const redeemedRef = useRef(false);
+  const redemptionRef = useRef<ReturnType<typeof completeLaunch> | null>(null);
 
   useEffect(() => {
-    if (claim === null || redeemedRef.current) {
+    if (claim === null) {
       return;
     }
-    redeemedRef.current = true;
 
     // Out of the address bar and out of session history before the request is
     // even made. The code is a credential, and whether it is redeemed
     // successfully has no bearing on whether it should still be sitting in a URL.
-    scrubLaunchParams(history, location);
+    if (redemptionRef.current === null) {
+      scrubLaunchParams(history, location);
+      redemptionRef.current = completeLaunch(launches, claim);
+    }
 
     let cancelled = false;
+    // StrictMode cleans up and re-runs this effect. Reuse the single request,
+    // but let the active effect receive its result after the first is cancelled.
+    const redemption = redemptionRef.current;
     void (async () => {
-      const outcome = await completeLaunch(launches, claim);
+      const outcome = await redemption;
       if (cancelled) {
         return;
       }
@@ -215,6 +220,13 @@ export function App({
   }
 
   return (
+    <>
+      {launchId !== null && (
+        <nav aria-label="Main" className="mx-auto flex max-w-3xl gap-4 px-6 pt-4 text-sm">
+          <Link className="text-blue-700 underline" to="/">Visit</Link>
+          <Link className="text-blue-700 underline" to="/prior-auth">Prior authorizations</Link>
+        </nav>
+      )}
     <Routes>
       <Route
         path="/notes/:sessionId"
@@ -241,5 +253,6 @@ export function App({
       />
       <Route path="*" element={visit} />
     </Routes>
+    </>
   );
 }
