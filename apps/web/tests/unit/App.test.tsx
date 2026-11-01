@@ -1,5 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react';
-import type { ReactNode } from 'react';
+import { StrictMode, type ReactNode } from 'react';
 import { MemoryRouter } from 'react-router';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -11,6 +11,11 @@ import {
   REDEMPTION_FAILED_MESSAGE,
 } from '../../src/launch/smartLaunch';
 import { NO_ISSUER_MESSAGE } from '../../src/screens/LaunchScreen';
+
+vi.mock('../../src/config', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/config')>(),
+  SMART_ISS: '',
+}));
 
 /**
  * The app root, which is where a completed SMART launch is collected (TASK-070).
@@ -73,6 +78,24 @@ describe('a plain load', () => {
 });
 
 describe('returning from a launch', () => {
+  it('finishes a single redemption under StrictMode after the URL is scrubbed', async () => {
+    const launches = launchesThatRedeem();
+    const location = locationAt('?claim=code-1');
+    const history = {
+      replaceState: vi.fn(() => { location.search = ''; }),
+    } as unknown as History;
+    render(inRouter(
+      <StrictMode>
+        <App launches={launches} location={location} history={history} />
+      </StrictMode>,
+    ));
+
+    await waitFor(() => expect(screen.getByTestId('patient-picker')).toBeInTheDocument());
+    expect(launches.redeemClaim).toHaveBeenCalledTimes(1);
+    expect(location.search).toBe('');
+    expect(screen.queryByTestId('redeeming')).not.toBeInTheDocument();
+  });
+
   it('redeems the claim and moves on to the visit', async () => {
     const launches = launchesThatRedeem();
     renderApp('?claim=code-1', launches);

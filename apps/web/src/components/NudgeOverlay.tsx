@@ -32,6 +32,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { nudgesApi, type NudgesApi } from '../api/nudges';
+import { playNudgeSound } from '../audio/nudgeSound';
 import { useNudgeStream } from '../hooks/useNudgeStream';
 import type { DenialRisk, Nudge } from '@medauth/nudge-client';
 
@@ -182,6 +183,21 @@ export function NudgeOverlay({
   );
 
   const { nudges, remove } = stream;
+  const soundedRef = useRef({ sessionId, ids: new Set<string>() });
+
+  useEffect(() => {
+    if (soundedRef.current.sessionId !== sessionId) {
+      soundedRef.current = { sessionId, ids: new Set<string>() };
+    }
+    let hasNewNudge = false;
+    for (const nudge of nudges) {
+      if (!soundedRef.current.ids.has(nudge.nudgeId)) {
+        soundedRef.current.ids.add(nudge.nudgeId);
+        hasNewNudge = true;
+      }
+    }
+    if (hasNewNudge) playNudgeSound();
+  }, [nudges, sessionId]);
 
   /*
     Held in a ref so the effect below depends on the nudge list alone. An inline

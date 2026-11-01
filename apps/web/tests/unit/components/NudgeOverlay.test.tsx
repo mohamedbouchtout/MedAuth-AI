@@ -5,7 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiResult, Session, SessionsApi } from '../../../src/api/sessions';
 import type { NudgesApi } from '../../../src/api/nudges';
 import { NudgeOverlay } from '../../../src/components/NudgeOverlay';
+import { playNudgeSound } from '../../../src/audio/nudgeSound';
 import { FakeWebSocket, installFakeWebSocket, nudgePayload, tokenExpiringAt } from '../../support/nudges';
+
+vi.mock('../../../src/audio/nudgeSound', () => ({ playNudgeSound: vi.fn() }));
 
 const SESSION_ID = '11111111-1111-4111-8111-111111111111';
 const NOW = 1_700_000_000_000;
@@ -75,6 +78,7 @@ async function receive(payload: unknown): Promise<void> {
 let restoreWebSocket: () => void;
 
 beforeEach(() => {
+  vi.mocked(playNudgeSound).mockClear();
   restoreWebSocket = installFakeWebSocket();
 });
 
@@ -100,6 +104,21 @@ describe('connecting', () => {
 });
 
 describe('rendering a nudge', () => {
+  it('beeps once for a new nudge, not for duplicate delivery or dismissal', async () => {
+    renderOverlay();
+    expect(playNudgeSound).not.toHaveBeenCalled();
+    await receive(nudgePayload());
+    expect(playNudgeSound).toHaveBeenCalledTimes(1);
+    await receive(nudgePayload());
+    expect(playNudgeSound).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    await receive(nudgePayload());
+    expect(playNudgeSound).toHaveBeenCalledTimes(1);
+    await receive(nudgePayload({ nudge_id: '0b7f0000-0000-4000-8000-000000000002' }));
+    expect(playNudgeSound).toHaveBeenCalledTimes(2);
+  });
+
   it('shows an alert when a nudge arrives', async () => {
     renderOverlay();
 
