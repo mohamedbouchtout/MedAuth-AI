@@ -26,7 +26,7 @@ dependencies = [
     "medauth-logging-policy",
     "pydantic>=2.14.0",
     "pydantic-settings>=2.6",
-    "sqlalchemy[asyncio]>=2.0.52",
+    "sqlalchemy[asyncio]>=2.1.6",
 ]
 
 [build-system]
