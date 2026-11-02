@@ -14,7 +14,7 @@ dependencies = [
     "pydantic-settings>=2.6",
     "redis>=8.1.0",
     "uvicorn[standard]>=0.52.4",
-    "websockets>=13.1",
+    "websockets>=17.3",
 ]
 
 [build-system]
