@@ -18,7 +18,7 @@ dependencies = [
     # id_token's RS256/ES256 signature, and PyJWT cannot do that without it.
     "pyjwt[crypto]>=2.13.0",
     "redis>=8.1.0",
-    "uvicorn[standard]>=0.52.4",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [dependency-groups]
