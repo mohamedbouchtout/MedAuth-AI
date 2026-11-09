@@ -43,15 +43,15 @@ medauth-track-b-rag = { workspace = true }
 
 [dependency-groups]
 dev = [
-    "pytest>=9.1.1",
-    "pytest-asyncio>=0.24",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1.post1",
     "pytest-cov>=7.1.0",
     "httpx>=0.28",
     "moto[all]>=5.2.3",
     # Reads the committed OpenAPI spec in the docs/api drift test.
     "pyyaml>=6.0",
-    "ruff>=0.17.0",
-    "mypy>=2.4.0",
+    "ruff>=0.17.4",
+    "mypy>=2.4.1",
 ]
 
 [tool.ruff]
