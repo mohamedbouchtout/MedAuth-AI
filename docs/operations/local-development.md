@@ -36,6 +36,24 @@ migration runs before any service-owned one
 
 ## Bringing it up
 
+On macOS, run `./scripts/dev-up.sh --migrate` from the repository root after
+installing dependencies. The launcher loads `.env.local`, starts the Compose
+stack, applies both migrations, and starts the six API services and Vite.
+Use `./scripts/dev-up.sh` on subsequent runs, or add `--skip-web` for an
+API-only run. Service logs are in `.dev-logs/`. Press Ctrl-C or run
+`./scripts/dev-down.sh` from another terminal to stop the application processes.
+Add `--include-backing-services` to stop Compose too while keeping its volumes.
+
+For a live demo, open http://localhost:5173, launch into the configured SMART
+sandbox, and start a visit with a synthetic patient. The launcher passes the
+AWS profile and Region from `.env.local` to the backend. When the visit has
+no coverage, see [the microphone demo setup](#driving-an-encounter-without-aws).
+Use the sandbox's synthetic patients for a SMART visit. The Synthea seed below
+populates local HAPI FHIR for direct FHIR testing. Seed the commercial policy
+corpus after startup if you want the demo to exercise Qdrant policy retrieval.
+
+On Windows:
+
 ```powershell
 ./scripts/dev-up.ps1              # all six services + the web app
 ./scripts/dev-up.ps1 -Background  # same, logging to .dev-logs/ instead of windows

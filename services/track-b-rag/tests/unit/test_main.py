@@ -207,9 +207,9 @@ def test_the_app_never_loads_the_model_at_import_time() -> None:
     """Startup must not pay for 1.3 GB of weights before the port opens."""
     create_app()
 
-    from track_b_rag.embeddings import get_embedder
+    from track_b_rag.embeddings import _load_embedder
 
-    assert get_embedder.cache_info().currsize == 0
+    assert _load_embedder.cache_info().currsize == 0
 
 
 def test_the_app_exposes_health_ingest_query_and_acknowledge() -> None:
