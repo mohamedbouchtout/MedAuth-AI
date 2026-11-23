@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from functools import lru_cache
+from threading import Lock
 from typing import TYPE_CHECKING
 
 from track_b_rag.config import get_settings
@@ -23,11 +24,22 @@ if TYPE_CHECKING:  # pragma: no cover - import cost is the reason for the guard
     from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
+_embedder_lock = Lock()
+
+
+def get_embedder() -> SentenceTransformer:
+    """Return the process-wide embedding model, loading it on first use.
+
+    Concurrent readiness probes can arrive while the first load is in progress.
+    Lock before checking the cache so they share that load.
+    """
+    with _embedder_lock:
+        return _load_embedder()
 
 
 @lru_cache(maxsize=1)
-def get_embedder() -> SentenceTransformer:
-    """Return the process-wide embedding model, loading it on first use.
+def _load_embedder() -> SentenceTransformer:
+    """Import and construct the embedding model.
 
     The ``sentence_transformers`` import happens here rather than at module
     scope: it pulls in torch, which costs seconds and hundreds of megabytes of
@@ -45,7 +57,8 @@ def get_embedder() -> SentenceTransformer:
 
 def reset_embedder() -> None:
     """Forget the loaded model. For tests and shutdown, not for request paths."""
-    get_embedder.cache_clear()
+    with _embedder_lock:
+        _load_embedder.cache_clear()
 
 
 def embed_query(text: str) -> list[float]:

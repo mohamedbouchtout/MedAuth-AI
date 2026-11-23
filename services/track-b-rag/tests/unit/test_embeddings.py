@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from time import sleep
 
 import pytest
 
@@ -65,21 +68,27 @@ def test_sentence_transformers_is_not_imported_at_module_scope() -> None:
     assert not hasattr(embeddings, "SentenceTransformer")
 
 
-def test_the_model_loads_once_and_is_reused(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_concurrent_first_calls_load_one_model(monkeypatch: pytest.MonkeyPatch) -> None:
     loads: list[str] = []
+    start = Barrier(2, timeout=5)
 
     class FakeTransformerModule:
         @staticmethod
         def SentenceTransformer(name: str) -> FakeModel:
             loads.append(name)
+            sleep(0.1)  # Keep the first load in progress while the other call enters.
             return FakeModel()
 
     monkeypatch.setitem(sys.modules, "sentence_transformers", FakeTransformerModule)
 
-    first = get_embedder()
-    second = get_embedder()
+    def load() -> object:
+        start.wait()
+        return get_embedder()
 
-    assert first is second
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = pool.map(lambda _: load(), range(2))
+
+    assert first is second is get_embedder()
     assert loads == ["BAAI/bge-large-en-v1.5"]
 
 
